@@ -1,0 +1,35 @@
+import { hash } from "starknet";
+
+/**
+ * The address seed binds a wallet to a stable, backend-managed user identity.
+ * The deterministic account address is derived from this seed + salt ONLY — never
+ * from a device pubkey — so the same user resolves to the same wallet on any
+ * device. The backend owns the user_id <-> address mapping off-chain.
+ */
+export interface IdentityInput {
+  /** Stable, backend-managed user identifier (e.g. from email / magic link). */
+  userId: string;
+  /** Per-app salt, so the same user has distinct wallets across apps. */
+  appSalt: string;
+}
+
+/** Derive the felt `address_seed` passed to the contract constructor. */
+export function deriveAddressSeed({ userId, appSalt }: IdentityInput): bigint {
+  // Poseidon over the identity components; stable and collision-resistant.
+  const h = hash.computePoseidonHashOnElements([feltFromString(userId), feltFromString(appSalt)]);
+  return BigInt(h);
+}
+
+/** Map an arbitrary UTF-8 string into a felt via Poseidon over its byte chunks. */
+function feltFromString(s: string): bigint {
+  const bytes = new TextEncoder().encode(s);
+  const chunks: bigint[] = [];
+  for (let i = 0; i < bytes.length; i += 31) {
+    let w = 0n;
+    for (const b of bytes.subarray(i, i + 31)) w = (w << 8n) | BigInt(b);
+    chunks.push(w);
+  }
+  if (chunks.length === 0) return 0n;
+  if (chunks.length === 1) return chunks[0];
+  return BigInt(hash.computePoseidonHashOnElements(chunks));
+}
