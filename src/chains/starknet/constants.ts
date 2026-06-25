@@ -30,5 +30,5 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
  */
 export const DEVICE_ACCOUNT_CLASS_HASH: Record<StarknetNetwork, string> = {
   sepolia: "0x6c3c3426667b6d4adda18a0b8d8cc34c495a1ace7276c4470068ad4c324876d",
-  mainnet: "",
+  mainnet: "0x6c3c3426667b6d4adda18a0b8d8cc34c495a1ace7276c4470068ad4c324876d",
 };

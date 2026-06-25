@@ -1,9 +1,13 @@
 import { Account, RpcProvider, PaymasterRpc, num, type Call } from "starknet";
+import type { Keypair } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
 import { WebCryptoSigner } from "./signer/WebCryptoSigner";
 import { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 import { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
+import { CavosSolana } from "./chains/solana/CavosSolana";
+import type { SolanaRelayer } from "./chains/solana/SolanaRelayer";
+import type { SolanaNetwork } from "./chains/solana/constants";
 import type { ChainCall } from "./chains/ChainAdapter";
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
@@ -19,8 +23,33 @@ import {
   type StarknetNetwork,
 } from "./chains/starknet/constants";
 
+/** The chains the unified `Cavos.connect` can target. */
+export type Chain = "starknet" | "solana";
+
+/**
+ * Environment selector. `Cavos.connect` resolves it to the chain's concrete
+ * network: starknet → sepolia/mainnet, solana → solana-devnet/solana-mainnet.
+ */
+export type NetworkEnv = "mainnet" | "testnet";
+
+/** Resolve the abstract `{ chain, network }` to each chain's concrete network. */
+const STARKNET_ENV: Record<NetworkEnv, StarknetNetwork> = {
+  mainnet: "mainnet",
+  testnet: "sepolia",
+};
+const SOLANA_ENV: Record<NetworkEnv, SolanaNetwork> = {
+  mainnet: "solana-mainnet",
+  testnet: "solana-devnet",
+};
+
+/** A connected wallet: discriminated by `chain`, so `execute()` stays native. */
+export type CavosWallet = Cavos | CavosSolana;
+
 export interface ConnectOptions {
-  network: StarknetNetwork;
+  /** Target chain. The returned wallet is discriminated by this same value. */
+  chain: Chain;
+  /** Environment. Resolved to sepolia/devnet (testnet) or mainnet per chain. */
+  network: NetworkEnv;
   /** Authenticated user (pass `identity` directly, or an `auth` provider). */
   auth?: AuthProvider;
   identity?: Identity;
@@ -38,16 +67,44 @@ export interface ConnectOptions {
    */
   registry?: WalletRegistry;
   /**
-   * Device-approval relay. Defaults to HttpRecoveryClient when `appId` is set;
-   * used to request addition of this device when it isn't an authorized signer.
+   * Device-approval relay (Starknet). Defaults to HttpRecoveryClient when
+   * `appId` is set; used to request addition of this device when it isn't a
+   * signer yet.
    */
   recovery?: RecoveryClient;
-  /** Cavos paymaster API key (sponsors deploy + execute). */
+  rpcUrl?: string;
+  /** Override the device signer factory (native / tests); default WebCrypto. */
+  createSigner?: (keyId: string) => Promise<DeviceSigner>;
+
+  // --- Starknet-only ---
+  /** Cavos paymaster API key (sponsors deploy + execute). Required for Starknet. */
+  paymasterApiKey?: string;
+  paymasterUrl?: string;
+  classHash?: string;
+
+  // --- Solana-only ---
+  /** Cavos device-account program id override. */
+  programId?: string;
+  /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
+  relayer?: SolanaRelayer;
+  /** Self-funded fee-payer fallback when no relayer is configured. */
+  feePayer?: Keypair;
+}
+
+/** The Starknet-specific connect options, resolved from the unified ones. */
+interface StarknetConnectOptions {
+  network: StarknetNetwork;
+  auth?: AuthProvider;
+  identity?: Identity;
+  appSalt: string;
+  appId?: string;
+  backendUrl?: string;
+  registry?: WalletRegistry;
+  recovery?: RecoveryClient;
   paymasterApiKey: string;
   paymasterUrl?: string;
   rpcUrl?: string;
   classHash?: string;
-  /** Override the device signer factory (native / tests); default WebCrypto. */
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
 }
 
@@ -60,7 +117,8 @@ export interface RecoveryOptions {
   code: string;
   /** Authenticated identity (same user who owns the account). */
   identity: Identity;
-  network: StarknetNetwork;
+  /** Environment (recovery is Starknet-only): testnet → sepolia, mainnet. */
+  network: NetworkEnv;
   appSalt: string;
   paymasterApiKey: string;
   appId?: string;
@@ -87,6 +145,8 @@ export interface RecoveryOptions {
  * an already-registered device) instead of creating a second wallet.
  */
 export class Cavos {
+  /** Discriminant for the `CavosWallet` union — narrows `execute()` per chain. */
+  readonly chain = "starknet" as const;
   /** Request id of the pending device-addition, when status is needs-device-approval. */
   pendingRequestId: string | null = null;
 
@@ -99,7 +159,54 @@ export class Cavos {
     private readonly devicePubkey: DevicePublicKey,
   ) {}
 
-  static async connect(opts: ConnectOptions): Promise<Cavos> {
+  /**
+   * Unified entry point. Pick a `chain` and an `network` environment; the kit
+   * resolves the concrete network (sepolia/devnet for testnet, mainnet for
+   * mainnet) and returns a chain-native wallet. The result is a discriminated
+   * union (`wallet.chain`), so `execute()` keeps each chain's native signature:
+   *
+   *   const wallet = await Cavos.connect({ chain: "solana", network: "testnet", identity, appSalt, appId });
+   *   if (wallet.chain === "starknet") await wallet.execute(calls);
+   *   else                              await wallet.execute(amount, dest);
+   */
+  static async connect(opts: ConnectOptions): Promise<CavosWallet> {
+    if (opts.chain === "solana") {
+      return CavosSolana.connect({
+        network: SOLANA_ENV[opts.network],
+        ...(opts.auth ? { auth: opts.auth } : {}),
+        ...(opts.identity ? { identity: opts.identity } : {}),
+        appSalt: opts.appSalt,
+        ...(opts.appId ? { appId: opts.appId } : {}),
+        ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
+        ...(opts.registry ? { registry: opts.registry } : {}),
+        ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
+        ...(opts.programId ? { programId: opts.programId } : {}),
+        ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
+        ...(opts.relayer ? { relayer: opts.relayer } : {}),
+        ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
+      });
+    }
+    if (!opts.paymasterApiKey) {
+      throw new Error("kit: `paymasterApiKey` is required for Starknet connections");
+    }
+    return Cavos.connectStarknet({
+      network: STARKNET_ENV[opts.network],
+      auth: opts.auth,
+      identity: opts.identity,
+      appSalt: opts.appSalt,
+      appId: opts.appId,
+      backendUrl: opts.backendUrl,
+      registry: opts.registry,
+      recovery: opts.recovery,
+      paymasterApiKey: opts.paymasterApiKey,
+      paymasterUrl: opts.paymasterUrl,
+      rpcUrl: opts.rpcUrl,
+      classHash: opts.classHash,
+      createSigner: opts.createSigner,
+    });
+  }
+
+  private static async connectStarknet(opts: StarknetConnectOptions): Promise<Cavos> {
     const identity = opts.identity ?? (await opts.auth?.authenticate());
     if (!identity) throw new Error("kit: connect requires `identity` or `auth`");
 
@@ -295,14 +402,15 @@ export class Cavos {
    * re-derive the backup key. The backend never sees the code.
    */
   static async recover(opts: RecoveryOptions): Promise<Cavos> {
-    const classHash = opts.classHash ?? DEVICE_ACCOUNT_CLASS_HASH[opts.network];
-    if (!classHash) throw new Error(`kit: no DeviceAccount class hash for ${opts.network}`);
+    const network = STARKNET_ENV[opts.network];
+    const classHash = opts.classHash ?? DEVICE_ACCOUNT_CLASS_HASH[network];
+    if (!classHash) throw new Error(`kit: no DeviceAccount class hash for ${network}`);
 
     const provider = new RpcProvider({
-      nodeUrl: opts.rpcUrl ?? STARKNET_NETWORKS[opts.network].rpcUrl,
+      nodeUrl: opts.rpcUrl ?? STARKNET_NETWORKS[network].rpcUrl,
     });
     const paymaster = new PaymasterRpc({
-      nodeUrl: opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[opts.network],
+      nodeUrl: opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[network],
       headers: { "x-paymaster-api-key": opts.paymasterApiKey },
     });
 
@@ -321,7 +429,7 @@ export class Cavos {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network })
         : defaultRegistry);
     const existing = await registry.lookup(opts.identity.userId);
     if (!existing) {

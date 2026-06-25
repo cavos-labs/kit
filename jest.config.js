@@ -4,4 +4,9 @@ module.exports = {
   testEnvironment: "node",
   roots: ["<rootDir>/src"],
   testMatch: ["**/*.test.ts"],
+  // @solana/web3.js pulls rpc-websockets -> uuid, whose `node` export condition
+  // is ESM and breaks under ts-jest. Map uuid to its CJS build so it resolves.
+  moduleNameMapper: {
+    "^uuid$": "<rootDir>/node_modules/uuid/dist/index.js",
+  },
 };

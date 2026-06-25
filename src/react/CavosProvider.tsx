@@ -10,9 +10,9 @@ import {
   type ReactNode,
 } from 'react';
 import { Cavos } from '../Cavos';
+import type { Chain, NetworkEnv, CavosWallet } from '../Cavos';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
-import type { StarknetNetwork } from '../chains/starknet/constants';
 import type { ChainCall } from '../chains/ChainAdapter';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
@@ -21,14 +21,17 @@ import { CavosAuthModal } from './CavosAuthModal';
 export interface CavosConfig {
   /** Cavos App ID from the dashboard. */
   appId?: string;
-  network: StarknetNetwork;
+  /** Target chain. Defaults to 'starknet'. */
+  chain?: Chain;
+  /** Environment: 'testnet' (sepolia/devnet) or 'mainnet'. */
+  network: NetworkEnv;
   /** Per-app salt so the same user has distinct wallets per app. */
   appSalt: string;
-  /** Cavos paymaster API key (sponsors deploy + execute). */
-  paymasterApiKey: string;
+  /** Cavos paymaster API key (sponsors deploy + execute). Required for Starknet. */
+  paymasterApiKey?: string;
   /** Override the Cavos auth backend (self-hosted / staging). */
   authBackendUrl?: string;
-  /** Override the Starknet RPC. */
+  /** Override the chain RPC. */
   rpcUrl?: string;
 }
 
@@ -70,6 +73,14 @@ export interface CavosContextValue {
   closeModal: () => void;
   isAuthenticated: boolean;
   user: UserInfo | null;
+  /** The active chain ('starknet' | 'solana'). */
+  chain: Chain;
+  /**
+   * The raw connected wallet, discriminated by `wallet.chain`. Use this for
+   * chain-native calls (e.g. Solana `wallet.execute(amount, dest)`); narrow on
+   * `wallet.chain` first. Null until connected.
+   */
+  wallet: CavosWallet | null;
   address: string | null;
   walletStatus: WalletStatus;
   isLoading: boolean;
@@ -140,7 +151,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );
-  const [cavos, setCavos] = useState<Cavos | null>(null);
+  const [cavos, setCavos] = useState<CavosWallet | null>(null);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [walletStatus, setWalletStatus] = useState<WalletStatus>(INITIAL_STATUS);
   const [isLoading, setIsLoading] = useState(false);
@@ -177,7 +188,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   // backend dedups within its TTL; calling again re-sends the owner email so the
   // user can recover from a lost/spam-filtered message.
   const resendDeviceApproval = useCallback(async () => {
-    if (!identity || !cavos || !cavos.pendingRequestId) return;
+    if (!identity || !cavos || cavos.chain !== 'starknet' || !cavos.pendingRequestId) return;
     const backendUrl = configRef.current.authBackendUrl ?? 'https://cavos.xyz';
     if (!configRef.current.appId) return;
     const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: configRef.current.appId });
@@ -190,25 +201,28 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   }, [identity, cavos]);
 
   // Bring the wallet online for an identity: Cavos.connect deploys if needed.
-  const connect = useCallback(async (id: Identity): Promise<Cavos> => {
+  const connect = useCallback(async (id: Identity): Promise<CavosWallet> => {
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     const c = await Cavos.connect({
+      chain: configRef.current.chain ?? 'starknet',
       network: configRef.current.network,
       identity: id,
       appSalt: configRef.current.appSalt,
-      paymasterApiKey: configRef.current.paymasterApiKey,
+      ...(configRef.current.paymasterApiKey ? { paymasterApiKey: configRef.current.paymasterApiKey } : {}),
       ...(configRef.current.appId ? { appId: configRef.current.appId } : {}),
       ...(configRef.current.authBackendUrl ? { backendUrl: configRef.current.authBackendUrl } : {}),
       ...(configRef.current.rpcUrl ? { rpcUrl: configRef.current.rpcUrl } : {}),
     });
     setCavos(c);
     setIdentity(id);
+    // Only Starknet wallets surface a pending device-addition request id.
+    const pendingRequestId = c.chain === 'starknet' ? c.pendingRequestId : null;
     setWalletStatus({
       isDeploying: false,
       isReady: c.status === 'ready',
       needsDeviceApproval: c.status === 'needs-device-approval',
-      awaitingApproval: c.status === 'needs-device-approval' && !!c.pendingRequestId,
-      pendingRequestId: c.pendingRequestId,
+      awaitingApproval: c.status === 'needs-device-approval' && !!pendingRequestId,
+      pendingRequestId,
     });
     modal?.onSuccess?.(c.address);
     return c;
@@ -279,12 +293,20 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
 
   const execute = useCallback(async (calls: ChainCall[]) => {
     if (!cavos) throw new Error('Not logged in');
+    if (cavos.chain !== 'starknet') {
+      throw new Error(
+        "kit: useCavos().execute(calls) is Starknet-only. On Solana use the `wallet` handle: wallet.execute(amount, dest).",
+      );
+    }
     return cavos.execute(calls);
   }, [cavos]);
 
   const addSigner = useCallback(
     async (pubkey: { x: bigint; y: bigint }) => {
       if (!cavos) throw new Error('Not logged in');
+      if (cavos.chain !== 'starknet') {
+        throw new Error('kit: addSigner via useCavos() is Starknet-only; use the `wallet` handle on Solana.');
+      }
       return cavos.addSigner(pubkey);
     },
     [cavos],
@@ -295,6 +317,9 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   // it and the backend never sees it.
   const setupRecovery = useCallback(async (): Promise<string> => {
     if (!cavos) throw new Error('Not logged in');
+    if (cavos.chain !== 'starknet') {
+      throw new Error('kit: self-custodial recovery is Starknet-only for now.');
+    }
     const code = generateRecoveryCode();
     await cavos.setupRecovery(code);
     return code;
@@ -313,7 +338,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
         identity,
         network: configRef.current.network,
         appSalt: configRef.current.appSalt,
-        paymasterApiKey: configRef.current.paymasterApiKey,
+        paymasterApiKey: configRef.current.paymasterApiKey ?? '',
         ...(configRef.current.appId ? { appId: configRef.current.appId } : {}),
         ...(configRef.current.authBackendUrl ? { backendUrl: configRef.current.authBackendUrl } : {}),
         ...(configRef.current.rpcUrl ? { rpcUrl: configRef.current.rpcUrl } : {}),
@@ -379,6 +404,8 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     user: identity
       ? { userId: identity.userId, email: identity.email, provider: identity.provider }
       : null,
+    chain: config.chain ?? 'starknet',
+    wallet: cavos,
     address: cavos?.address ?? null,
     walletStatus,
     isLoading,

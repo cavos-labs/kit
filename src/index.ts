@@ -10,7 +10,14 @@
 
 // High-level entry point (Privy-like: log in -> ready, deployed, gasless wallet)
 export { Cavos } from "./Cavos";
-export type { ConnectOptions, ConnectStatus, RecoveryOptions } from "./Cavos";
+export type {
+  ConnectOptions,
+  ConnectStatus,
+  RecoveryOptions,
+  Chain,
+  NetworkEnv,
+  CavosWallet,
+} from "./Cavos";
 
 // Auth / identity
 export type { AuthProvider, Identity } from "./auth/AuthProvider";
@@ -19,7 +26,7 @@ export { CavosAuth } from "./auth/CavosAuth";
 export type { CavosAuthOptions } from "./auth/CavosAuth";
 
 // Identity derivation
-export { deriveAddressSeed } from "./identity";
+export { deriveAddressSeed, deriveAddressSeedSolana } from "./identity";
 export type { IdentityInput } from "./identity";
 
 // Off-chain user_id -> wallet map (multi-device recognition; backend-implemented)
@@ -53,6 +60,24 @@ export {
   DEVICE_ACCOUNT_CLASS_HASH,
 } from "./chains/starknet/constants";
 export type { StarknetNetwork } from "./chains/starknet/constants";
+export {
+  SolanaAdapter,
+  compressedPubkey,
+  encodeLowSSignature,
+  buildSecp256r1Instruction,
+  anchorDiscriminator,
+} from "./chains/solana/SolanaAdapter";
+export type { SolanaAdapterOptions } from "./chains/solana/SolanaAdapter";
+export {
+  DEVICE_ACCOUNT_PROGRAM_ID,
+  SECP256R1_PROGRAM_ID,
+  SOLANA_NETWORKS,
+} from "./chains/solana/constants";
+export type { SolanaNetwork } from "./chains/solana/constants";
+export { CavosSolana } from "./chains/solana/CavosSolana";
+export type { ConnectSolanaOptions } from "./chains/solana/CavosSolana";
+export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
+export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 
 // Low-level crypto / encoding (advanced use)
 export { signatureToFelts, recoverYParity } from "./crypto/signature";

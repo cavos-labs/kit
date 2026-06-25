@@ -1,4 +1,5 @@
 import { hash } from "starknet";
+import { sha256 } from "@noble/hashes/sha256";
 
 /**
  * The address seed binds a wallet to a stable, backend-managed user identity.
@@ -18,6 +19,17 @@ export function deriveAddressSeed({ userId, appSalt }: IdentityInput): bigint {
   // Poseidon over the identity components; stable and collision-resistant.
   const h = hash.computePoseidonHashOnElements([feltFromString(userId), feltFromString(appSalt)]);
   return BigInt(h);
+}
+
+/**
+ * Solana variant: a 32-byte `address_seed` for the Cavos device-account PDA.
+ * Uses the SAME identity input as Starknet (`userId + appSalt`) but hashes with
+ * SHA-256 instead of Poseidon, since Solana has no native Poseidon and the PDA
+ * seed is raw bytes. The same user therefore maps to a stable, app-scoped
+ * address on each chain (different address spaces, one identity).
+ */
+export function deriveAddressSeedSolana({ userId, appSalt }: IdentityInput): Uint8Array {
+  return sha256(new TextEncoder().encode(`cavos:solana:v1:${userId}:${appSalt}`));
 }
 
 /** Map an arbitrary UTF-8 string into a felt via Poseidon over its byte chunks. */
