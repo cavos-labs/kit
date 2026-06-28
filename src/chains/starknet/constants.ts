@@ -26,9 +26,11 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
 /**
  * DeviceAccount class hash, per network. Populated from
  * `account-contracts/starknet/deployments/<network>.json` after declaring.
- * Left empty until the class is declared on each network.
+ *
+ * Both networks were re-declared 2026-06-26 (code changed) to the same class
+ * hash, so mainnet and sepolia run identical contract source.
  */
 export const DEVICE_ACCOUNT_CLASS_HASH: Record<StarknetNetwork, string> = {
-  sepolia: "0x6c3c3426667b6d4adda18a0b8d8cc34c495a1ace7276c4470068ad4c324876d",
-  mainnet: "0x6c3c3426667b6d4adda18a0b8d8cc34c495a1ace7276c4470068ad4c324876d",
+  sepolia: "0x1840aded59e8a0d2b440a134cb9079a7fc11b06c77f58ed189ab436a034ca6a",
+  mainnet: "0x1840aded59e8a0d2b440a134cb9079a7fc11b06c77f58ed189ab436a034ca6a",
 };

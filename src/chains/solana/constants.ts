@@ -15,6 +15,9 @@ export const ACCOUNT_SEED = "cavos-account";
 export const DOMAIN_ADD = "cavos:add_signer:v1";
 export const DOMAIN_REMOVE = "cavos:remove_signer:v1";
 export const DOMAIN_TRANSFER = "cavos:transfer:v1";
+/** Arbitrary execution (CPI). The signed message commits to sha256 of the
+ *  canonical Borsh serialization of the instruction set — see `buildExecute`. */
+export const DOMAIN_EXECUTE = "cavos:execute:v1";
 
 /** secp256r1 (P-256) curve order, for low-S normalization. */
 export const SECP256R1_N =

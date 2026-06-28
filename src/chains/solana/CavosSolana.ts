@@ -14,8 +14,10 @@ import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
 import { deriveAddressSeedSolana } from "../../identity";
 import { SolanaAdapter } from "./SolanaAdapter";
+import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
+import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
 
 export interface ConnectSolanaOptions {
   network: SolanaNetwork;
@@ -48,6 +50,35 @@ export interface ConnectSolanaOptions {
 }
 
 export type ConnectStatus = "ready" | "needs-device-approval";
+
+/**
+ * Options for recovering a Solana account after losing every device signer.
+ * Mirrors `RecoveryOptions` (Starknet), adapted to the Solana path: the backup
+ * key signs the `add_signer` bundle via the secp256r1 precompile and the Cavos
+ * relayer sponsors it (no fee-payer keypair needed).
+ */
+export interface RecoverSolanaOptions {
+  /** The recovery code the user stored when they ran setupRecovery. */
+  code: string;
+  /** Authenticated identity (same user who owns the account). */
+  identity: Identity;
+  /** Solana network the account lives on. */
+  network: SolanaNetwork;
+  appSalt: string;
+  appId?: string;
+  backendUrl?: string;
+  registry?: WalletRegistry;
+  /** RPC override (else the network default). */
+  rpcUrl?: string;
+  /** Cavos device-account program id override. */
+  programId?: string;
+  /** Override the new device's signer (native / tests); default WebCrypto. */
+  createSigner?: (keyId: string) => Promise<DeviceSigner>;
+  /** Gasless sponsorship via the Cavos relayer (defaults to hosted when appId set). */
+  relayer?: SolanaRelayer;
+  /** Self-funded fallback when no relayer is configured (tests / advanced). */
+  feePayer?: Keypair;
+}
 
 /**
  * High-level Solana entry — the Solana analogue of `Cavos.connect`. One call
@@ -85,6 +116,16 @@ export class CavosSolana {
     const identity = opts.identity ?? (await opts.auth?.authenticate());
     if (!identity) throw new Error("kit/solana: connect requires `identity` or `auth`");
 
+    // Client-side read RPC. The integrator SHOULD pass their own `rpcUrl` — the
+    // public default is rate-limited and unfit for production. (This is separate
+    // from the relayer's server-side RPC, which Cavos operates.) Warn loudly when
+    // hitting mainnet on the shared public endpoint.
+    if (opts.network === "solana-mainnet" && !opts.rpcUrl) {
+      console.warn(
+        "[cavos] Using the public mainnet-beta RPC. Pass `rpcUrl` with your own " +
+          "provider (Helius/Triton/QuickNode) for production — the public endpoint is rate-limited.",
+      );
+    }
     const connection = new Connection(opts.rpcUrl ?? SOLANA_NETWORKS[opts.network], "confirmed");
 
     const signer = opts.createSigner
@@ -173,6 +214,129 @@ export class CavosSolana {
     }
     const ixs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
     return this.send(ixs);
+  }
+
+  /**
+   * Run arbitrary CPI `instructions` with the account PDA as signer (device-
+   * signed). The signature commits to sha256 of the canonical Borsh
+   * serialization of the instructions, so it binds exactly the operations the
+   * program will invoke. Unlocks SPL transfers, swaps, staking, etc.
+   *
+   * What the relayer will sponsor is constrained by the app's Solana program
+   * allowlist (configured in the dashboard) — programs outside the allowlist are
+   * rejected before co-signing.
+   */
+  async executeInstructions(instructions: InstructionData[]): Promise<string> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    }
+    const ixs = await this.adapter.buildExecute(this.address, instructions);
+    return this.send(ixs);
+  }
+
+  /**
+   * Register the backup signer derived from `code` as an authorized signer of this
+   * account (device-signed via precompile). Idempotent: returns without a tx if
+   * the backup signer is already registered. The code never leaves the device —
+   * only the derived public key travels on-chain.
+   *
+   * Self-custodial: anyone who can re-derive the backup key from the code (i.e.
+   * the rightful owner) can later recover the account with `CavosSolana.recover`.
+   * Run this once, on a registered device, and have the user store the code.
+   */
+  async setupRecovery(code: string): Promise<string | undefined> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: setupRecovery requires a ready, registered device");
+    }
+    const { publicKey: backupPubkey } = deriveBackupKey(code);
+    // Skip the on-chain call if the backup signer is already registered.
+    const already = await this.adapter.isAuthorizedSigner(this.address, backupPubkey);
+    if (already) return undefined;
+    return this.addSigner(backupPubkey);
+  }
+
+  /**
+   * Recover an account after losing every device signer. Derives the backup key
+   * from `code`, uses it (not the new device key) to sign an `add_signer` for the
+   * new device, and returns a ready CavosSolana bound to the new device. The
+   * account address is unchanged.
+   *
+   * Self-custodial: only someone holding the code (i.e. the rightful owner) can
+   * re-derive the backup key. The backend never sees the code.
+   *
+   * This mirrors `Cavos.recover` (Starknet): the backup key is just another
+   * authorized signer, so recovery is an `add_signer(newDevice)` bundle signed by
+   * the backup key. The on-chain program needs no recovery-specific entrypoint.
+   */
+  static async recover(opts: RecoverSolanaOptions): Promise<CavosSolana> {
+    if (opts.network === "solana-mainnet" && !opts.rpcUrl) {
+      console.warn(
+        "[cavos] Using the public mainnet-beta RPC. Pass `rpcUrl` with your own " +
+          "provider (Helius/Triton/QuickNode) for production — the public endpoint is rate-limited.",
+      );
+    }
+    const connection = new Connection(opts.rpcUrl ?? SOLANA_NETWORKS[opts.network], "confirmed");
+
+    // The new device's signer (created/loaded the same way connect() does).
+    const signer = opts.createSigner
+      ? await opts.createSigner(`${opts.identity.userId}:${opts.appSalt}`)
+      : await WebCryptoSigner.loadOrCreate({ keyId: `${opts.identity.userId}:${opts.appSalt}` });
+    const devicePubkey = await signer.getPublicKey();
+
+    // The backup key drives THIS transaction: it's the only signer that can
+    // authorise adding the new device after all device keys are lost. The
+    // adapter signs every bundle with whatever `signer` it's constructed with,
+    // so a backup-backed adapter produces backup-signed `add_signer` bundles.
+    const backup = BackupSigner.fromCode(opts.code);
+    const backupAdapter = new SolanaAdapter({
+      programId: opts.programId,
+      connection,
+      signer: backup,
+    });
+
+    const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
+    const registry =
+      opts.registry ??
+      (opts.appId
+        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        : defaultRegistry);
+    const existing = await registry.lookup(opts.identity.userId);
+    if (!existing) {
+      throw new Error("kit/solana: no account found for this identity — nothing to recover");
+    }
+
+    const relayer =
+      opts.relayer ??
+      (opts.appId
+        ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection })
+        : undefined);
+
+    // Authorise the new device, signed by the backup key (sponsored by the relayer,
+    // or self-funded). The account address is unchanged.
+    const alreadyAuthed = await backupAdapter.isAuthorizedSigner(existing.address, devicePubkey);
+    if (!alreadyAuthed) {
+      const ixs = await backupAdapter.buildAddSigner(existing.address, devicePubkey);
+      if (relayer) {
+        await relayer.send(ixs);
+      } else if (opts.feePayer) {
+        await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [opts.feePayer]);
+      } else {
+        throw new Error("kit/solana: a relayer (appId) or feePayer is required to recover");
+      }
+    }
+
+    // Hand control to the new device's signer for all future operations.
+    const adapter = new SolanaAdapter({ programId: opts.programId, connection, signer });
+    return new CavosSolana(
+      opts.identity,
+      existing.address,
+      "ready",
+      connection,
+      adapter,
+      devicePubkey,
+      relayer,
+      opts.feePayer,
+    );
   }
 
   private async send(ixs: TransactionInstruction[]): Promise<string> {

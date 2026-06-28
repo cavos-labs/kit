@@ -62,12 +62,13 @@ export {
 export type { StarknetNetwork } from "./chains/starknet/constants";
 export {
   SolanaAdapter,
+  serializeInstructions,
   compressedPubkey,
   encodeLowSSignature,
   buildSecp256r1Instruction,
   anchorDiscriminator,
 } from "./chains/solana/SolanaAdapter";
-export type { SolanaAdapterOptions } from "./chains/solana/SolanaAdapter";
+export type { SolanaAdapterOptions, InstructionData, InstructionAccount } from "./chains/solana/SolanaAdapter";
 export {
   DEVICE_ACCOUNT_PROGRAM_ID,
   SECP256R1_PROGRAM_ID,
@@ -75,7 +76,7 @@ export {
 } from "./chains/solana/constants";
 export type { SolanaNetwork } from "./chains/solana/constants";
 export { CavosSolana } from "./chains/solana/CavosSolana";
-export type { ConnectSolanaOptions } from "./chains/solana/CavosSolana";
+export type { ConnectSolanaOptions, RecoverSolanaOptions } from "./chains/solana/CavosSolana";
 export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 

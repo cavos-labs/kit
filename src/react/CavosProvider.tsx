@@ -11,6 +11,8 @@ import {
 } from 'react';
 import { Cavos } from '../Cavos';
 import type { Chain, NetworkEnv, CavosWallet } from '../Cavos';
+import { CavosSolana } from '../chains/solana/CavosSolana';
+import type { SolanaNetwork } from '../chains/solana/constants';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall } from '../chains/ChainAdapter';
@@ -317,32 +319,44 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   // it and the backend never sees it.
   const setupRecovery = useCallback(async (): Promise<string> => {
     if (!cavos) throw new Error('Not logged in');
-    if (cavos.chain !== 'starknet') {
-      throw new Error('kit: self-custodial recovery is Starknet-only for now.');
-    }
     const code = generateRecoveryCode();
+    // Both chains expose setupRecovery(code) on the wallet handle.
     await cavos.setupRecovery(code);
     return code;
   }, [cavos]);
 
   // Recover access after losing every device. The caller passes the recovery
   // code; the backup key it derives authorises adding this new device. Brings
-  // the provider straight to a ready state.
+  // the provider straight to a ready state. Works on both chains.
   const recover = useCallback(async (code: string) => {
     if (!identity) throw new Error('Sign in first so we know which account to recover.');
     setAuthError(null);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     try {
-      const c = await Cavos.recover({
-        code,
-        identity,
-        network: configRef.current.network,
-        appSalt: configRef.current.appSalt,
-        paymasterApiKey: configRef.current.paymasterApiKey ?? '',
-        ...(configRef.current.appId ? { appId: configRef.current.appId } : {}),
-        ...(configRef.current.authBackendUrl ? { backendUrl: configRef.current.authBackendUrl } : {}),
-        ...(configRef.current.rpcUrl ? { rpcUrl: configRef.current.rpcUrl } : {}),
-      });
+      const chain = configRef.current.chain ?? 'starknet';
+      const c: CavosWallet =
+        chain === 'solana'
+          ? await CavosSolana.recover({
+              code,
+              identity,
+              network: (configRef.current.network === 'mainnet'
+                ? 'solana-mainnet'
+                : 'solana-devnet') as SolanaNetwork,
+              appSalt: configRef.current.appSalt,
+              ...(configRef.current.appId ? { appId: configRef.current.appId } : {}),
+              ...(configRef.current.authBackendUrl ? { backendUrl: configRef.current.authBackendUrl } : {}),
+              ...(configRef.current.rpcUrl ? { rpcUrl: configRef.current.rpcUrl } : {}),
+            })
+          : await Cavos.recover({
+              code,
+              identity,
+              network: configRef.current.network,
+              appSalt: configRef.current.appSalt,
+              paymasterApiKey: configRef.current.paymasterApiKey ?? '',
+              ...(configRef.current.appId ? { appId: configRef.current.appId } : {}),
+              ...(configRef.current.authBackendUrl ? { backendUrl: configRef.current.authBackendUrl } : {}),
+              ...(configRef.current.rpcUrl ? { rpcUrl: configRef.current.rpcUrl } : {}),
+            });
       setCavos(c);
       setWalletStatus({ ...INITIAL_STATUS, isReady: true });
       modal?.onSuccess?.(c.address);

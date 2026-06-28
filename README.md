@@ -6,8 +6,10 @@ secp256r1 (P-256) keys that live on the device and sign **invisibly** (no passke
 no Face ID / Touch ID, no popups). OAuth / email is used only to derive the
 address, never to sign. No exported keys, no MPC, no on-chain JWT/RSA.
 
-**Phase 1: Starknet only.** The API is chain-configurable by design so Stellar
-and Solana adapters slot in behind the same `ChainAdapter` interface later.
+**Chains:** **Starknet** and **Solana** are implemented today, behind a single
+unified `Cavos.connect({ chain, network })` entry point. The API is
+chain-configurable by design — Stellar (and others) will slot in behind the same
+`ChainAdapter` interface.
 
 > New package. Does **not** replace `@cavos/react` / `react-native` (legacy
 > OAuth/session-key SDKs), which continue on the old flow.
@@ -22,45 +24,94 @@ npm install @cavos/kit
 
 | Piece | Role |
 |-------|------|
-| `deriveAddressSeed` | Stable `address_seed` from `{ userId, appSalt }`. Identity → wallet, device-independent. |
-| `StarknetAdapter` | Computes the deterministic address, builds deploy/initialize/add/remove calls, serializes signatures. |
+| `Cavos.connect` | Unified entry point: log in → derive deterministic address → create/load device key → auto-deploy → ready, gas-sponsored wallet. |
+| `deriveAddressSeed` / `deriveAddressSeedSolana` | Stable `address_seed` from `{ userId, appSalt }`. Identity → wallet, device-independent. |
+| `StarknetAdapter` / `SolanaAdapter` | Per-chain: compute the deterministic address, build deploy/initialize/add/remove calls, serialize signatures. |
 | `WebCryptoSigner` | Browser silent device signer: non-extractable P-256 key in IndexedDB, no UI on sign. |
-| `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer. |
-| `CavosAccount` | High-level facade tying identity + adapter + signer together. |
-| `RecoveryClient` | Interface to the (non-custodial) backend for the email-approval multi-device flow. |
+| `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
+| `SolanaRelayer` | Cavos gasless sponsor for Solana: co-signs as fee payer so the integrator holds no keypair. |
+| `RecoveryClient` | Interface to the (non-custodial) backend for the email-approval multi-device flow (Starknet). |
 
-## Quickstart — high-level (Privy-like)
+## Quickstart — Starknet
 
 One call logs the user in and returns a ready, deployed, gas-sponsored smart
 account controlled by a silent device key. The user only sees the login.
 
 ```ts
-import { Cavos, StaticIdentity, CavosPaymaster } from "@cavos/kit";
+import { Cavos, StaticIdentity } from "@cavos/kit";
 
-const cavos = await Cavos.connect({
-  network: "sepolia",
+const wallet = await Cavos.connect({
+  chain: "starknet",
+  network: "testnet",                 // "testnet" (sepolia) | "mainnet"
   appSalt: "my-app",
-  // Identity from your login (Cavos-hosted auth lands here; or pass your own userId)
+  // Identity from your login (use CavosAuth for hosted Google/Apple/email, or
+  // wrap your own userId with StaticIdentity)
   auth: new StaticIdentity({ userId: user.id, email: user.email }),
-  // Gas sponsor — deploy + execute are gasless
-  sponsor: new CavosPaymaster({ network: "sepolia", apiKey: process.env.CAVOS_API_KEY! }),
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,        // hosted registry + recovery
+  paymasterApiKey: process.env.CAVOS_PAYMASTER_API_KEY!, // gas sponsor
 });
 
-console.log(cavos.address);        // deterministic; auto-deployed on first connect
-await cavos.execute(calls);        // gasless; signed invisibly by the device key
+console.log(wallet.address);          // deterministic; auto-deployed on first connect
+
+if (wallet.chain === "starknet" && wallet.status === "ready") {
+  await wallet.execute(calls);        // gasless; signed invisibly by the device key
+}
 ```
 
-> **Status:** `Cavos.connect` orchestration (auth → device key → address →
-> auto-deploy → execute) is built. Fully-gasless execution needs the contract to
-> add SNIP-6 `is_valid_signature` + SNIP-9 `execute_from_outside_v2` (tracked
-> follow-up) and the Cavos paymaster to support the new class. The self-funded
-> path below is proven on-chain today.
+`wallet` is a discriminated union (`Cavos | CavosSolana`); narrow on
+`wallet.chain` before calling `execute`, since its signature differs per chain.
 
-## Quickstart — low-level (Starknet)
+## Quickstart — Solana
+
+Same unified entry point; pass `chain: "solana"`. Gas is sponsored by the Cavos
+relayer (activated by `appId`) — no `paymasterApiKey` and no fee-payer keypair
+needed.
+
+```ts
+import { Cavos, StaticIdentity } from "@cavos/kit";
+
+const wallet = await Cavos.connect({
+  chain: "solana",
+  network: "testnet",                 // -> solana-devnet ("mainnet" -> solana-mainnet)
+  appSalt: "my-app",
+  auth: new StaticIdentity({ userId: user.id, email: user.email }),
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID, // activates the gasless relayer
+});
+
+if (wallet.chain === "solana" && wallet.status === "ready") {
+  const signature = await wallet.execute(1_000_000n, recipient); // lamports, base58 dest
+  console.log(signature);
+}
+```
+
+On Solana every guarded action (initialize, add/remove signer, execute) is a
+two-instruction bundle pairing Solana's **native secp256r1 precompile** with the
+Cavos `cavos-device-account` program instruction. The address is a deterministic
+PDA derived from `deriveAddressSeedSolana` (`{ userId, appSalt }`).
+
+```ts
+// Arbitrary program calls (SPL transfers, swaps, staking):
+import type { InstructionData } from "@cavos/kit";
+
+if (wallet.chain === "solana" && wallet.status === "ready") {
+  const instructions: InstructionData[] = [/* … SPL/swap instructions … */];
+  await wallet.executeInstructions(instructions); // CPIs run with the PDA signing
+}
+```
+
+> **Note:** `execute(amount, destination)` moves **lamports** (SOL); use
+> `executeInstructions(instructions)` for arbitrary program calls. Sponsored
+> `executeInstructions` is gated by the app's Solana program allowlist (dashboard
+> → Solana Programs); targets outside the allowlist + safe set are rejected.
+
+## Quickstart — low-level (Starknet, advanced)
+
+If you want to drive the pieces yourself (own paymaster, custom deploy), use the
+adapter + signer directly instead of `Cavos.connect`:
 
 ```ts
 import {
-  CavosAccount, StarknetAdapter, WebCryptoSigner,
+  StarknetAdapter, WebCryptoSigner,
   deriveAddressSeed, DEVICE_ACCOUNT_CLASS_HASH,
 } from "@cavos/kit";
 
@@ -75,39 +126,36 @@ const address = new StarknetAdapter({ classHash }).computeAddress({
 // 2. Create/load the SILENT device key (keyed by the address). No prompt, ever.
 const signer = await WebCryptoSigner.loadOrCreate({ keyId: address });
 
-// 3. Build the account.
-const adapter = new StarknetAdapter({ classHash, signer });
-const account = new CavosAccount({ identity, adapter, signer });
-console.log(account.address); // deterministic, pre-deploy
-
-// 4. Onboarding: deploy + register first signer (route through your paymaster).
-const calls = await account.buildOnboarding(); // [UDC deploy, initialize] — submit atomically
-
-// 5. Add another device later (must be self-submitted by an existing signer).
-const addCall = account.buildAddSigner(otherDevicePublicKey);
-
-// 6. Submit transactions through a standard starknet.js Account.
+// 3. Build deploy/initialize/add/remove calls, then submit through your own
+//    paymaster. Route signing through a standard starknet.js Account:
 import { Account, RpcProvider } from "starknet";
 import { StarknetDeviceSigner } from "@cavos/kit";
 
 const provider = new RpcProvider({ nodeUrl: "https://api.cartridge.gg/x/starknet/sepolia" });
-const snAccount = new Account(provider, account.address, new StarknetDeviceSigner(signer), "1");
+const snAccount = new Account(provider, address, new StarknetDeviceSigner(signer), "1");
 await snAccount.execute(someCalls); // signed silently; DeviceAccount validates on-chain
 ```
 
 `StarknetDeviceSigner` is a drop-in starknet.js `SignerInterface`, so it also
 plugs into paymaster SDKs (AVNU) for gasless flows. The kit does **not** own gas
-sponsorship — route execution through your paymaster of choice.
+sponsorship in the low-level path — route execution through your paymaster of
+choice.
 
 ## How signing works
 
-The device key signs `sha256(tx_hash)` with no user interaction (WebCrypto's
-ECDSA hashes the message internally). The signature is serialized as
-`[r_low, r_high, s_low, s_high, y_parity]` — exactly what
+On **Starknet**, the device key signs `sha256(tx_hash)` with no user interaction
+(WebCrypto's ECDSA hashes the message internally). The signature is serialized
+as `[r_low, r_high, s_low, s_high, y_parity]` — exactly what
 `DeviceAccount.__validate__` decodes. The contract recomputes `sha256(tx_hash)`,
 normalizes high-s, and recovers the secp256r1 signer. This 5-felt encoding is
 covered by a cross-checked contract test (`test_sdk_signature_payload_authorized`
 in `account-contracts/starknet`).
+
+On **Solana**, each guarded action pairs the native `Secp256r1SigVerify`
+precompile (which records the device's P-256 signature of a domain-separated
+message) with the Cavos program instruction that consumes it. The fee payer is
+not bound by the device signature, so the relayer co-signs without re-authorizing
+the action.
 
 **Security model:** the private key is non-extractable (never visible to JS) and
 device-bound — non-custodial, no MPC, verified on-chain. Because signing is
@@ -115,7 +163,9 @@ silent there is no per-signature user-verification gate (unlike a biometric
 passkey); this is the standard embedded-wallet trade-off. Multi-device + the
 non-custodial recovery relay cover device loss.
 
-## Status (Phase 1)
+## Status
+
+### Starknet
 
 - ✅ Silent secp256r1 device signer (`WebCryptoSigner`) + 5-felt signature
   serialization, cross-checked against the live contract.
@@ -124,7 +174,6 @@ non-custodial recovery relay cover device loss.
 - ✅ **Proven on-chain (Sepolia):** silent device key signs a real STRK `approve`,
   the deployed DeviceAccount validates it ([tx](https://sepolia.starkscan.co/tx/0x51e0e961ee535bf3c45ea020b9c258aee544ed18aea57dbbc80767f8e86ab9e)).
 - ✅ `Cavos.connect` orchestration: auth → device key → address → auto-deploy → execute.
-- ✅ `CavosPaymaster` client + `Sponsor` interface (Cavos-hosted gasless).
 - ✅ **Gasless proven on-chain (Sepolia):** relayer-paid `execute_from_outside_v2`,
   authorized solely by the silent device signature, executed a real STRK approve
   ([tx](https://sepolia.starkscan.co/tx/0x05ade4008f4ccbcfe4a7f016c61eb0eb591c8f696db3f5dad6f0db3ea3b5d2e6)).
@@ -132,7 +181,29 @@ non-custodial recovery relay cover device loss.
 - ✅ `CavosAuth` (hosted Google/Apple/email/OTP login, mirroring `@cavos/react`).
 - ✅ Recovery client interface (non-custodial multi-device email-approval flow).
 - 🚧 Cavos paymaster backend must register the new class hash (backend, out of repo).
+
+### Solana
+
+- ✅ `SolanaAdapter` — PDA derivation, the `[secp256r1 precompile, program]`
+  instruction builders, low-S normalization, anchor discriminators.
+- ✅ `CavosSolana` high-level client — `connect`, `execute(amount, destination)`,
+  `executeInstructions(instructions)`, `addSigner`, `setupRecovery`, static
+  `recover`; gasless by default via the relayer when `appId` is set.
+- ✅ `executeInstructions` arbitrary CPI — the device key signs over a hash of the
+  instruction set; the on-chain `execute` instruction invokes the CPIs with the
+  PDA signing. Sponsored calls are gated by the app's program allowlist.
+- ✅ `SolanaRelayer` — co-signs as fee payer for seedless/gasless execution
+  (integrator holds no fee-payer keypair); self-funded `feePayer` fallback.
+- ✅ Unit tests + end-to-end scripts (`scripts/solana_e2e.ts`,
+  `scripts/solana_relayer_e2e.ts`).
+- ✅ Recovery (`setupRecovery` / `recover`) — same self-custodial model as Starknet.
+
+### Cross-chain / next
+
+- ✅ Unified `Cavos.connect({ chain, network })` dispatcher with a `CavosWallet`
+  discriminated union.
 - 🚧 Recovery backend service + session keys (Phase 2).
+- 🚧 Stellar adapter (planned).
 
 ## Demo
 

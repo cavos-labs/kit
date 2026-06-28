@@ -14,6 +14,7 @@ import {
   DOMAIN_ADD,
   DOMAIN_REMOVE,
   DOMAIN_TRANSFER,
+  DOMAIN_EXECUTE,
   SECP256R1_N,
   SECP256R1_PROGRAM_ID,
 } from "./constants";
@@ -21,6 +22,23 @@ import {
 const COMPRESSED_PUBKEY_SIZE = 33;
 const SIGNATURE_SIZE = 64;
 const CURRENT_IX = 0xffff;
+
+/** An account meta candidate for a CPI instruction inside `execute`. Mirrors the
+ *  on-chain `AccountMetaCandidate` (Borsh). */
+export interface InstructionAccount {
+  pubkey: string;
+  isSigner: boolean;
+  isWritable: boolean;
+}
+
+/** A CPI instruction the device key authorizes via `execute`. Mirrors the
+ *  on-chain `InstructionData` (Borsh). Serialized canonically and hashed before
+ *  signing, so a signature binds exactly this instruction set. */
+export interface InstructionData {
+  programId: string;
+  accounts: InstructionAccount[];
+  data: Uint8Array;
+}
 
 export interface SolanaAdapterOptions {
   /** Cavos device-account program id (defaults to the deployed one). */
@@ -163,6 +181,75 @@ export class SolanaAdapter {
     return [precompileIx, ix];
   }
 
+  /**
+   * `[precompile, execute]` bundle running arbitrary CPI instructions with the
+   * account PDA as signer. The device key signs over
+   * `DOMAIN_EXECUTE || account || sha256(canonical(instructions)) || nonce`, so
+   * the signature commits to the EXACT instruction set the program will invoke —
+   * no account/data substitution is possible after signing.
+   *
+   * The instructions' accounts are passed to the program via `remaining_accounts`
+   * (flattened, in order); the program enforces an exact, ordered mapping.
+   */
+  async buildExecute(
+    account: string,
+    instructions: InstructionData[]
+  ): Promise<TransactionInstruction[]> {
+    if (instructions.length === 0) throw new Error("kit/solana: execute requires at least one instruction");
+
+    const accountPk = new PublicKey(account);
+    const nonce = await this.fetchNonce(accountPk);
+
+    // Canonical Borsh serialization MUST match the on-chain
+    // `hash_instructions` (sha256 over the concatenated `InstructionData`).
+    const blob = serializeInstructions(instructions);
+    const ixsHash = sha256(blob);
+
+    const message = concatBytes(
+      Buffer.from(DOMAIN_EXECUTE),
+      accountPk.toBuffer(),
+      Buffer.from(ixsHash),
+      u64le(nonce)
+    );
+    const { precompileIx } = await this.signToPrecompile(message);
+
+    // The program ix carries the instructions in its data; the accounts they
+    // reference are flattened into `remaining_accounts` in order. The wire format
+    // is discriminator + Borsh Vec<u8>(blob) = discriminator + u32_len + blob.
+    // The signed hash (above) is over the inner `blob` only — no length prefix —
+    // matching the program's parse and the relay's allowlist parser.
+    const blobLen = Buffer.alloc(4);
+    new DataView(blobLen.buffer).setUint32(0, blob.length, true);
+    const data = Buffer.concat([anchorDiscriminator("execute"), blobLen, blob]);
+    const remainingAccounts: Array<{ pubkey: PublicKey; isSigner: false; isWritable: boolean }> = [];
+    for (const ix of instructions) {
+      for (const acc of ix.accounts) {
+        remainingAccounts.push({
+          pubkey: new PublicKey(acc.pubkey),
+          isSigner: false, // signer flags are part of the signed InstructionData
+          isWritable: acc.isWritable,
+        });
+      }
+      // The CPI target program must be a remaining_account too — invoke_signed
+      // needs it loaded. Appended (not part of the signed account list).
+      remainingAccounts.push({
+        pubkey: new PublicKey(ix.programId),
+        isSigner: false,
+        isWritable: false,
+      });
+    }
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: accountPk, isSigner: false, isWritable: true },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        ...remainingAccounts,
+      ],
+      data,
+    });
+    return [precompileIx, ix];
+  }
+
   /** Read whether `signer` is currently an authorized signer of `account`. */
   async isAuthorizedSigner(account: string, signer: DevicePublicKey): Promise<boolean> {
     const signers = await this.fetchSigners(new PublicKey(account));
@@ -197,7 +284,8 @@ export class SolanaAdapter {
   private async fetchNonce(account: PublicKey): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(account);
     if (!info) return 0n;
-    // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce(LE) ...
+    // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce(LE) + 33 initial_signer + ...
+    // nonce is right after bump, so its offset is unaffected by initial_signer.
     return readU64le(info.data, 41);
   }
 
@@ -205,7 +293,8 @@ export class SolanaAdapter {
     const info = await this.requireConnection().getAccountInfo(account);
     if (!info) return [];
     const d = info.data;
-    const lenOffset = 8 + 32 + 1 + 8; // = 49
+    // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce + 33 initial_signer + 4 vec_len + signers
+    const lenOffset = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // = 82
     const count = d.readUInt32LE(lenOffset);
     const out: Uint8Array[] = [];
     let off = lenOffset + 4;
@@ -280,12 +369,17 @@ export function anchorDiscriminator(name: string): Buffer {
 
 function u64le(n: bigint | number): Buffer {
   const b = Buffer.alloc(8);
-  b.writeBigUInt64LE(BigInt(n));
+  // Avoid Buffer.writeBigUInt64LE: the browser `buffer` polyfill doesn't
+  // implement the BigInt methods. Use DataView instead.
+  new DataView(b.buffer, b.byteOffset, 8).setBigUint64(0, BigInt(n), true);
   return b;
 }
 
 function readU64le(buf: Buffer, offset: number): bigint {
-  return buf.readBigUInt64LE(offset);
+  return new DataView(buf.buffer, buf.byteOffset, buf.length).getBigUint64(
+    offset,
+    true,
+  );
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
@@ -297,4 +391,41 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
     off += p.length;
   }
   return out;
+}
+
+// ─── Canonical Borsh serialization for `execute` ────────────────────────────
+// MUST match the on-chain `InstructionData`/`AccountMetaCandidate` AnchorSer
+// layout byte-for-byte: `hash_instructions` hashes this and the program
+// requires the precompile-verified message to commit to the same hash. Changing
+// the byte layout here breaks signature binding (and recovery of past sigs).
+
+/** Serialize a single `InstructionData` exactly as Anchor's Borsh derive would. */
+function serializeInstruction(ix: InstructionData): Buffer {
+  const programId = new PublicKey(ix.programId).toBuffer(); // 32 bytes
+  const accounts = serializeAccounts(ix.accounts);
+  const data = serializeVecU8(ix.data);
+  return Buffer.concat([programId, accounts, data]);
+}
+
+function serializeAccounts(metas: InstructionAccount[]): Buffer {
+  const len = Buffer.alloc(4);
+  new DataView(len.buffer).setUint32(0, metas.length, true);
+  const parts = metas.map(serializeAccountMeta);
+  return Buffer.concat([len, ...parts]);
+}
+
+function serializeAccountMeta(meta: InstructionAccount): Buffer {
+  const pubkey = new PublicKey(meta.pubkey).toBuffer(); // 32 bytes
+  return Buffer.concat([pubkey, Buffer.from([meta.isSigner ? 1 : 0, meta.isWritable ? 1 : 0])]);
+}
+
+function serializeVecU8(data: Uint8Array): Buffer {
+  const len = Buffer.alloc(4);
+  new DataView(len.buffer).setUint32(0, data.length, true);
+  return Buffer.concat([len, Buffer.from(data)]);
+}
+
+/** Serialize the full instruction set — the bytes `hash_instructions` hashes. */
+export function serializeInstructions(instructions: InstructionData[]): Buffer {
+  return Buffer.concat(instructions.map(serializeInstruction));
 }
