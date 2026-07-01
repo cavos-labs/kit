@@ -18,6 +18,8 @@ export const DOMAIN_TRANSFER = "cavos:transfer:v1";
 /** Arbitrary execution (CPI). The signed message commits to sha256 of the
  *  canonical Borsh serialization of the instruction set — see `buildExecute`. */
 export const DOMAIN_EXECUTE = "cavos:execute:v1";
+export const DOMAIN_ADD_APPROVER = "cavos:add_approver:v1";
+export const DOMAIN_REMOVE_APPROVER = "cavos:remove_approver:v1";
 
 /** secp256r1 (P-256) curve order, for low-S normalization. */
 export const SECP256R1_N =

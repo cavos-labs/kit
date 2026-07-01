@@ -32,6 +32,16 @@ export function deriveAddressSeedSolana({ userId, appSalt }: IdentityInput): Uin
   return sha256(new TextEncoder().encode(`cavos:solana:v1:${userId}:${appSalt}`));
 }
 
+/**
+ * Stellar variant: a 32-byte `address_seed` used as the Soroban account's seed
+ * and folded (with the initial device signer) into the factory deploy salt.
+ * Same identity input as the other chains, SHA-256 hashed, with a Stellar-scoped
+ * domain so the same user maps to a distinct address per chain.
+ */
+export function deriveAddressSeedStellar({ userId, appSalt }: IdentityInput): Uint8Array {
+  return sha256(new TextEncoder().encode(`cavos:stellar:v1:${userId}:${appSalt}`));
+}
+
 /** Map an arbitrary UTF-8 string into a felt via Poseidon over its byte chunks. */
 function feltFromString(s: string): bigint {
   const bytes = new TextEncoder().encode(s);

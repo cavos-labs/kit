@@ -15,9 +15,12 @@ import {
   DOMAIN_REMOVE,
   DOMAIN_TRANSFER,
   DOMAIN_EXECUTE,
+  DOMAIN_ADD_APPROVER,
+  DOMAIN_REMOVE_APPROVER,
   SECP256R1_N,
   SECP256R1_PROGRAM_ID,
 } from "./constants";
+import type { PasskeyAssertion } from "../../crypto/webauthn";
 
 const COMPRESSED_PUBKEY_SIZE = 33;
 const SIGNATURE_SIZE = 64;
@@ -150,6 +153,123 @@ export class SolanaAdapter {
       data: Buffer.concat([anchorDiscriminator("remove_signer"), Buffer.from(compressed)]),
     });
     return [precompileIx, ix];
+  }
+
+  /** `[precompile, add_approver]` bundle enrolling a passkey approver (device-signed). */
+  async buildAddApprover(
+    account: string,
+    passkey: DevicePublicKey
+  ): Promise<TransactionInstruction[]> {
+    const accountPk = new PublicKey(account);
+    const compressed = compressedPubkey(passkey);
+    const nonce = await this.fetchNonce(accountPk);
+    const message = concatBytes(
+      Buffer.from(DOMAIN_ADD_APPROVER),
+      accountPk.toBuffer(),
+      compressed,
+      u64le(nonce)
+    );
+    const { precompileIx } = await this.signToPrecompile(message);
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: this.guardedKeys(accountPk),
+      data: Buffer.concat([anchorDiscriminator("add_approver"), Buffer.from(compressed)]),
+    });
+    return [precompileIx, ix];
+  }
+
+  /** `[precompile, remove_approver]` bundle (device-signed). */
+  async buildRemoveApprover(
+    account: string,
+    passkey: DevicePublicKey
+  ): Promise<TransactionInstruction[]> {
+    const accountPk = new PublicKey(account);
+    const compressed = compressedPubkey(passkey);
+    const nonce = await this.fetchNonce(accountPk);
+    const message = concatBytes(
+      Buffer.from(DOMAIN_REMOVE_APPROVER),
+      accountPk.toBuffer(),
+      compressed,
+      u64le(nonce)
+    );
+    const { precompileIx } = await this.signToPrecompile(message);
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: this.guardedKeys(accountPk),
+      data: Buffer.concat([anchorDiscriminator("remove_approver"), Buffer.from(compressed)]),
+    });
+    return [precompileIx, ix];
+  }
+
+  /** This chain's leaf for approving `add_signer(newSigner)` at `nonce`:
+   * `sha256(compressed(new_signer) || passkey_nonce_le8)`. The batch challenge the
+   * passkey signs is `sha256(concat(leaves))` across chains. */
+  passkeyLeaf(newSigner: DevicePublicKey, nonce: bigint): Uint8Array {
+    return sha256(concatBytes(compressedPubkey(newSigner), u64le(nonce)));
+  }
+
+  /**
+   * `[precompile(passkey), add_signer_via_passkey]` bundle. The precompile ix
+   * verifies the PASSKEY's WebAuthn assertion over `authData || sha256(clientDataJSON)`;
+   * the program ix binds the challenge to `newSigner` + the passkey nonce and adds
+   * the signer. No device signature — a gasless relayer can submit it.
+   */
+  buildAddSignerViaPasskey(
+    account: string,
+    newSigner: DevicePublicKey,
+    passkey: DevicePublicKey,
+    leaves: Uint8Array[],
+    leafIndex: number,
+    assertion: PasskeyAssertion
+  ): TransactionInstruction[] {
+    const accountPk = new PublicKey(account);
+    const newCompressed = compressedPubkey(newSigner);
+    const passkeyCompressed = compressedPubkey(passkey);
+
+    // Precompile message = authData || sha256(clientDataJSON); the precompile
+    // hashes it once → the WebAuthn signed digest.
+    const clientHash = sha256(assertion.clientDataJSON);
+    const message = concatBytes(assertion.authenticatorData, clientHash);
+    const signature = encodeLowSSignature(assertion.r, assertion.s);
+    const precompileIx = buildSecp256r1Instruction(passkeyCompressed, signature, message);
+
+    // Borsh Vec<[u8; 32]> leaves: u32 len + len*32 bytes.
+    const leavesBlob = Buffer.concat([u32le(leaves.length), ...leaves.map((l) => Buffer.from(l))]);
+    const data = Buffer.concat([
+      anchorDiscriminator("add_signer_via_passkey"),
+      Buffer.from(newCompressed),
+      leavesBlob,
+      u32le(leafIndex),
+      serializeVecU8(assertion.authenticatorData),
+      serializeVecU8(assertion.clientDataJSON),
+      u32le(assertion.challengeOffset),
+    ]);
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: this.guardedKeys(accountPk),
+      data,
+    });
+    return [precompileIx, ix];
+  }
+
+  /** Read whether `passkey` is a registered approver. */
+  async isApprover(account: string, passkey: DevicePublicKey): Promise<boolean> {
+    const approvers = await this.fetchApprovers(new PublicKey(account));
+    const target = Buffer.from(compressedPubkey(passkey)).toString("hex");
+    return approvers.some((a) => Buffer.from(a).toString("hex") === target);
+  }
+
+  /** Read the current passkey-approval nonce. */
+  async passkeyNonce(account: string): Promise<bigint> {
+    const info = await this.requireConnection().getAccountInfo(new PublicKey(account));
+    if (!info) return 0n;
+    const d = info.data;
+    const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
+    const signerCount = d.readUInt32LE(signersLenOff);
+    const approversLenOff = signersLenOff + 4 + signerCount * COMPRESSED_PUBKEY_SIZE;
+    const approverCount = d.readUInt32LE(approversLenOff);
+    const passkeyNonceOff = approversLenOff + 4 + approverCount * COMPRESSED_PUBKEY_SIZE;
+    return readU64le(d, passkeyNonceOff);
   }
 
   /** `[precompile, execute_transfer]` bundle moving lamports out of the account. */
@@ -305,6 +425,23 @@ export class SolanaAdapter {
     return out;
   }
 
+  private async fetchApprovers(account: PublicKey): Promise<Uint8Array[]> {
+    const info = await this.requireConnection().getAccountInfo(account);
+    if (!info) return [];
+    const d = info.data;
+    const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
+    const signerCount = d.readUInt32LE(signersLenOff);
+    const approversLenOff = signersLenOff + 4 + signerCount * COMPRESSED_PUBKEY_SIZE;
+    const count = d.readUInt32LE(approversLenOff);
+    const out: Uint8Array[] = [];
+    let off = approversLenOff + 4;
+    for (let i = 0; i < count; i++) {
+      out.push(Uint8Array.from(d.subarray(off, off + COMPRESSED_PUBKEY_SIZE)));
+      off += COMPRESSED_PUBKEY_SIZE;
+    }
+    return out;
+  }
+
   private requireConnection(): Connection {
     if (!this.opts.connection) throw new Error("kit/solana: connection required for reads");
     return this.opts.connection;
@@ -365,6 +502,12 @@ export function buildSecp256r1Instruction(
 /** Anchor instruction discriminator = sha256("global:<name>")[..8]. */
 export function anchorDiscriminator(name: string): Buffer {
   return Buffer.from(sha256(`global:${name}`).slice(0, 8));
+}
+
+function u32le(n: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(n);
+  return b;
 }
 
 function u64le(n: bigint | number): Buffer {

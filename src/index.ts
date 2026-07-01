@@ -9,7 +9,8 @@
  */
 
 // High-level entry point (Privy-like: log in -> ready, deployed, gasless wallet)
-export { Cavos } from "./Cavos";
+export { Cavos, approveDeviceEverywhere } from "./Cavos";
+export type { PasskeyApprovable } from "./Cavos";
 export type {
   ConnectOptions,
   ConnectStatus,
@@ -26,7 +27,7 @@ export { CavosAuth } from "./auth/CavosAuth";
 export type { CavosAuthOptions } from "./auth/CavosAuth";
 
 // Identity derivation
-export { deriveAddressSeed, deriveAddressSeedSolana } from "./identity";
+export { deriveAddressSeed, deriveAddressSeedSolana, deriveAddressSeedStellar } from "./identity";
 export type { IdentityInput } from "./identity";
 
 // Off-chain user_id -> wallet map (multi-device recognition; backend-implemented)
@@ -80,8 +81,42 @@ export type { ConnectSolanaOptions, RecoverSolanaOptions } from "./chains/solana
 export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 
+// Stellar (Soroban) — device-native custom account via __check_auth + secp256r1
+export {
+  StellarAdapter,
+  sec1Pubkey,
+  encodeLowSSignature as encodeStellarLowSSignature,
+  deviceSignatureScVal,
+} from "./chains/stellar/StellarAdapter";
+export type { StellarAdapterOptions } from "./chains/stellar/StellarAdapter";
+export {
+  STELLAR_NETWORKS,
+  FACTORY_CONTRACT_ID,
+  DEVICE_ACCOUNT_WASM_HASH,
+  NATIVE_SAC_ID,
+} from "./chains/stellar/constants";
+export type { StellarNetwork } from "./chains/stellar/constants";
+export { CavosStellar } from "./chains/stellar/CavosStellar";
+export type { ConnectStellarOptions, RecoverStellarOptions } from "./chains/stellar/CavosStellar";
+export { StellarRelayer } from "./chains/stellar/StellarRelayer";
+export type { StellarRelayerOptions } from "./chains/stellar/StellarRelayer";
+
 // Low-level crypto / encoding (advanced use)
 export { signatureToFelts, recoverYParity } from "./crypto/signature";
+export { PasskeySigner } from "./signer/PasskeySigner";
+export type {
+  PasskeySignerOptions,
+  PasskeyEnrollParams,
+  EnrolledPasskey,
+} from "./signer/PasskeySigner";
+export type { PasskeyAssertion } from "./crypto/webauthn";
+export {
+  base64urlEncode,
+  webauthnDigest,
+  recoverCandidatePublicKeys,
+  batchChallenge,
+  lowS,
+} from "./crypto/webauthn";
 export {
   u256ToFelts,
   bytesToBigInt,

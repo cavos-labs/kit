@@ -30,6 +30,26 @@ export function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+/**
+ * Serialize raw bytes into the calldata a Cairo `ByteArray` deserializes from:
+ *   [ num_full_words, ...full_words(31 bytes each), pending_word, pending_len ]
+ * Each full word is 31 big-endian bytes; the pending word holds the trailing
+ * `< 31` bytes. Used to pass `authenticator_data` / `client_data_json` to the
+ * passkey-approval entrypoint.
+ */
+export function bytesToByteArrayCalldata(bytes: Uint8Array): string[] {
+  const CHUNK = 31;
+  const fullCount = Math.floor(bytes.length / CHUNK);
+  const out: string[] = [String(fullCount)];
+  for (let i = 0; i < fullCount; i++) {
+    out.push("0x" + bytesToBigInt(bytes.subarray(i * CHUNK, i * CHUNK + CHUNK)).toString(16));
+  }
+  const rem = bytes.subarray(fullCount * CHUNK);
+  out.push("0x" + (rem.length ? bytesToBigInt(rem).toString(16) : "0"));
+  out.push(String(rem.length));
+  return out;
+}
+
 /** A felt/bigint -> 32-byte big-endian Uint8Array (the tx-hash width). */
 export function bigIntTo32Bytes(value: bigint): Uint8Array {
   const out = new Uint8Array(32);

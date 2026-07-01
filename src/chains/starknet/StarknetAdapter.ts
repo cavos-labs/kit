@@ -1,8 +1,10 @@
 import { hash, num } from "starknet";
+import { sha256 } from "@noble/hashes/sha256";
 import type { ChainAdapter, ChainCall, ComputeAddressParams } from "../ChainAdapter";
 import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
 import { signatureToFelts } from "../../crypto/signature";
-import { u256ToFelts, bigIntTo32Bytes } from "../../crypto/encoding";
+import { u256ToFelts, bigIntTo32Bytes, bytesToByteArrayCalldata, bytesToBigInt } from "../../crypto/encoding";
+import type { PasskeyAssertion } from "../../crypto/webauthn";
 import { UDC_ADDRESS } from "./constants";
 
 export interface StarknetAdapterOptions {
@@ -76,6 +78,84 @@ export class StarknetAdapter implements ChainAdapter {
     if (!this.opts.signer) throw new Error("kit/starknet: signer required to sign");
     const sig = await this.opts.signer.sign(bigIntTo32Bytes(txHash));
     return signatureToFelts(sig).map((f) => num.toHex(f));
+  }
+
+  // --- passkey approvers ---
+
+  buildAddApprover(accountAddress: string, passkey: DevicePublicKey): ChainCall {
+    return { contractAddress: accountAddress, entrypoint: "add_approver", calldata: pubkeyCalldata(passkey) };
+  }
+
+  buildRemoveApprover(accountAddress: string, passkey: DevicePublicKey): ChainCall {
+    return { contractAddress: accountAddress, entrypoint: "remove_approver", calldata: pubkeyCalldata(passkey) };
+  }
+
+  async isApprover(accountAddress: string, passkey: DevicePublicKey): Promise<boolean> {
+    if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
+    const res = await this.opts.provider.callContract({
+      contractAddress: accountAddress,
+      entrypoint: "is_approver",
+      calldata: pubkeyCalldata(passkey),
+    });
+    return BigInt(res[0] ?? 0) !== 0n;
+  }
+
+  async getPasskeyNonce(accountAddress: string): Promise<bigint> {
+    if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
+    const res = await this.opts.provider.callContract({
+      contractAddress: accountAddress,
+      entrypoint: "get_passkey_nonce",
+      calldata: [],
+    });
+    return BigInt(res[0] ?? 0);
+  }
+
+  /** This chain's leaf for approving `add_signer(newSigner)` at `nonce`:
+   * `sha256(new_x || new_y || nonce)` (coords 32B BE, nonce 16B BE). The batch
+   * challenge the passkey signs is `sha256(concat(leaves))` across chains. */
+  passkeyLeaf(newSigner: DevicePublicKey, nonce: bigint): Uint8Array {
+    const msg = new Uint8Array(32 + 32 + 16);
+    msg.set(bigIntTo32Bytes(newSigner.x), 0);
+    msg.set(bigIntTo32Bytes(newSigner.y), 32);
+    msg.set(bigIntTo32Bytes(nonce).subarray(16), 64); // low 16 bytes = u128 BE
+    return sha256(msg);
+  }
+
+  /** Passkey-authorized `add_signer` call. `leaves`/`leafIndex` place this chain's
+   * leaf in the multi-chain batch (single chain → `[leaf]`, index 0). `yParity`
+   * matches the raw `(r, s)` — the contract normalizes high-S internally. */
+  buildAddSignerViaPasskey(
+    accountAddress: string,
+    newSigner: DevicePublicKey,
+    nonce: bigint,
+    leaves: Uint8Array[],
+    leafIndex: number,
+    assertion: PasskeyAssertion,
+    yParity: boolean,
+  ): ChainCall {
+    const [rl, rh] = u256ToFelts(assertion.r);
+    const [sl, sh] = u256ToFelts(assertion.s);
+    const leavesCalldata: string[] = [String(leaves.length)];
+    for (const leaf of leaves) {
+      const [lo, hi] = u256ToFelts(bytesToBigInt(leaf));
+      leavesCalldata.push(num.toHex(lo), num.toHex(hi));
+    }
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "add_signer_via_passkey",
+      calldata: [
+        ...pubkeyCalldata(newSigner), // new_x, new_y (u256 pairs)
+        num.toHex(nonce),
+        ...leavesCalldata, // Array<u256> leaves
+        String(leafIndex),
+        ...bytesToByteArrayCalldata(assertion.authenticatorData),
+        ...bytesToByteArrayCalldata(assertion.clientDataJSON),
+        String(assertion.challengeOffset),
+        num.toHex(rl), num.toHex(rh),
+        num.toHex(sl), num.toHex(sh),
+        yParity ? "0x1" : "0x0",
+      ],
+    };
   }
 }
 

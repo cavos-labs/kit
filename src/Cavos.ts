@@ -1,4 +1,4 @@
-import { Account, RpcProvider, PaymasterRpc, num, type Call } from "starknet";
+import { Account, RpcProvider, PaymasterRpc, hash, num, type Call } from "starknet";
 import type { Keypair } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
@@ -8,6 +8,10 @@ import { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
 import { CavosSolana } from "./chains/solana/CavosSolana";
 import type { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 import type { SolanaNetwork } from "./chains/solana/constants";
+import { CavosStellar } from "./chains/stellar/CavosStellar";
+import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
+import type { StellarNetwork } from "./chains/stellar/constants";
+import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
 import type { ChainCall } from "./chains/ChainAdapter";
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
@@ -16,6 +20,9 @@ import type { RecoveryClient } from "./recovery/RecoveryClient";
 import { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
 import { BackupSigner, deriveBackupKey } from "./recovery/BackupSigner";
 import { deriveAddressSeed } from "./identity";
+import type { PasskeySigner, PasskeyEnrollParams } from "./signer/PasskeySigner";
+import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "./crypto/webauthn";
+import type { PasskeyAssertion } from "./crypto/webauthn";
 import {
   CAVOS_PAYMASTER_URL,
   DEVICE_ACCOUNT_CLASS_HASH,
@@ -24,7 +31,7 @@ import {
 } from "./chains/starknet/constants";
 
 /** The chains the unified `Cavos.connect` can target. */
-export type Chain = "starknet" | "solana";
+export type Chain = "starknet" | "solana" | "stellar";
 
 /**
  * Environment selector. `Cavos.connect` resolves it to the chain's concrete
@@ -41,9 +48,13 @@ const SOLANA_ENV: Record<NetworkEnv, SolanaNetwork> = {
   mainnet: "solana-mainnet",
   testnet: "solana-devnet",
 };
+const STELLAR_ENV: Record<NetworkEnv, StellarNetwork> = {
+  mainnet: "stellar-mainnet",
+  testnet: "stellar-testnet",
+};
 
 /** A connected wallet: discriminated by `chain`, so `execute()` stays native. */
-export type CavosWallet = Cavos | CavosSolana;
+export type CavosWallet = Cavos | CavosSolana | CavosStellar;
 
 export interface ConnectOptions {
   /** Target chain. The returned wallet is discriminated by this same value. */
@@ -89,6 +100,14 @@ export interface ConnectOptions {
   relayer?: SolanaRelayer;
   /** Self-funded fee-payer fallback when no relayer is configured. */
   feePayer?: Keypair;
+
+  // --- Stellar-only ---
+  /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
+  stellarRelayer?: StellarRelayer;
+  /** Self-funded source/fee-payer Stellar keypair when no relayer is configured. */
+  stellarSourceKeypair?: StellarKeypair;
+  /** Factory contract id override (else the per-network default). */
+  factoryId?: string;
 }
 
 /** The Starknet-specific connect options, resolved from the unified ones. */
@@ -157,6 +176,8 @@ export class Cavos {
     readonly account: Account,
     private readonly adapter: StarknetAdapter,
     private readonly devicePubkey: DevicePublicKey,
+    /** Paymaster URL + API key, for the sponsored passkey-approval path. */
+    private readonly paymaster?: { url: string; apiKey?: string },
   ) {}
 
   /**
@@ -184,6 +205,22 @@ export class Cavos {
         ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
         ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
+      });
+    }
+    if (opts.chain === "stellar") {
+      return CavosStellar.connect({
+        network: STELLAR_ENV[opts.network],
+        ...(opts.auth ? { auth: opts.auth } : {}),
+        ...(opts.identity ? { identity: opts.identity } : {}),
+        appSalt: opts.appSalt,
+        ...(opts.appId ? { appId: opts.appId } : {}),
+        ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
+        ...(opts.registry ? { registry: opts.registry } : {}),
+        ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
+        ...(opts.factoryId ? { factoryId: opts.factoryId } : {}),
+        ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
+        ...(opts.stellarRelayer ? { relayer: opts.stellarRelayer } : {}),
+        ...(opts.stellarSourceKeypair ? { sourceKeypair: opts.stellarSourceKeypair } : {}),
       });
     }
     if (!opts.paymasterApiKey) {
@@ -216,8 +253,10 @@ export class Cavos {
     const provider = new RpcProvider({
       nodeUrl: opts.rpcUrl ?? STARKNET_NETWORKS[opts.network].rpcUrl,
     });
+    const paymasterUrl = opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[opts.network];
+    const paymasterConfig = { url: paymasterUrl, apiKey: opts.paymasterApiKey };
     const paymaster = new PaymasterRpc({
-      nodeUrl: opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[opts.network],
+      nodeUrl: paymasterUrl,
       headers: { "x-paymaster-api-key": opts.paymasterApiKey },
     });
 
@@ -262,6 +301,7 @@ export class Cavos {
         account,
         adapter,
         devicePubkey,
+        paymasterConfig,
       );
 
       // New device on an existing wallet: ask the backend to email the owner an
@@ -350,6 +390,7 @@ export class Cavos {
       account,
       adapter,
       devicePubkey,
+      paymasterConfig,
     );
   }
 
@@ -372,6 +413,103 @@ export class Cavos {
   /** Authorize an additional device signer (sponsored). Self-submitted. */
   async addSigner(pubkey: DevicePublicKey): Promise<{ transactionHash: string }> {
     return this.execute([this.adapter.buildAddSigner(this.address, pubkey)]);
+  }
+
+  /**
+   * Enroll a passkey as an APPROVER so the user can later add devices from any
+   * browser (2FA-style step-up). Requires a ready device (the enrollment call is
+   * device-signed and gasless). Idempotent: a no-op if the passkey is already an
+   * approver. Call this whenever the app decides to prompt "turn on device
+   * approvals". Returns the passkey's public key + the enrollment tx hash.
+   */
+  async enrollPasskey(
+    passkey: PasskeySigner,
+    params: PasskeyEnrollParams,
+  ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
+    const enrolled = await passkey.enroll(params);
+    const { transactionHash } = await this.addApprover(enrolled.publicKey);
+    return { publicKey: enrolled.publicKey, transactionHash };
+  }
+
+  /**
+   * Register an ALREADY-enrolled passkey public key as an approver (gasless,
+   * device-signed). Idempotent. Use this to register ONE passkey across multiple
+   * chains without re-prompting `passkey.enroll()` on each: enroll once, then
+   * call `addApprover(pubkey)` on each chain's wallet.
+   */
+  async addApprover(pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
+    if (this.status !== "ready") {
+      throw new Error("kit: addApprover requires a ready, authorized device");
+    }
+    if (await this.adapter.isApprover(this.address, pubkey)) return {};
+    const { transactionHash } = await this.execute([
+      this.adapter.buildAddApprover(this.address, pubkey),
+    ]);
+    return { transactionHash };
+  }
+
+  /**
+   * From a brand-new browser (status `needs-device-approval`), use the user's
+   * synced passkey to authorize adding THIS device — no trip back to an already-
+   * authorized device.
+   *
+   * `add_signer_via_passkey` is a public external authorized by the embedded
+   * WebAuthn assertion (no device signature), so by default we sponsor it through
+   * the Cavos paymaster's `paymaster_executeDirectTransaction` (the forwarder's
+   * `execute_sponsored` runs a generic call — it does NOT require SNIP-9). Pass a
+   * custom `submit` to route it through your own relayer instead. Returns the tx.
+   */
+  async approveThisDeviceWithPasskey(opts: {
+    passkey: PasskeySigner;
+    submit?: (call: ChainCall) => Promise<{ transactionHash: string }>;
+  }): Promise<{ transactionHash: string }> {
+    if (this.status === "ready") {
+      throw new Error("kit: this device is already an authorized signer");
+    }
+    const { leaf, nonce } = await this.passkeyLeafForThisDevice();
+    const leaves = [leaf];
+    const assertion = await opts.passkey.assert(batchChallenge(leaves));
+    return this.submitPasskeyApproval(assertion, leaves, 0, nonce, opts.submit);
+  }
+
+  /** This device's leaf + the current passkey nonce, for a (possibly multi-chain)
+   * passkey approval batch. See `approveDeviceEverywhere`. */
+  async passkeyLeafForThisDevice(): Promise<{ leaf: Uint8Array; nonce: bigint }> {
+    const nonce = await this.adapter.getPasskeyNonce(this.address);
+    return { leaf: this.adapter.passkeyLeaf(this.devicePubkey, nonce), nonce };
+  }
+
+  /** Submit `add_signer_via_passkey` given a (shared) assertion + this chain's
+   * position in the batch. The assertion doesn't carry the passkey pubkey, so we
+   * recover both candidates and pick the enrolled approver via the on-chain view
+   * (no backend). Defaults to sponsoring through the paymaster. */
+  async submitPasskeyApproval(
+    assertion: PasskeyAssertion,
+    leaves: Uint8Array[],
+    leafIndex: number,
+    nonce: bigint,
+    submit?: (call: ChainCall) => Promise<{ transactionHash: string }>,
+  ): Promise<{ transactionHash: string }> {
+    const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
+    const candidates = recoverCandidatePublicKeys(assertion.r, assertion.s, digest);
+    let yParity: boolean | null = null;
+    for (const cand of candidates) {
+      if (await this.adapter.isApprover(this.address, cand.publicKey)) {
+        yParity = cand.yParity;
+        break;
+      }
+    }
+    if (yParity === null) {
+      throw new Error("kit: this passkey is not a registered approver of the wallet");
+    }
+    const call = this.adapter.buildAddSignerViaPasskey(
+      this.address, this.devicePubkey, nonce, leaves, leafIndex, assertion, yParity,
+    );
+    if (submit) return submit(call);
+    if (!this.paymaster) {
+      throw new Error("kit: no paymaster configured — pass a `submit` relayer to approveThisDeviceWithPasskey");
+    }
+    return paymasterExecuteDirect(this.paymaster, this.address, call);
   }
 
   /**
@@ -494,4 +632,94 @@ async function isDeployed(provider: RpcProvider, address: string): Promise<boole
   } catch {
     return false;
   }
+}
+
+/** A chain wallet that can approve THIS device via a passkey (implemented by
+ * `Cavos`, `CavosSolana`, `CavosStellar`). */
+export interface PasskeyApprovable {
+  readonly chain: string;
+  readonly status: string;
+  passkeyLeafForThisDevice(): Promise<{ leaf: Uint8Array; nonce: bigint }>;
+  submitPasskeyApproval(
+    assertion: PasskeyAssertion,
+    leaves: Uint8Array[],
+    leafIndex: number,
+    nonce: bigint,
+  ): Promise<{ transactionHash: string }>;
+}
+
+/**
+ * Approve THIS device across several chains with a SINGLE passkey prompt. Each
+ * chain is a separate account, so the device must be added per chain — but one
+ * WebAuthn assertion over the batch challenge (`sha256(concat(leaves))`) suffices
+ * for all of them. Only wallets whose status is `needs-device-approval` are
+ * touched. Returns the per-chain tx hashes.
+ *
+ *   await approveDeviceEverywhere([starknet, solana, stellar], passkey);
+ */
+export async function approveDeviceEverywhere(
+  wallets: PasskeyApprovable[],
+  passkey: PasskeySigner,
+): Promise<{ chain: string; transactionHash: string }[]> {
+  const targets = wallets.filter((w) => w.status === "needs-device-approval");
+  if (targets.length === 0) return [];
+  const infos = await Promise.all(targets.map((w) => w.passkeyLeafForThisDevice()));
+  const leaves = infos.map((i) => i.leaf);
+  // ONE prompt: the passkey signs the batch challenge over every chain's leaf.
+  const assertion = await passkey.assert(batchChallenge(leaves));
+  const out: { chain: string; transactionHash: string }[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const { transactionHash } = await targets[i].submitPasskeyApproval(
+      assertion, leaves, i, infos[i].nonce,
+    );
+    out.push({ chain: targets[i].chain, transactionHash });
+  }
+  return out;
+}
+
+/**
+ * Sponsor a single call through the Cavos paymaster's `paymaster_executeDirectTransaction`
+ * (AVNU-fork extension). In sponsored mode the forwarder runs a generic
+ * `call_contract_syscall` (no SNIP-9 / device signature required), so the
+ * passkey-authorized `add_signer_via_passkey` external is paid for by the
+ * paymaster's relayer. The account's on-chain check (approver membership +
+ * challenge binding) is the real authorization.
+ */
+async function paymasterExecuteDirect(
+  paymaster: { url: string; apiKey?: string },
+  userAddress: string,
+  call: ChainCall,
+): Promise<{ transactionHash: string }> {
+  const body = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "paymaster_executeDirectTransaction",
+    params: {
+      transaction: {
+        type: "invoke",
+        invoke: {
+          user_address: userAddress,
+          execute_from_outside_call: {
+            to: call.contractAddress,
+            selector: hash.getSelectorFromName(call.entrypoint),
+            calldata: call.calldata.map((c) => num.toHex(c)),
+          },
+        },
+      },
+      parameters: { version: "0x1", fee_mode: { mode: "sponsored" } },
+    },
+  };
+  const res = await fetch(paymaster.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(paymaster.apiKey ? { "x-paymaster-api-key": paymaster.apiKey } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.error) {
+    throw new Error(`kit: paymaster passkey approval failed: ${JSON.stringify(json.error)}`);
+  }
+  return { transactionHash: json.result?.transaction_hash ?? json.result?.tracking_id };
 }

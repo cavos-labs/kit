@@ -18,6 +18,9 @@ import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
+import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySigner";
+import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
+import type { PasskeyAssertion } from "../../crypto/webauthn";
 
 export interface ConnectSolanaOptions {
   network: SolanaNetwork;
@@ -205,6 +208,77 @@ export class CavosSolana {
   async addSigner(pubkey: DevicePublicKey): Promise<string> {
     const ixs = await this.adapter.buildAddSigner(this.address, pubkey);
     return this.send(ixs);
+  }
+
+  /**
+   * Enroll a passkey as an approver (2FA-style step-up). Device-signed + gasless;
+   * requires a ready device. Idempotent. Returns the passkey pubkey + tx hash.
+   */
+  async enrollPasskey(
+    passkey: PasskeySigner,
+    params: PasskeyEnrollParams,
+  ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
+    const enrolled = await passkey.enroll(params);
+    const { transactionHash } = await this.addApprover(enrolled.publicKey);
+    return { publicKey: enrolled.publicKey, transactionHash };
+  }
+
+  /** Register an already-enrolled passkey pubkey as an approver (gasless).
+   * Idempotent. Lets one passkey be registered across chains without re-prompting. */
+  async addApprover(pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: addApprover requires a ready, authorized device");
+    }
+    if (await this.adapter.isApprover(this.address, pubkey)) return {};
+    const ixs = await this.adapter.buildAddApprover(this.address, pubkey);
+    const transactionHash = await this.send(ixs);
+    return { transactionHash };
+  }
+
+  /**
+   * From a fresh browser (status `needs-device-approval`), approve adding THIS
+   * device with the user's synced passkey. Gasless via the relayer — the bundle
+   * carries the passkey's WebAuthn assertion, so no device signature is needed.
+   */
+  async approveThisDeviceWithPasskey(passkey: PasskeySigner): Promise<string> {
+    if (this.status === "ready") {
+      throw new Error("kit/solana: this device is already an authorized signer");
+    }
+    const { leaf, nonce } = await this.passkeyLeafForThisDevice();
+    const leaves = [leaf];
+    const assertion = await passkey.assert(batchChallenge(leaves));
+    const { transactionHash } = await this.submitPasskeyApproval(assertion, leaves, 0, nonce);
+    return transactionHash;
+  }
+
+  /** This device's leaf + passkey nonce for a (possibly multi-chain) batch. */
+  async passkeyLeafForThisDevice(): Promise<{ leaf: Uint8Array; nonce: bigint }> {
+    const nonce = await this.adapter.passkeyNonce(this.address);
+    return { leaf: this.adapter.passkeyLeaf(this.devicePubkey, nonce), nonce };
+  }
+
+  /** Submit `add_signer_via_passkey` given a shared assertion + batch position.
+   * Used by `approveThisDeviceWithPasskey` and `approveDeviceEverywhere`. */
+  async submitPasskeyApproval(
+    assertion: PasskeyAssertion,
+    leaves: Uint8Array[],
+    leafIndex: number,
+    _nonce: bigint,
+  ): Promise<{ transactionHash: string }> {
+    const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
+    const candidates = recoverCandidatePublicKeys(assertion.r, assertion.s, digest);
+    let approver: DevicePublicKey | null = null;
+    for (const cand of candidates) {
+      if (await this.adapter.isApprover(this.address, cand.publicKey)) {
+        approver = cand.publicKey;
+        break;
+      }
+    }
+    if (!approver) throw new Error("kit/solana: this passkey is not a registered approver");
+    const ixs = this.adapter.buildAddSignerViaPasskey(
+      this.address, this.devicePubkey, approver, leaves, leafIndex, assertion,
+    );
+    return { transactionHash: await this.send(ixs) };
   }
 
   /** Move `amount` lamports out of the account to `destination` (device-signed). */

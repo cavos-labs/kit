@@ -9,4 +9,12 @@ module.exports = {
   moduleNameMapper: {
     "^uuid$": "<rootDir>/node_modules/uuid/dist/index.js",
   },
+  // @stellar/stellar-sdk (even its CJS build) transitively imports @noble/hashes
+  // v2, which ships ESM-only. Transform those packages instead of ignoring them.
+  transform: {
+    "^.+\\.[tj]sx?$": ["ts-jest", { isolatedModules: true, tsconfig: { allowJs: true } }],
+  },
+  transformIgnorePatterns: [
+    "node_modules/(?!(@stellar/stellar-sdk|@noble|uint8array-extras)/)",
+  ],
 };
