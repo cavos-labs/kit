@@ -78,6 +78,8 @@ export type ConnectStatus = "ready" | "needs-device-approval";
 export class CavosStellar {
   /** Discriminant for the `CavosWallet` union — narrows `execute()` per chain. */
   readonly chain = "stellar" as const;
+  /** True when this connect just created a brand-new account (first sign-up). */
+  isNewAccount = false;
 
   private constructor(
     readonly identity: Identity,
@@ -142,7 +144,8 @@ export class CavosStellar {
     }
 
     const address = adapter.computeAddress(addressSeed, devicePubkey);
-    if (!(await adapter.isDeployed(address))) {
+    const wasDeployed = await adapter.isDeployed(address);
+    if (!wasDeployed) {
       const func = adapter.buildDeploy(addressSeed, devicePubkey);
       // Deploy needs NO device auth (factory deploys; account doesn't exist yet),
       // so `authAccount` is undefined — nothing to sign, just the relayer/self pays.
@@ -151,7 +154,10 @@ export class CavosStellar {
 
     await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
     const isSigner = await adapter.isAuthorizedSigner(address, devicePubkey, readSource);
-    return build(address, isSigner ? "ready" : "needs-device-approval");
+    const wallet = build(address, isSigner ? "ready" : "needs-device-approval");
+    // First sign-up: a fresh deploy that made this device an authorized signer.
+    wallet.isNewAccount = !wasDeployed && isSigner;
+    return wallet;
   }
 
   /** Authorize an additional device signer (device-signed via `__check_auth`). */
@@ -184,6 +190,20 @@ export class CavosStellar {
     const func = this.adapter.buildAddApprover(this.address, pubkey);
     const transactionHash = await this.submitHostFunction(func, this.address);
     return { transactionHash };
+  }
+
+  /** True if this account already has a passkey enrolled as an approver, so a
+   * new device can be approved with the passkey instead of the email flow. */
+  async hasPasskey(): Promise<boolean> {
+    const readSource = await this.resolveSource();
+    return this.adapter.hasPasskeyApprover(this.address, readSource);
+  }
+
+  /** Re-read (from chain) whether THIS device is now an authorized signer.
+   * Used to poll for readiness after a passkey approval before it's indexed. */
+  async isReady(): Promise<boolean> {
+    const readSource = await this.resolveSource();
+    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey, readSource);
   }
 
   /**

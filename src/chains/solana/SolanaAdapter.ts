@@ -253,6 +253,12 @@ export class SolanaAdapter {
   }
 
   /** Read whether `passkey` is a registered approver. */
+  /** True if the account has at least one passkey registered as an approver. */
+  async hasPasskeyApprover(account: string): Promise<boolean> {
+    const approvers = await this.fetchApprovers(new PublicKey(account));
+    return approvers.length > 0;
+  }
+
   async isApprover(account: string, passkey: DevicePublicKey): Promise<boolean> {
     const approvers = await this.fetchApprovers(new PublicKey(account));
     const target = Buffer.from(compressedPubkey(passkey)).toString("hex");

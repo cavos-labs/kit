@@ -100,6 +100,18 @@ export class StarknetAdapter implements ChainAdapter {
     return BigInt(res[0] ?? 0) !== 0n;
   }
 
+  /** True if the account has at least one passkey registered as an approver.
+   * Lets the UI decide whether to offer passkey approval before prompting. */
+  async hasPasskeyApprover(accountAddress: string): Promise<boolean> {
+    if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
+    const res = await this.opts.provider.callContract({
+      contractAddress: accountAddress,
+      entrypoint: "get_approver_count",
+      calldata: [],
+    });
+    return BigInt(res[0] ?? 0) > 0n;
+  }
+
   async getPasskeyNonce(accountAddress: string): Promise<bigint> {
     if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
     const res = await this.opts.provider.callContract({

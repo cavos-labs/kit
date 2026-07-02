@@ -26,7 +26,17 @@ export interface CavosAuthModalProps {
 
 const cavosLogoBase64 = "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";
 
-type Screen = 'select' | 'magic-link' | 'verify' | 'otp-code' | 'deploying' | 'device-approval' | 'recover';
+type Screen =
+  | 'select'
+  | 'magic-link'
+  | 'verify'
+  | 'otp-code'
+  | 'deploying'
+  | 'device-approval'
+  | 'passkey-approval'
+  | 'recover'
+  | 'secure-account'
+  | 'recovery-code';
 
 // ─── Style injection ──────────────────────────────────────────────────────────
 
@@ -144,6 +154,22 @@ const EmailIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <rect x="2" y="4" width="20" height="16" rx="2"/>
     <path d="m22 7-8.97 5.7a1.94 1.94 0 01-2.06 0L2 7"/>
+  </svg>
+);
+
+// Clean monochrome fingerprint (Lucide). Inherits the surrounding ink color so
+// it stays on-brand in both themes — no colored circles.
+const FingerprintIcon = ({ size = 22, color = 'currentColor' }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4" />
+    <path d="M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2" />
+    <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" />
+    <path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" />
+    <path d="M8.65 22c.21-.66.45-1.32.57-2" />
+    <path d="M14 13.12c0 2.38 0 6.38-1 8.88" />
+    <path d="M2 16h.01" />
+    <path d="M21.8 16c.2-2 .131-5.354 0-6" />
+    <path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2" />
   </svg>
 );
 
@@ -292,6 +318,10 @@ export function CavosAuthModal({
     clearAuthError,
     resendDeviceApproval,
     recover,
+    passkeySupported,
+    enrollPasskeyDefault,
+    approveDeviceWithPasskey,
+    setupRecovery,
   } = useCavos();
   const isMobile = useIsMobile();
 
@@ -322,8 +352,16 @@ export function CavosAuthModal({
   const [deviceResendBusy, setDeviceResendBusy] = useState(false);
   const [recoverCode, setRecoverCode] = useState('');
   const [recoverBusy, setRecoverBusy] = useState(false);
+  // Passkey / account-security flows (new-device approval + first-time upsell).
+  const [pkBusy, setPkBusy] = useState(false);
+  const [pkError, setPkError] = useState('');
+  const [savedRecoveryCode, setSavedRecoveryCode] = useState('');
+  const [copied, setCopied] = useState(false);
 
   const doneHandledRef = useRef(false);
+  // True once the first-time "secure your account" step has been shown & handled
+  // (completed or skipped) this session, so we don't loop back into it.
+  const secureHandledRef = useRef(false);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // One ref per OTP box for focus management / auto-advance.
   const otpBoxRefs = useRef<Array<HTMLInputElement | null>>([null, null, null, null, null, null]);
@@ -398,6 +436,7 @@ export function CavosAuthModal({
       setDeployState('loading');
       setEmail(''); setOtpCode(''); setError('');
       doneHandledRef.current = false;
+      secureHandledRef.current = false;
     }, 1600);
     // addr unused beyond guarding the transition; keep the param for clarity.
     void addr;
@@ -416,17 +455,39 @@ export function CavosAuthModal({
     }
 
     if (isAuthenticated && address && walletStatus.isReady) {
-      triggerDone(address);
+      // First sign-up: offer a one-time "secure your account" step (passkey /
+      // recovery phrase) before finishing. Stay put once we've shown it.
+      if (walletStatus.isNewAccount && !secureHandledRef.current) {
+        if (screen !== 'secure-account' && screen !== 'recovery-code' && !doneHandledRef.current) {
+          setScreen('secure-account');
+        }
+      } else {
+        triggerDone(address);
+      }
     }
 
-    // This device needs approval: show the "check your email" screen. Don't
-    // override the recover screen — the user navigated there intentionally from
-    // device-approval to restore access with their recovery phrase.
-    if (walletStatus.awaitingApproval && screen !== 'device-approval' && screen !== 'recover') {
-      setScreen('device-approval');
-      doneHandledRef.current = false;
+    // This device needs approval. If the account has a passkey enrolled, offer
+    // the passkey path (works on any browser); otherwise fall back to the email
+    // approval flow. Don't override the recover screen — the user navigated there
+    // intentionally to restore access with their recovery phrase.
+    if (
+      walletStatus.needsDeviceApproval &&
+      // A deploy in progress owns the screen; never fight the deploying branch
+      // above (both flags true would oscillate deploying ↔ approval → loop).
+      !walletStatus.isDeploying &&
+      screen !== 'recover' &&
+      screen !== 'device-approval' &&
+      screen !== 'passkey-approval'
+    ) {
+      if (walletStatus.hasPasskey && passkeySupported) {
+        setScreen('passkey-approval');
+        doneHandledRef.current = false;
+      } else if (walletStatus.awaitingApproval) {
+        setScreen('device-approval');
+        doneHandledRef.current = false;
+      }
     }
-  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, screen, triggerDone]);
+  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, passkeySupported, screen, triggerDone]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
@@ -435,8 +496,67 @@ export function CavosAuthModal({
   const handleClose = () => {
     if (screen === 'deploying') return;
     setScreen('select'); setEmail(''); setOtpCode(''); setError('');
+    setPkError(''); setSavedRecoveryCode(''); setCopied(false);
     doneHandledRef.current = false;
+    secureHandledRef.current = false;
     onClose();
+  };
+
+  // ── Passkey / account-security handlers ────────────────────────────────────
+
+  const finishSecureStep = () => {
+    secureHandledRef.current = true;
+    if (address) triggerDone(address);
+  };
+
+  const handleSetupPasskey = async () => {
+    setPkBusy(true); setPkError('');
+    try {
+      await enrollPasskeyDefault();
+      finishSecureStep();
+    } catch (e: unknown) {
+      setPkError(e instanceof Error ? e.message : "We couldn't set up your passkey. Try again.");
+    } finally {
+      setPkBusy(false);
+    }
+  };
+
+  const handleSaveRecovery = async () => {
+    setPkBusy(true); setPkError('');
+    try {
+      const code = await setupRecovery();
+      setSavedRecoveryCode(code);
+      setScreen('recovery-code');
+    } catch (e: unknown) {
+      setPkError(e instanceof Error ? e.message : "We couldn't create your recovery phrase. Try again.");
+    } finally {
+      setPkBusy(false);
+    }
+  };
+
+  const handleCopyRecovery = async () => {
+    try {
+      await navigator.clipboard.writeText(savedRecoveryCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard blocked — the user can still select the text manually */
+    }
+  };
+
+  const handlePasskeyApprove = async () => {
+    setPkBusy(true); setPkError('');
+    try {
+      await approveDeviceWithPasskey();
+      // approveDeviceWithPasskey reconnects → walletStatus flips to ready and the
+      // status effect drives the "deploying" → done transition. Always drop the
+      // busy flag so we never freeze on "Verifying…" if the modal lands back on
+      // the passkey screen (e.g. on-chain indexing lag) — the user can retry.
+      setPkBusy(false);
+    } catch (e: unknown) {
+      setPkError(e instanceof Error ? e.message : "We couldn't verify your passkey. Try again or use email.");
+      setPkBusy(false);
+    }
   };
 
   const handleOAuth = async (provider: 'google' | 'apple') => {
@@ -534,6 +654,131 @@ export function CavosAuthModal({
     }
   };
 
+  // ── Secure your account (one-time, first sign-up) ─────────────────────────
+
+  if (screen === 'secure-account') {
+    return (
+      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div style={{ ...card, position: 'relative' }}>
+          {isMobile && <div style={handle} />}
+          <div style={{ padding: isMobile ? '28px 24px 28px' : '44px 24px 28px', textAlign: 'center' }}>
+            <div style={{ width: 48, height: 48, borderRadius: '50%', margin: '0 auto 16px', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={textColor} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+            </div>
+            <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
+              Keep your account safe
+            </h2>
+            <p style={{ margin: '0 0 24px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
+              Set up a passkey so you can sign in on a new phone or computer in one tap. It takes a few seconds.
+            </p>
+            {pkError && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px', textAlign: 'left' }}>{pkError}</div>}
+
+            {passkeySupported ? (
+              <>
+                <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: '12px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s, transform 0.1s' }} onClick={handleSetupPasskey} disabled={pkBusy}>
+                  {pkBusy ? <Spinner size={16} color="#fff" /> : <FingerprintIcon size={18} color="#fff" />}
+                  {pkBusy ? 'Setting up…' : 'Set up a passkey'}
+                </button>
+                <p style={{ margin: '10px 0 0', fontSize: '12px', color: subTextColor, lineHeight: 1.5 }}>
+                  Uses Face ID, Touch ID, or your device PIN.
+                </p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '18px 0' }}>
+                  <span className="cavos-divider-line" style={{ background: isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)' }} />
+                  <span style={{ fontSize: '11px', color: subTextColor, textTransform: 'uppercase', letterSpacing: '0.06em' }}>or</span>
+                  <span className="cavos-divider-line" style={{ background: isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)' }} />
+                </div>
+                <button className="cavos-submit-btn" style={{ width: '100%', padding: '12px', borderRadius: '12px', border: inputBorder, background: 'transparent', color: textColor, fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'background 0.15s', opacity: pkBusy ? 0.6 : 1 }} onClick={handleSaveRecovery} disabled={pkBusy}>
+                  Save a recovery phrase instead
+                </button>
+              </>
+            ) : (
+              <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: '12px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s' }} onClick={handleSaveRecovery} disabled={pkBusy}>
+                {pkBusy && <Spinner size={16} color="#fff" />}
+                {pkBusy ? 'Setting up…' : 'Save a recovery phrase'}
+              </button>
+            )}
+
+            <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: pkBusy ? 'default' : 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '18px 0 0', fontFamily: 'inherit', transition: 'color 0.15s', opacity: pkBusy ? 0.6 : 1 }} onClick={finishSecureStep} disabled={pkBusy}>
+              Skip for now
+            </button>
+          </div>
+          <div style={footer}><CavosLogo invert={!isLight} /><span>Secured by Cavos</span></div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Recovery phrase reveal (save it once) ─────────────────────────────────
+
+  if (screen === 'recovery-code') {
+    return (
+      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div style={{ ...card, position: 'relative' }}>
+          {isMobile && <div style={handle} />}
+          <div style={{ padding: isMobile ? '28px 24px 28px' : '44px 24px 28px', textAlign: 'center' }}>
+            <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
+              Save your recovery phrase
+            </h2>
+            <p style={{ margin: '0 0 18px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
+              Write this down and keep it somewhere safe. It's the only way to get back in if you lose your devices, and we can't recover it for you.
+            </p>
+            <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.05)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'}`, borderRadius: '12px', padding: '16px', marginBottom: '12px', fontSize: '14px', fontWeight: 500, color: textColor, wordBreak: 'break-word', lineHeight: 1.6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAlign: 'center' }}>
+              {savedRecoveryCode}
+            </div>
+            <button className="cavos-provider" style={{ ...pBtn, marginBottom: '10px' }} onClick={handleCopyRecovery}>
+              <span>{copied ? 'Copied ✓' : 'Copy to clipboard'}</span>
+            </button>
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '12px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s' }} onClick={finishSecureStep}>
+              I've saved it
+            </button>
+          </div>
+          <div style={footer}><CavosLogo invert={!isLight} /><span>Secured by Cavos</span></div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Passkey approval (returning user, new device, passkey enrolled) ───────
+
+  if (screen === 'passkey-approval') {
+    return (
+      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div style={{ ...card, position: 'relative' }}>
+          {isMobile && <div style={handle} />}
+          <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
+          <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
+            <div style={{ width: 48, height: 48, borderRadius: '50%', margin: '0 auto 16px', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <FingerprintIcon size={24} color={textColor} />
+            </div>
+            <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
+              Verify it's you
+            </h2>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
+              Confirm with Face ID, Touch ID, or your device PIN to add this device to your account.
+            </p>
+            {pkError && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{pkError}</div>}
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '12px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: pkBusy ? 0.65 : 1 }} onClick={handlePasskeyApprove} disabled={pkBusy}>
+              {pkBusy && <Spinner size={15} color="#fff" />}
+              {pkBusy ? 'Verifying…' : 'Continue with passkey'}
+            </button>
+            {walletStatus.awaitingApproval && (
+              <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '16px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('device-approval'); setPkError(''); }}>
+                Approve by email instead
+              </button>
+            )}
+            <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: `${walletStatus.awaitingApproval ? '10px' : '16px'} 0 0`, fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('recover'); setPkError(''); }}>
+              Use a recovery phrase
+            </button>
+          </div>
+          <div style={footer}><CavosLogo invert={!isLight} /><span>Secured by Cavos</span></div>
+        </div>
+      </div>
+    );
+  }
+
   if (screen === 'device-approval') {
     // The provider nulls pendingRequestId when the request expires (while the
     // device is still awaiting approval) — that's our signal to switch copy.
@@ -608,7 +853,7 @@ export function CavosAuthModal({
       <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
         <div style={{ ...card, position: 'relative' }}>
           {isMobile && <div style={handle} />}
-          <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen('device-approval'); setError(''); setRecoverCode(''); }} aria-label="Back">
+          <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen(walletStatus.hasPasskey && passkeySupported ? 'passkey-approval' : 'device-approval'); setError(''); setRecoverCode(''); }} aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
           </button>
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>

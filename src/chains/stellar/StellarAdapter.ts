@@ -176,6 +176,29 @@ export class StellarAdapter {
   }
 
   /** Read whether `passkey` is a registered approver (read-only simulation). */
+  /** True if the account has at least one passkey registered as an approver.
+   * Reads the contract's `approvers` view and checks the list is non-empty. */
+  async hasPasskeyApprover(accountAddress: string, readSource: string): Promise<boolean> {
+    if (!(await this.isDeployed(accountAddress))) return false;
+    const { Account, TransactionBuilder, BASE_FEE } = await import("@stellar/stellar-sdk");
+    const src = new Account(readSource, "0");
+    const op = Operation.invokeHostFunction({
+      func: invokeFunc(accountAddress, "approvers", []),
+      auth: [],
+    });
+    const tx = new TransactionBuilder(src, { fee: BASE_FEE, networkPassphrase: this.passphrase })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
+    const sim = await this.server().simulateTransaction(tx);
+    if (rpc.Api.isSimulationError(sim)) {
+      throw new Error(`kit/stellar: approvers simulation failed: ${sim.error}`);
+    }
+    if (!sim.result?.retval) return false;
+    const list = scValToNative(sim.result.retval) as unknown[];
+    return Array.isArray(list) && list.length > 0;
+  }
+
   async isApprover(
     accountAddress: string,
     passkey: DevicePublicKey,

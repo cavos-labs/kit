@@ -168,6 +168,9 @@ export class Cavos {
   readonly chain = "starknet" as const;
   /** Request id of the pending device-addition, when status is needs-device-approval. */
   pendingRequestId: string | null = null;
+  /** True when this connect just created & deployed a brand-new account (first
+   * sign-up), so the UI can offer a one-time "secure your account" step. */
+  isNewAccount = false;
 
   private constructor(
     readonly identity: Identity,
@@ -383,7 +386,7 @@ export class Cavos {
       isSigner = !alreadyDeployed;
     }
 
-    return new Cavos(
+    const cavos = new Cavos(
       identity,
       address,
       isSigner ? "ready" : "needs-device-approval",
@@ -392,6 +395,9 @@ export class Cavos {
       devicePubkey,
       paymasterConfig,
     );
+    // First sign-up: a fresh deploy that made this device an authorized signer.
+    cavos.isNewAccount = !alreadyDeployed && isSigner;
+    return cavos;
   }
 
   /** This device's public key (e.g. to request addition to an existing wallet). */
@@ -445,7 +451,28 @@ export class Cavos {
     const { transactionHash } = await this.execute([
       this.adapter.buildAddApprover(this.address, pubkey),
     ]);
+    // Confirm the approver is actually on-chain before returning: a new device
+    // detects the passkey by reading `get_approver_count`, so a fire-and-forget
+    // submit that never mines would leave the user stuck on the email flow.
+    try {
+      await this.account.waitForTransaction(transactionHash);
+    } catch (e) {
+      console.warn("[Cavos] add_approver receipt wait failed:", e);
+    }
     return { transactionHash };
+  }
+
+  /** True if this account already has a passkey enrolled as an approver, so a
+   * new device can be approved with the passkey instead of the email flow. */
+  async hasPasskey(): Promise<boolean> {
+    return this.adapter.hasPasskeyApprover(this.address);
+  }
+
+  /** Re-read (from chain) whether THIS device is now an authorized signer.
+   * Cheap and side-effect free — used to poll for readiness after a passkey /
+   * device approval submits, before the new signer is indexed. */
+  async isReady(): Promise<boolean> {
+    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
   }
 
   /**
@@ -660,21 +687,28 @@ export interface PasskeyApprovable {
 export async function approveDeviceEverywhere(
   wallets: PasskeyApprovable[],
   passkey: PasskeySigner,
-): Promise<{ chain: string; transactionHash: string }[]> {
+): Promise<{ chain: string; transactionHash?: string; error?: string }[]> {
   const targets = wallets.filter((w) => w.status === "needs-device-approval");
   if (targets.length === 0) return [];
   const infos = await Promise.all(targets.map((w) => w.passkeyLeafForThisDevice()));
   const leaves = infos.map((i) => i.leaf);
   // ONE prompt: the passkey signs the batch challenge over every chain's leaf.
   const assertion = await passkey.assert(batchChallenge(leaves));
-  const out: { chain: string; transactionHash: string }[] = [];
-  for (let i = 0; i < targets.length; i++) {
-    const { transactionHash } = await targets[i].submitPasskeyApproval(
-      assertion, leaves, i, infos[i].nonce,
-    );
-    out.push({ chain: targets[i].chain, transactionHash });
-  }
-  return out;
+  // Submit every chain IN PARALLEL (they're independent accounts) with error
+  // ISOLATION: one chain's relay/RPC failure must not abort the others. The same
+  // assertion authorizes all of them, so this is a single user gesture that fans
+  // out to every chain at once. Failures are reported, never thrown.
+  const settled = await Promise.allSettled(
+    targets.map((w, i) => w.submitPasskeyApproval(assertion, leaves, i, infos[i].nonce)),
+  );
+  return settled.map((r, i) =>
+    r.status === 'fulfilled'
+      ? { chain: targets[i].chain, transactionHash: r.value.transactionHash }
+      : {
+          chain: targets[i].chain,
+          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        },
+  );
 }
 
 /**

@@ -99,6 +99,8 @@ export interface RecoverSolanaOptions {
 export class CavosSolana {
   /** Discriminant for the `CavosWallet` union — narrows `execute()` per chain. */
   readonly chain = "solana" as const;
+  /** True when this connect just created a brand-new account (first sign-up). */
+  isNewAccount = false;
 
   private constructor(
     readonly identity: Identity,
@@ -192,7 +194,7 @@ export class CavosSolana {
 
     await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
     const isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
-    return new CavosSolana(
+    const wallet = new CavosSolana(
       identity,
       address,
       isSigner ? "ready" : "needs-device-approval",
@@ -202,6 +204,9 @@ export class CavosSolana {
       relayer,
       opts.feePayer,
     );
+    // First sign-up: a fresh initialize that made this device an authorized signer.
+    wallet.isNewAccount = !deployed && isSigner;
+    return wallet;
   }
 
   /** Authorize an additional device signer (device-signed via precompile). */
@@ -233,6 +238,18 @@ export class CavosSolana {
     const ixs = await this.adapter.buildAddApprover(this.address, pubkey);
     const transactionHash = await this.send(ixs);
     return { transactionHash };
+  }
+
+  /** True if this account already has a passkey enrolled as an approver, so a
+   * new device can be approved with the passkey instead of the email flow. */
+  async hasPasskey(): Promise<boolean> {
+    return this.adapter.hasPasskeyApprover(this.address);
+  }
+
+  /** Re-read (from chain) whether THIS device is now an authorized signer.
+   * Used to poll for readiness after a passkey approval before it's indexed. */
+  async isReady(): Promise<boolean> {
+    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
   }
 
   /**
