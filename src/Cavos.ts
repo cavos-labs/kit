@@ -14,7 +14,7 @@ import { WebCryptoDeviceUnwrapKey } from "./chains/stellar/WebCryptoDeviceUnwrap
 import type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
 import type { StellarNetwork } from "./chains/stellar/constants";
 import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
-import type { ChainCall } from "./chains/ChainAdapter";
+import type { ChainCall, ExecuteOptions } from "./chains/ChainAdapter";
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 import { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
@@ -432,9 +432,18 @@ export class Cavos {
   }
 
   /** Execute a sponsored (gasless) multicall, signed silently by the device. */
-  async execute(calls: ChainCall[]): Promise<{ transactionHash: string }> {
+  async execute(calls: ChainCall[], opts?: ExecuteOptions): Promise<{ transactionHash: string }> {
     if (this.status !== "ready") {
       throw new Error("kit: this device is not yet an authorized signer of the wallet");
+    }
+    // `sponsored` defaults to true → paymaster pays the gas. Pass `sponsored:
+    // false` to submit directly: the account pays its own fee from its ETH
+    // balance (starknet.js' `Account.execute` ignores the paymaster entirely, so
+    // the same Account instance works for both paths). Both return
+    // { transaction_hash }.
+    if (opts?.sponsored === false) {
+      const res = await this.account.execute(calls as Call[]);
+      return { transactionHash: res.transaction_hash };
     }
     const res = await this.account.executePaymasterTransaction(calls as Call[], {
       feeMode: { mode: "sponsored" },
@@ -442,9 +451,15 @@ export class Cavos {
     return { transactionHash: res.transaction_hash };
   }
 
-  /** Authorize an additional device signer (sponsored). Self-submitted. */
-  async addSigner(pubkey: DevicePublicKey): Promise<{ transactionHash: string }> {
-    return this.execute([this.adapter.buildAddSigner(this.address, pubkey)]);
+  /**
+   * Authorize an additional device signer. Sponsored by default; pass
+   * `{ sponsored: false }` to pay the fee from the account's own ETH balance.
+   */
+  async addSigner(
+    pubkey: DevicePublicKey,
+    opts?: ExecuteOptions,
+  ): Promise<{ transactionHash: string }> {
+    return this.execute([this.adapter.buildAddSigner(this.address, pubkey)], opts);
   }
 
   /**
@@ -457,26 +472,32 @@ export class Cavos {
   async enrollPasskey(
     passkey: PasskeySigner,
     params: PasskeyEnrollParams,
+    opts?: ExecuteOptions,
   ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
     const enrolled = await passkey.enroll(params);
-    const { transactionHash } = await this.addApprover(enrolled.publicKey);
+    const { transactionHash } = await this.addApprover(enrolled.publicKey, opts);
     return { publicKey: enrolled.publicKey, transactionHash };
   }
 
   /**
-   * Register an ALREADY-enrolled passkey public key as an approver (gasless,
-   * device-signed). Idempotent. Use this to register ONE passkey across multiple
-   * chains without re-prompting `passkey.enroll()` on each: enroll once, then
-   * call `addApprover(pubkey)` on each chain's wallet.
+   * Register an ALREADY-enrolled passkey public key as an approver (gasless by
+   * default, device-signed). Idempotent. Use this to register ONE passkey across
+   * multiple chains without re-prompting `passkey.enroll()` on each: enroll once,
+   * then call `addApprover(pubkey)` on each chain's wallet. Pass
+   * `{ sponsored: false }` to pay the fee from the account's own balance.
    */
-  async addApprover(pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
+  async addApprover(
+    pubkey: DevicePublicKey,
+    opts?: ExecuteOptions,
+  ): Promise<{ transactionHash?: string }> {
     if (this.status !== "ready") {
       throw new Error("kit: addApprover requires a ready, authorized device");
     }
     if (await this.adapter.isApprover(this.address, pubkey)) return {};
-    const { transactionHash } = await this.execute([
-      this.adapter.buildAddApprover(this.address, pubkey),
-    ]);
+    const { transactionHash } = await this.execute(
+      [this.adapter.buildAddApprover(this.address, pubkey)],
+      opts,
+    );
     // Confirm the approver is actually on-chain before returning: a new device
     // detects the passkey by reading `get_approver_count`, so a fire-and-forget
     // submit that never mines would leave the user stuck on the email flow.
@@ -575,12 +596,15 @@ export class Cavos {
    * add_signer (gasless). Returns the transaction hash (or undefined when the
    * backup was already set up).
    */
-  async setupRecovery(code: string): Promise<{ transactionHash: string } | undefined> {
+  async setupRecovery(
+    code: string,
+    opts?: ExecuteOptions,
+  ): Promise<{ transactionHash: string } | undefined> {
     const { publicKey: backupPubkey } = deriveBackupKey(code);
     // Skip the on-chain call if the backup signer is already registered.
     const already = await this.adapter.isAuthorizedSigner(this.address, backupPubkey);
     if (already) return undefined;
-    return this.addSigner(backupPubkey);
+    return this.addSigner(backupPubkey, opts);
   }
 
   /**

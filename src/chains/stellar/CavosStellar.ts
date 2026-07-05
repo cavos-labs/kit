@@ -28,6 +28,7 @@ import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
 import type { StellarNetwork } from "./constants";
 import type { Transaction } from "@stellar/stellar-sdk";
+import type { ExecuteOptions } from "../../chains/ChainAdapter";
 
 /** Default starting balance (stroops) for a new account: covers the 1 XLM base
  *  reserve + ~0.5 XLM per subentry (data entries + control signer) with headroom
@@ -221,12 +222,17 @@ export class CavosStellar {
     return this.statusValue === "ready";
   }
 
-  /** Move `amount` stroops of native XLM to `destination`, signed by the control
-   *  key. Self-funded path submits directly (the account pays the small fee). */
-  async execute(amount: bigint, destination: string): Promise<string> {
+  /**
+   * Move `amount` stroops of native XLM to `destination`, signed by the control
+   * key. Sponsored by default (the relayer fee-bumps and pays the fee); pass
+   * `{ sponsored: false }` to submit directly — the account pays its own (tiny)
+   * fee from its XLM balance. The control key signs identically in both modes;
+   * only the fee payer differs.
+   */
+  async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
     const control = this.requireControl();
     const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
-    return this.submitInner(inner, control);
+    return this.submitInner(inner, control, opts);
   }
 
   /**
@@ -312,13 +318,19 @@ export class CavosStellar {
 
   /**
    * Sign an inner (account-sourced) payment tx with the control key and submit it:
-   *   - with a relayer → wrap in a fee-bump (relayer pays the fee) and POST;
-   *   - self-funded → submit directly (the account pays its own small fee).
+   *   - sponsored (default) → with a relayer, wrap in a fee-bump (relayer pays
+   *     the fee) and POST; falls back to self-funded if no relayer;
+   *   - `{ sponsored: false }` → submit directly (the account pays its own fee).
    * Payments add no subentries, so no reserve sponsorship is needed here.
    */
-  private async submitInner(inner: Transaction, control: Keypair): Promise<string> {
+  private async submitInner(
+    inner: Transaction,
+    control: Keypair,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
     inner.sign(control);
-    if (this.relayer) {
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) {
       const feeSource = await this.relayer.getSource();
       const bump = this.adapter.wrapFeeBump(inner, feeSource);
       return this.relayer.submit("fee-bump", bump.toXDR());
@@ -333,12 +345,19 @@ export class CavosStellar {
    * that each need ~0.5 XLM of reserve. A relayer-sponsored account holds no XLM,
    * so the write must be sponsored by the relayer (source + sponsor), exactly like
    * account creation — a plain fee-bump would fail with `op_low_reserve`.
-   *   - with a relayer → build a sponsored write (relayer source + begin/end
-   *     sponsoring), control-sign the account ops, relay co-signs + submits;
-   *   - self-funded → the account (which holds its own reserves) writes directly.
+   *   - sponsored (default) → with a relayer, build a sponsored write (relayer
+   *     source + begin/end sponsoring), control-sign the account ops, relay
+   *     co-signs + submits; falls back to self-funded if no relayer;
+   *   - `{ sponsored: false }` → the account writes directly (it must hold its
+   *     own reserve for the new subentries).
    */
-  private async submitDataWrite(entries: Record<string, Uint8Array>, control: Keypair): Promise<string> {
-    if (this.relayer) {
+  private async submitDataWrite(
+    entries: Record<string, Uint8Array>,
+    control: Keypair,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) {
       const relayerSource = await this.relayer.getSource();
       const tx = await this.adapter.buildSponsoredDataTx({
         relayer: relayerSource,

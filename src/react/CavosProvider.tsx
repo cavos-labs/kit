@@ -16,7 +16,7 @@ import type { SolanaNetwork } from '../chains/solana/constants';
 import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
-import type { ChainCall } from '../chains/ChainAdapter';
+import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyEnrollParams } from '../signer/PasskeySigner';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
@@ -110,8 +110,13 @@ export interface CavosContextValue {
   verifyOtp: (email: string, code: string) => Promise<void>;
   /** Resolve identity from an OAuth callback (?auth_data=…) and deploy. */
   handleCallback: (authData: string) => Promise<void>;
-  /** Execute a sponsored (gasless) multicall, signed by the device key (Starknet). */
-  execute: (calls: ChainCall[]) => Promise<{ transactionHash: string }>;
+  /**
+   * Execute a multicall signed by the device key (Starknet-only — on Solana /
+   * Stellar call `wallet.execute(...)` directly). Sponsored (gasless) by default;
+   * pass `{ sponsored: false }` to submit directly with the account paying its
+   * own fee.
+   */
+  execute: (calls: ChainCall[], opts?: ExecuteOptions) => Promise<{ transactionHash: string }>;
   /** Authorize another device signer on this wallet (sponsored add_signer). */
   addSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
   /** Re-request the device-approval email for the current pending request. */
@@ -343,14 +348,14 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     await connect(id);
   }, [auth, connect]);
 
-  const execute = useCallback(async (calls: ChainCall[]) => {
+  const execute = useCallback(async (calls: ChainCall[], opts?: ExecuteOptions) => {
     if (!wallet) throw new Error('Not logged in');
     if (wallet.chain !== 'starknet') {
       throw new Error(
         "kit: useCavos().execute(calls) is Starknet-only. On Solana/Stellar use the `wallet` handle: wallet.execute(amount, dest).",
       );
     }
-    return wallet.execute(calls);
+    return wallet.execute(calls, opts);
   }, [wallet]);
 
   const addSigner = useCallback(

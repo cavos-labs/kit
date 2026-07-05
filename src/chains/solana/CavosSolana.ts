@@ -19,6 +19,7 @@ import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
 import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySigner";
+import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
 
@@ -304,12 +305,12 @@ export class CavosSolana {
   }
 
   /** Move `amount` lamports out of the account to `destination` (device-signed). */
-  async execute(amount: bigint, destination: string): Promise<string> {
+  async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
     if (this.status !== "ready") {
       throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
     }
     const ixs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
-    return this.send(ixs);
+    return this.send(ixs, opts);
   }
 
   /**
@@ -320,14 +321,19 @@ export class CavosSolana {
    *
    * What the relayer will sponsor is constrained by the app's Solana program
    * allowlist (configured in the dashboard) — programs outside the allowlist are
-   * rejected before co-signing.
+   * rejected before co-signing. Pass `{ sponsored: false }` to bypass the relayer
+   * and pay the fee from a configured `feePayer` (e.g. for allowlisted programs
+   * the relayer rejects, or to test the device signature end-to-end).
    */
-  async executeInstructions(instructions: InstructionData[]): Promise<string> {
+  async executeInstructions(
+    instructions: InstructionData[],
+    opts?: ExecuteOptions,
+  ): Promise<string> {
     if (this.status !== "ready") {
       throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
     }
     const ixs = await this.adapter.buildExecute(this.address, instructions);
-    return this.send(ixs);
+    return this.send(ixs, opts);
   }
 
   /**
@@ -435,13 +441,22 @@ export class CavosSolana {
     );
   }
 
-  private async send(ixs: TransactionInstruction[]): Promise<string> {
-    // Prefer the sponsored relayer (no fee payer needed); fall back to self-funded.
-    if (this.relayer) return this.relayer.send(ixs);
+  /**
+   * Submit a built instruction bundle. Sponsored by default (relayer pays the
+   * fee); pass `{ sponsored: false }` to self-fund via the configured `feePayer`.
+   * The device signature is embedded inside the secp256r1 precompile instruction,
+   * NOT applied as a Solana tx signature — so switching only changes who pays,
+   * never the signing identity.
+   */
+  private async send(ixs: TransactionInstruction[], opts?: ExecuteOptions): Promise<string> {
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) return this.relayer.send(ixs);
     if (this.feePayer) {
       return sendAndConfirmTransaction(this.connection, new Transaction().add(...ixs), [this.feePayer]);
     }
-    throw new Error("kit/solana: no relayer or feePayer configured to submit transactions");
+    throw new Error(
+      `kit/solana: cannot ${sponsored ? "sponsor" : "self-fund"} — no ${sponsored ? "relayer" : "feePayer"} configured`,
+    );
   }
 }
 

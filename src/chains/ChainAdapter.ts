@@ -7,6 +7,24 @@ export interface ChainCall {
   calldata: string[];
 }
 
+/**
+ * Options for state-changing wallet calls (`execute`, `addSigner`, etc.).
+ *
+ *   await wallet.execute(calls, { sponsored: false }); // self-funded
+ *
+ * `sponsored` defaults to `true`: the Cavos relayer / paymaster pays gas (and, on
+ * Stellar, the reserve) so the user signs but never holds gas tokens. Pass
+ * `sponsored: false` to submit directly — the account pays its own fee / reserve
+ * from its own balance (ETH on Starknet, SOL on Solana, XLM on Stellar). Useful
+ * for testing the device signature, for fee transparency, or as a fallback when
+ * the relayer is unreachable. Self-funded mode requires the account to actually
+ * hold enough native balance for the fee (and Stellar reserve, if the call adds
+ * subentries).
+ */
+export interface ExecuteOptions {
+  sponsored?: boolean;
+}
+
 export interface ComputeAddressParams {
   addressSeed: bigint;
   /**

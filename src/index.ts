@@ -51,7 +51,7 @@ export { WebCryptoSigner } from "./signer/WebCryptoSigner";
 export type { WebCryptoSignerOptions } from "./signer/WebCryptoSigner";
 
 // Chain adapters
-export type { ChainAdapter, ChainCall, ComputeAddressParams } from "./chains/ChainAdapter";
+export type { ChainAdapter, ChainCall, ComputeAddressParams, ExecuteOptions } from "./chains/ChainAdapter";
 export { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 export type { StarknetAdapterOptions } from "./chains/starknet/StarknetAdapter";
 export { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
