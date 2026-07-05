@@ -1,28 +1,39 @@
-import {
-  Account,
-  Address,
-  BASE_FEE,
-  Operation,
-  TransactionBuilder,
-  rpc,
-  xdr,
-  type Keypair,
-  type Transaction,
-} from "@stellar/stellar-sdk";
+import { Keypair } from "@stellar/stellar-sdk";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
-import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
-import { WebCryptoSigner } from "../../signer/WebCryptoSigner";
-import type { WalletRegistry } from "../../registry/WalletRegistry";
-import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
-import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
-import { deriveAddressSeedStellar } from "../../identity";
-import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
-import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySigner";
-import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
-import type { PasskeyAssertion } from "../../crypto/webauthn";
 import { StellarAdapter } from "./StellarAdapter";
+import {
+  deriveStellarMasterKeypair,
+  generateControlKey,
+  controlKeypairFromSeed,
+} from "./keys";
+import {
+  generateDEK,
+  sealControlSeed,
+  openControlSeed,
+  wrapDEK,
+  eciesWrapDEK,
+  deriveRecoveryKEK,
+  derivePasskeyKEK,
+  unwrapDEK,
+} from "./envelope";
+import {
+  fromDataEntries,
+  deviceWrapEntries,
+  PASSKEY_BASE,
+  RECOVERY_BASE,
+  type AccountEnvelope,
+} from "./datamap";
+import { chunkTo64 } from "./envelope";
+import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
-import { NATIVE_SAC_ID, type StellarNetwork } from "./constants";
+import type { StellarNetwork } from "./constants";
+import type { Transaction } from "@stellar/stellar-sdk";
+
+/** Default starting balance (stroops) for a new account: covers the 1 XLM base
+ *  reserve + ~0.5 XLM per subentry (data entries + control signer) with headroom
+ *  for fees and future factor entries. ~5 XLM, recoverable when merged.
+ *  Sponsorship (Phase 3) will move this cost to the relayer. */
+const DEFAULT_STARTING_BALANCE = 50_000_000n;
 
 export interface ConnectStellarOptions {
   network: StellarNetwork;
@@ -30,444 +41,387 @@ export interface ConnectStellarOptions {
   auth?: AuthProvider;
   identity?: Identity;
   appSalt: string;
-  appId?: string;
-  backendUrl?: string;
-  registry?: WalletRegistry;
-  /** RPC override (else the network default). */
-  rpcUrl?: string;
-  /** Factory contract id override (else the per-network default). */
-  factoryId?: string;
-  /** Override the device signer factory (native / tests); default WebCrypto. */
-  createSigner?: (keyId: string) => Promise<DeviceSigner>;
+  /** This device's P-256 ECDH unwrap key (provisioned + persisted per device). */
+  deviceKey: DeviceUnwrapKey;
   /**
-   * Gasless sponsorship via the Cavos relayer. When set (or when `appId` +
-   * `backendUrl` are given) the relayer is the transaction source + fee payer, so
-   * the integrator needs NO Stellar keypair — the silent device key (which holds
-   * no XLM) gets a seedless, gasless experience.
+   * Gasless sponsorship via the Cavos classic relayer. When set (or when `appId` +
+   * `backendUrl` are given) the relayer is the tx source + fee payer AND sponsors
+   * the account's reserves — the user locks no XLM and pays no fees.
    */
   relayer?: StellarRelayer;
+  /** Cavos App ID — enables the default relayer when no `relayer` is passed. */
+  appId?: string;
+  /** Cavos backend base URL (default https://cavos.xyz). */
+  backendUrl?: string;
   /**
-   * Self-funded fallback: a Stellar `Keypair` that is the transaction source +
-   * fee payer. Used only when no `relayer` is configured (tests / advanced).
+   * Self-funded funder + fee payer: creates + submits classic transactions
+   * directly (the account pays its own reserves + fees). The advanced /
+   * self-hosted fallback used when no relayer is configured.
    */
   sourceKeypair?: Keypair;
+  /** Horizon URL override. */
+  horizonUrl?: string;
+  /** Starting balance for a fresh account, in stroops. */
+  startingBalance?: bigint;
 }
 
-export interface RecoverStellarOptions extends Omit<ConnectStellarOptions, "auth"> {
-  /** The recovery code the user stored when they ran setupRecovery. */
-  code: string;
-  /** Authenticated identity (same user who owns the account). */
-  identity: Identity;
-}
+export type StellarConnectStatus = "ready" | "needs-device-approval";
 
-export type ConnectStatus = "ready" | "needs-device-approval";
+/** The DEK + control keypair recovered by opening any single unlock factor. */
+interface Unlocked {
+  control: Keypair;
+  dek: Uint8Array;
+}
 
 /**
- * High-level Stellar entry — the Soroban analogue of `Cavos.connect` /
- * `CavosSolana.connect`. One call derives the deterministic device-bound account,
- * deploys it via the factory if needed, registers it for cross-device
- * recognition, and returns a ready handle whose silent P-256 device key
- * authorizes every action through the account's `__check_auth`.
+ * High-level entry for the classic-Stellar (`G…`) multisig account — the classic
+ * analogue of `CavosStellar` (Soroban). One `connect` derives the deterministic
+ * `G…` address, creates the account if needed, and on a known device unlocks the
+ * control key from the on-chain envelope so `execute` signs silently.
  *
- *   const cavos = await CavosStellar.connect({ network: "stellar-testnet", identity, appSalt, relayer });
- *   if (cavos.status === "ready") await cavos.execute(10_000_000n, dest); // 1 XLM
+ * Multiple unlock **factors** all wrap the same DEK, so opening any one yields the
+ * control key:
+ *   - **device** (P-256 ECIES): silent daily signing, per-device, non-syncable;
+ *   - **passkey** (WebAuthn PRF): synced anchor to approve a new device / recover;
+ *   - **recovery code**: offline backup (optional).
  *
- * Gasless by default: with an `appId` the Cavos relayer is the tx source + fee
- * payer. `sourceKeypair` is the self-funded fallback.
+ * Self-custodial, no backend, no registry: the address is a pure function of
+ * identity and the control key lives only in the account's own data entries.
+ * Unlike the Soroban `CavosStellar`, this path uses NO wallet registry —
+ * creation needs neither an org API key nor a relayer. The optional relayer is
+ * only a fee payer + reserve sponsor (never a custodian or identity authority),
+ * so a bad/absent relayer can cost fees but can never move funds or squat an
+ * address.
  */
 export class CavosStellar {
-  /** Discriminant for the `CavosWallet` union — narrows `execute()` per chain. */
+  // Discriminant for the `CavosWallet` union. Classic `G…` IS the Stellar chain
+  // now (the Soroban `C…` path was removed), so this is "stellar".
   readonly chain = "stellar" as const;
-  /** True when this connect just created a brand-new account (first sign-up). */
   isNewAccount = false;
+  private statusValue: StellarConnectStatus;
 
   private constructor(
     readonly identity: Identity,
     readonly address: string,
-    readonly status: ConnectStatus,
+    status: StellarConnectStatus,
     readonly network: StellarNetwork,
     private readonly adapter: StellarAdapter,
-    private readonly devicePubkey: DevicePublicKey,
-    private readonly relayer?: StellarRelayer,
-    private readonly sourceKeypair?: Keypair,
-  ) {}
+    private readonly deviceKey: DeviceUnwrapKey,
+    private control: Keypair | undefined,
+    private dek: Uint8Array | undefined,
+    private readonly relayer: StellarRelayer | undefined,
+  ) {
+    this.statusValue = status;
+  }
 
-  get publicKey(): DevicePublicKey {
-    return this.devicePubkey;
+  get status(): StellarConnectStatus {
+    return this.statusValue;
   }
 
   static async connect(opts: ConnectStellarOptions): Promise<CavosStellar> {
     const identity = opts.identity ?? (await opts.auth?.authenticate());
     if (!identity) throw new Error("kit/stellar: connect requires `identity` or `auth`");
 
-    const signer = opts.createSigner
-      ? await opts.createSigner(`${identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${identity.userId}:${opts.appSalt}` });
-    const devicePubkey = await signer.getPublicKey();
-
-    const adapter = new StellarAdapter({
-      network: opts.network,
-      rpcUrl: opts.rpcUrl,
-      factoryId: opts.factoryId,
-      signer,
-    });
-    const addressSeed = deriveAddressSeedStellar({ userId: identity.userId, appSalt: opts.appSalt });
+    const adapter = new StellarAdapter({ network: opts.network, horizonUrl: opts.horizonUrl });
+    const master = deriveStellarMasterKeypair({ userId: identity.userId, appSalt: opts.appSalt });
+    const address = master.publicKey();
+    const startingBalance = opts.startingBalance ?? DEFAULT_STARTING_BALANCE;
 
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
-    const registry =
-      opts.registry ??
-      (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
-        : defaultRegistry);
     const relayer =
       opts.relayer ??
       (opts.appId
         ? new StellarRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
         : undefined);
 
-    const build = (
-      address: string,
-      status: ConnectStatus,
-    ): CavosStellar =>
-      new CavosStellar(identity, address, status, opts.network, adapter, devicePubkey, relayer, opts.sourceKeypair);
+    const build = (status: StellarConnectStatus, unlocked?: Unlocked): CavosStellar =>
+      new CavosStellar(
+        identity,
+        address,
+        status,
+        opts.network,
+        adapter,
+        opts.deviceKey,
+        unlocked?.control,
+        unlocked?.dek,
+        relayer,
+      );
 
-    const self = build("", "needs-device-approval");
-    const readSource = await self.resolveSource();
-
-    // Returning user on another device? The address is device-bound, so the
-    // registry (not identity alone) recognizes it. A new device is flagged
-    // needs-device-approval — same model as Starknet/Solana.
-    const existing = await registry.lookup(identity.userId);
-    if (existing) {
-      const isSigner = await adapter.isAuthorizedSigner(existing.address, devicePubkey, readSource);
-      return build(existing.address, isSigner ? "ready" : "needs-device-approval");
+    if (await adapter.isDeployed(address)) {
+      // Returning user: rebuild the control key from the on-chain envelope if this
+      // device has a wrap slot; otherwise this is a new device awaiting approval.
+      const unlocked = await unlockViaDevice(adapter, address, opts.deviceKey);
+      return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    const address = adapter.computeAddress(addressSeed, devicePubkey);
-    const wasDeployed = await adapter.isDeployed(address);
-    if (!wasDeployed) {
-      const func = adapter.buildDeploy(addressSeed, devicePubkey);
-      // Deploy needs NO device auth (factory deploys; account doesn't exist yet),
-      // so `authAccount` is undefined — nothing to sign, just the relayer/self pays.
-      await self.submitHostFunction(func, undefined);
+    // First sign-up on this identity: create the account.
+    if (!relayer && !opts.sourceKeypair) {
+      throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required to create the account");
+    }
+    const { keypair: control, seed: controlSeed } = generateControlKey();
+    const dek = generateDEK();
+    const envelope: AccountEnvelope = {
+      ct: sealControlSeed(controlSeed, dek),
+      deviceWraps: { [opts.deviceKey.slotId()]: eciesWrapDEK(dek, opts.deviceKey.publicKeySec1()) },
+    };
+
+    if (relayer) {
+      // Gasless + sponsored: the relayer is source + fee payer + reserve sponsor.
+      // Master signs its own account ops; the relayer co-signs the envelope.
+      const relayerSource = await relayer.getSource();
+      const tx = await adapter.buildSponsoredCreateTx({
+        relayer: relayerSource,
+        masterAddress: address,
+        controlAddress: control.publicKey(),
+        envelope,
+      });
+      tx.sign(master);
+      await relayer.submit("create", tx.toXDR());
+    } else {
+      const funder = opts.sourceKeypair!;
+      const tx = await adapter.buildCreateTx({
+        funder: funder.publicKey(),
+        masterAddress: address,
+        controlAddress: control.publicKey(),
+        envelope,
+        startingBalance,
+      });
+      // Master authorizes its own account ops (while still weight 1); funder is the
+      // source + fee payer. After this tx the master is permanently weight 0.
+      tx.sign(master, funder);
+      await adapter.submit(tx);
     }
 
-    await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
-    const isSigner = await adapter.isAuthorizedSigner(address, devicePubkey, readSource);
-    const wallet = build(address, isSigner ? "ready" : "needs-device-approval");
-    // First sign-up: a fresh deploy that made this device an authorized signer.
-    wallet.isNewAccount = !wasDeployed && isSigner;
+    const wallet = build("ready", { control, dek });
+    wallet.isNewAccount = true;
     return wallet;
   }
 
-  /** Authorize an additional device signer (device-signed via `__check_auth`). */
-  async addSigner(pubkey: DevicePublicKey): Promise<string> {
-    const func = this.adapter.buildAddSigner(this.address, pubkey);
-    return this.submitHostFunction(func, this.address);
+  /** Native XLM balance of the account, in stroops. */
+  async balance(): Promise<bigint> {
+    return this.adapter.balance(this.address);
   }
 
-  /**
-   * Enroll a passkey as an approver (2FA-style step-up). Device-signed + gasless;
-   * requires a ready device. Idempotent. Returns the passkey pubkey + tx hash.
-   */
-  async enrollPasskey(
-    passkey: PasskeySigner,
-    params: PasskeyEnrollParams,
-  ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
-    const enrolled = await passkey.enroll(params);
-    const { transactionHash } = await this.addApprover(enrolled.publicKey);
-    return { publicKey: enrolled.publicKey, transactionHash };
-  }
-
-  /** Register an already-enrolled passkey pubkey as an approver (gasless).
-   * Idempotent. Lets one passkey be registered across chains without re-prompting. */
-  async addApprover(pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
-    if (this.status !== "ready") {
-      throw new Error("kit/stellar: addApprover requires a ready, authorized device");
-    }
-    const readSource = await this.resolveSource();
-    if (await this.adapter.isApprover(this.address, pubkey, readSource)) return {};
-    const func = this.adapter.buildAddApprover(this.address, pubkey);
-    const transactionHash = await this.submitHostFunction(func, this.address);
-    return { transactionHash };
-  }
-
-  /** True if this account already has a passkey enrolled as an approver, so a
-   * new device can be approved with the passkey instead of the email flow. */
+  /** True if the account has a passkey factor enrolled (`cv:wp`), so a new device
+   *  can be approved with the passkey instead of a recovery code. Mirrors the
+   *  other chains' `hasPasskey()` for the React provider. */
   async hasPasskey(): Promise<boolean> {
-    const readSource = await this.resolveSource();
-    return this.adapter.hasPasskeyApprover(this.address, readSource);
+    try {
+      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
+      return !!env.passkeyWrap;
+    } catch {
+      return false;
+    }
   }
 
-  /** Re-read (from chain) whether THIS device is now an authorized signer.
-   * Used to poll for readiness after a passkey approval before it's indexed. */
+  /** Whether the control key is unlocked on this device (status ready). Classic
+   *  approvals land synchronously via Horizon, so this reflects state immediately
+   *  (no indexing delay to poll for). */
   async isReady(): Promise<boolean> {
-    const readSource = await this.resolveSource();
-    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey, readSource);
+    return this.statusValue === "ready";
   }
 
-  /**
-   * From a fresh browser (status `needs-device-approval`), approve adding THIS
-   * device using the user's synced passkey. Gasless via the relayer — the call
-   * carries the WebAuthn assertion, so no device signature is needed. Returns the
-   * tx hash. No trip back to an already-authorized device.
-   */
-  async approveThisDeviceWithPasskey(passkey: PasskeySigner): Promise<string> {
-    if (this.status === "ready") {
-      throw new Error("kit/stellar: this device is already an authorized signer");
-    }
-    const { leaf, nonce } = await this.passkeyLeafForThisDevice();
-    const leaves = [leaf];
-    const assertion = await passkey.assert(batchChallenge(leaves));
-    const { transactionHash } = await this.submitPasskeyApproval(assertion, leaves, 0, nonce);
-    return transactionHash;
-  }
-
-  /** This device's leaf + passkey nonce for a (possibly multi-chain) batch. */
-  async passkeyLeafForThisDevice(): Promise<{ leaf: Uint8Array; nonce: bigint }> {
-    const readSource = await this.resolveSource();
-    const nonce = await this.adapter.passkeyNonce(this.address, readSource);
-    return { leaf: this.adapter.passkeyLeaf(this.devicePubkey, nonce), nonce };
-  }
-
-  /** Submit `add_signer_via_passkey` given a shared assertion + batch position.
-   * No device auth entry — authorized purely by the passkey assertion. */
-  async submitPasskeyApproval(
-    assertion: PasskeyAssertion,
-    leaves: Uint8Array[],
-    leafIndex: number,
-    nonce: bigint,
-  ): Promise<{ transactionHash: string }> {
-    const readSource = await this.resolveSource();
-    const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
-    const candidates = recoverCandidatePublicKeys(assertion.r, assertion.s, digest);
-    let approver: DevicePublicKey | null = null;
-    for (const cand of candidates) {
-      if (await this.adapter.isApprover(this.address, cand.publicKey, readSource)) {
-        approver = cand.publicKey;
-        break;
-      }
-    }
-    if (!approver) throw new Error("kit/stellar: this passkey is not a registered approver");
-    const func = this.adapter.buildAddSignerViaPasskey(
-      this.address, this.devicePubkey, approver, nonce, leaves, leafIndex, assertion,
-    );
-    return { transactionHash: await this.submitHostFunction(func, undefined) };
-  }
-
-  /** Move `amount` stroops of native XLM to `destination` (device-signed). */
+  /** Move `amount` stroops of native XLM to `destination`, signed by the control
+   *  key. Self-funded path submits directly (the account pays the small fee). */
   async execute(amount: bigint, destination: string): Promise<string> {
-    return this.executeTransfer(NATIVE_SAC_ID[this.network], amount, destination);
-  }
-
-  /** Read this account's balance of `tokenId` (defaults to native XLM), in stroops. */
-  async balance(tokenId: string = NATIVE_SAC_ID[this.network]): Promise<bigint> {
-    const readSource = await this.resolveSource();
-    return this.adapter.readBalance(tokenId, this.address, readSource);
-  }
-
-  /** Transfer `amount` of any SEP-41 token out of the account (device-signed). */
-  async executeTransfer(tokenId: string, amount: bigint, destination: string): Promise<string> {
-    if (this.status !== "ready") {
-      throw new Error("kit/stellar: this device is not yet an authorized signer of the wallet");
-    }
-    const func = this.adapter.buildTransfer(tokenId, this.address, destination, amount);
-    return this.submitHostFunction(func, this.address);
+    const control = this.requireControl();
+    const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
+    return this.submitInner(inner, control);
   }
 
   /**
-   * Register the backup signer derived from `code` as an authorized signer of
-   * this account (device-signed). Idempotent. The code never leaves the device —
-   * only the derived public key travels on-chain. Mirrors the other chains.
+   * Enroll a passkey as an unlock factor: wrap the DEK under the passkey's PRF
+   * output and write the `cv:wp` entry. This is the synced anchor used to approve
+   * a new device or recover — it survives device loss. Idempotent-ish: writing it
+   * again just overwrites the wrap of the same DEK. Requires a ready device.
    */
-  async setupRecovery(code: string): Promise<string | undefined> {
-    if (this.status !== "ready") {
-      throw new Error("kit/stellar: setupRecovery requires a ready, registered device");
-    }
-    const { publicKey: backupPubkey } = deriveBackupKey(code);
-    const readSource = await this.resolveSource();
-    if (await this.adapter.isAuthorizedSigner(this.address, backupPubkey, readSource)) return undefined;
-    return this.addSigner(backupPubkey);
+  async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
+    const { control, dek } = this.requireUnlocked();
+    const wrap = wrapDEK(dek, derivePasskeyKEK(prfOutput));
+    return this.writeFactor(PASSKEY_BASE, wrap, control);
   }
 
   /**
-   * Recover an account after losing every device signer: derive the backup key
-   * from `code`, use it (not the new device) to authorize `add_signer(newDevice)`,
-   * and return a ready handle bound to the new device. The address is unchanged.
+   * Set up a recovery code as an unlock factor: wrap the DEK under the code's KEK
+   * and write the `cv:wr` entry. Optional in v1 — the integrating app decides when
+   * to surface it. The code never leaves the device; only the wrap goes on-chain.
+   * Requires a ready device.
    */
-  static async recover(opts: RecoverStellarOptions): Promise<CavosStellar> {
-    const signer = opts.createSigner
-      ? await opts.createSigner(`${opts.identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${opts.identity.userId}:${opts.appSalt}` });
-    const devicePubkey = await signer.getPublicKey();
+  async setupRecovery(code: string): Promise<string> {
+    const { control, dek } = this.requireUnlocked();
+    const wrap = wrapDEK(dek, deriveRecoveryKEK(code));
+    return this.writeFactor(RECOVERY_BASE, wrap, control);
+  }
 
-    // The backup key drives this tx: it's the only signer that can authorize
-    // adding the new device after all device keys are lost. Build an adapter
-    // whose signer IS the backup key so the auth entry is backup-signed.
-    const backup = BackupSigner.fromCode(opts.code);
-    const backupAdapter = new StellarAdapter({
-      network: opts.network,
-      rpcUrl: opts.rpcUrl,
-      factoryId: opts.factoryId,
-      signer: backup,
-    });
-
-    const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
-    const registry =
-      opts.registry ??
-      (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
-        : defaultRegistry);
-    const existing = await registry.lookup(opts.identity.userId);
-    if (!existing) {
-      throw new Error("kit/stellar: no account found for this identity — nothing to recover");
-    }
-    const relayer =
-      opts.relayer ??
-      (opts.appId
-        ? new StellarRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
-        : undefined);
-
-    // A CavosStellar bound to the backup adapter, used only to authorize add_signer.
-    const backupHandle = new CavosStellar(
-      opts.identity,
-      existing.address,
-      "ready",
-      opts.network,
-      backupAdapter,
-      devicePubkey,
-      relayer,
-      opts.sourceKeypair,
-    );
-    const readSource = await backupHandle.resolveSource();
-    if (!(await backupAdapter.isAuthorizedSigner(existing.address, devicePubkey, readSource))) {
-      await backupHandle.addSigner(devicePubkey);
-    }
-
-    // Hand control to the new device's signer for all future operations.
-    const adapter = new StellarAdapter({
-      network: opts.network,
-      rpcUrl: opts.rpcUrl,
-      factoryId: opts.factoryId,
-      signer,
-    });
-    return new CavosStellar(
-      opts.identity,
-      existing.address,
-      "ready",
-      opts.network,
-      adapter,
-      devicePubkey,
-      relayer,
-      opts.sourceKeypair,
+  /**
+   * From a new browser/device (`needs-device-approval`), approve THIS device using
+   * the user's synced passkey: unlock the DEK via the passkey factor, then wrap it
+   * to this device's slot so future sessions unlock silently. Flips status to
+   * `ready`. No trip back to an already-authorized device.
+   */
+  async approveThisDeviceWithPasskey(prfOutput: Uint8Array): Promise<string> {
+    return this.approveThisDevice(
+      await unlockViaPasskey(this.adapter, this.address, prfOutput),
+      "passkey",
     );
   }
 
-  /** The transaction source/fee-payer G-address (relayer or self-funded). */
-  private async resolveSource(): Promise<string> {
-    if (this.relayer) return this.relayer.getSource();
-    if (this.sourceKeypair) return this.sourceKeypair.publicKey();
-    throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required");
+  /** Approve THIS device using the recovery code (same as the passkey path, for
+   *  the backup factor). */
+  async approveThisDeviceWithRecovery(code: string): Promise<string> {
+    return this.approveThisDevice(
+      await unlockViaRecovery(this.adapter, this.address, code),
+      "recovery code",
+    );
+  }
+
+  /** The control key's public G address (the weight-1 real signer), for display. */
+  get controlAddress(): string | undefined {
+    return this.control?.publicKey();
+  }
+
+  // --- internals ----------------------------------------------------------
+
+  private async approveThisDevice(unlocked: Unlocked | null, factor: string): Promise<string> {
+    if (this.statusValue === "ready") {
+      throw new Error("kit/stellar: this device is already authorized");
+    }
+    if (!unlocked) {
+      throw new Error(`kit/stellar: could not unlock the account with the ${factor} — wrong factor or not enrolled`);
+    }
+    const slot = this.deviceKey.slotId();
+    const wrap = eciesWrapDEK(unlocked.dek, this.deviceKey.publicKeySec1());
+    const hash = await this.submitDataWrite(deviceWrapEntries(slot, wrap), unlocked.control);
+    // This device is now a silent-unlock factor.
+    this.control = unlocked.control;
+    this.dek = unlocked.dek;
+    this.statusValue = "ready";
+    return hash;
+  }
+
+  /** Write a single-factor wrap (passkey/recovery) into the account data entries,
+   *  signed by the control key. Overwrites cleanly if the base already existed and
+   *  the new blob has the same chunk count. */
+  private async writeFactor(base: string, wrap: Uint8Array, control: Keypair): Promise<string> {
+    const entries: Record<string, Uint8Array> = {};
+    chunkTo64(wrap).forEach((chunk, i) => {
+      entries[`${base}/${i}`] = chunk;
+    });
+    return this.submitDataWrite(entries, control);
   }
 
   /**
-   * Build → simulate → device-sign auth → assemble → submit an invoke-contract
-   * host function. `authAccount` is the account whose `__check_auth` must sign the
-   * operation's Soroban auth entry (undefined for a plain factory deploy).
+   * Sign an inner (account-sourced) payment tx with the control key and submit it:
+   *   - with a relayer → wrap in a fee-bump (relayer pays the fee) and POST;
+   *   - self-funded → submit directly (the account pays its own small fee).
+   * Payments add no subentries, so no reserve sponsorship is needed here.
    */
-  private async submitHostFunction(
-    func: xdr.HostFunction,
-    authAccount: string | undefined,
-  ): Promise<string> {
-    const server = this.adapter.server();
-    const sourceAddr = await this.resolveSource();
-
-    // Simulation ignores the source sequence, so a throwaway seq is fine here —
-    // this avoids double-incrementing the real relayer sequence between builds.
-    const simSource = new Account(sourceAddr, "0");
-    const unsignedOp = Operation.invokeHostFunction({ func, auth: [] });
-    const simTx = new TransactionBuilder(simSource, {
-      fee: BASE_FEE,
-      networkPassphrase: this.adapter.passphrase,
-    })
-      .addOperation(unsignedOp)
-      .setTimeout(180)
-      .build();
-
-    const sim = await server.simulateTransaction(simTx);
-    if (rpc.Api.isSimulationError(sim)) {
-      throw new Error(`kit/stellar: simulation failed: ${sim.error}`);
-    }
-
-    const validUntil = (await server.getLatestLedger()).sequence + 100;
-    const entries = sim.result?.auth ?? [];
-    const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
-    for (const entry of entries) {
-      if (authAccount && isAddressCredentialFor(entry, authAccount)) {
-        signedAuth.push(await this.adapter.signAuthEntry(entry, validUntil));
-      } else {
-        signedAuth.push(entry);
-      }
-    }
-
-    // Final tx: real sequence + the device-signed auth entries. assembleTransaction
-    // preserves the op's existing auth (only fills sorobanData + resource fee).
-    const account = await server.getAccount(sourceAddr);
-    const finalOp = Operation.invokeHostFunction({ func, auth: signedAuth });
-    const built = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.adapter.passphrase,
-    })
-      .addOperation(finalOp)
-      .setTimeout(180)
-      .build();
-
-    // Re-simulate WITH the signed auth so the resource estimate includes the cost
-    // of running `__check_auth` (secp256r1_verify + sha256). The first simulation
-    // ran in recording mode with no signatures, so it under-counted CPU and the
-    // tx would fail on-chain with RESOURCE_LIMIT_EXCEEDED.
-    const authSim = await server.simulateTransaction(built);
-    if (rpc.Api.isSimulationError(authSim)) {
-      throw new Error(`kit/stellar: auth simulation failed: ${authSim.error}`);
-    }
-    const assembled = rpc.assembleTransaction(built, authSim).build();
-
-    // Relayer signs the envelope + submits (gasless). Self-funded signs locally.
+  private async submitInner(inner: Transaction, control: Keypair): Promise<string> {
+    inner.sign(control);
     if (this.relayer) {
-      return this.relayer.submit(assembled.toXDR());
+      const feeSource = await this.relayer.getSource();
+      const bump = this.adapter.wrapFeeBump(inner, feeSource);
+      return this.relayer.submit("fee-bump", bump.toXDR());
     }
-    if (this.sourceKeypair) {
-      assembled.sign(this.sourceKeypair);
-      return this.sendAndConfirm(assembled);
-    }
-    throw new Error("kit/stellar: no relayer or sourceKeypair configured to submit");
+    // Self-funded: submit the account-sourced inner tx directly; the account pays
+    // the (tiny) fee out of its own balance.
+    return this.adapter.submit(inner);
   }
 
-  /** Submit a signed tx via RPC and poll to confirmation. Returns the hash. */
-  private async sendAndConfirm(tx: Transaction): Promise<string> {
-    const server = this.adapter.server();
-    const sent = await server.sendTransaction(tx);
-    if (sent.status === "ERROR") {
-      throw new Error(`kit/stellar: submit rejected: ${JSON.stringify(sent.errorResult)}`);
+  /**
+   * Write data entries (add a factor / device slot) — which create NEW subentries
+   * that each need ~0.5 XLM of reserve. A relayer-sponsored account holds no XLM,
+   * so the write must be sponsored by the relayer (source + sponsor), exactly like
+   * account creation — a plain fee-bump would fail with `op_low_reserve`.
+   *   - with a relayer → build a sponsored write (relayer source + begin/end
+   *     sponsoring), control-sign the account ops, relay co-signs + submits;
+   *   - self-funded → the account (which holds its own reserves) writes directly.
+   */
+  private async submitDataWrite(entries: Record<string, Uint8Array>, control: Keypair): Promise<string> {
+    if (this.relayer) {
+      const relayerSource = await this.relayer.getSource();
+      const tx = await this.adapter.buildSponsoredDataTx({
+        relayer: relayerSource,
+        account: this.address,
+        entries,
+      });
+      tx.sign(control); // account-sourced manageData + endSponsoring
+      return this.relayer.submit("sponsored-data", tx.toXDR());
     }
-    const hash = sent.hash;
-    for (let i = 0; i < 30; i++) {
-      const got = await server.getTransaction(hash);
-      if (got.status === rpc.Api.GetTransactionStatus.SUCCESS) return hash;
-      if (got.status === rpc.Api.GetTransactionStatus.FAILED) {
-        throw new Error(`kit/stellar: tx ${hash} failed`);
-      }
-      await new Promise((r) => setTimeout(r, 1000));
+    const tx = await this.adapter.buildDataTx({ account: this.address, entries });
+    tx.sign(control);
+    return this.adapter.submit(tx);
+  }
+
+  private requireControl(): Keypair {
+    if (this.statusValue !== "ready" || !this.control) {
+      throw new Error("kit/stellar: control key not unlocked on this device (needs approval)");
     }
-    throw new Error(`kit/stellar: tx ${hash} not confirmed in time`);
+    return this.control;
+  }
+
+  private requireUnlocked(): Unlocked {
+    const control = this.requireControl();
+    if (!this.dek) throw new Error("kit/stellar: DEK unavailable on this device");
+    return { control, dek: this.dek };
   }
 }
 
-/** Whether an auth entry is an Address credential for `accountAddress`. */
-function isAddressCredentialFor(entry: xdr.SorobanAuthorizationEntry, accountAddress: string): boolean {
-  const creds = entry.credentials();
-  if (creds.switch() !== xdr.SorobanCredentialsType.sorobanCredentialsAddress()) return false;
-  return Address.fromScAddress(creds.address().address()).toString() === accountAddress;
+/** Rebuild the control keypair from the on-chain envelope using this device's
+ *  ECIES wrap. Returns null if this device has no slot or the wrap can't open. */
+async function unlockViaDevice(
+  adapter: StellarAdapter,
+  address: string,
+  deviceKey: DeviceUnwrapKey,
+): Promise<Unlocked | null> {
+  const env = await loadEnvelope(adapter, address);
+  const wrap = env.deviceWraps[deviceKey.slotId()];
+  if (!wrap) return null;
+  try {
+    const dek = await deviceKey.unwrap(wrap);
+    return openControl(env, dek);
+  } catch {
+    return null;
+  }
 }
 
-const defaultRegistry = new InMemoryWalletRegistry();
+/** Unlock via the passkey PRF factor (`cv:wp`). */
+async function unlockViaPasskey(
+  adapter: StellarAdapter,
+  address: string,
+  prfOutput: Uint8Array,
+): Promise<Unlocked | null> {
+  const env = await loadEnvelope(adapter, address);
+  if (!env.passkeyWrap) return null;
+  try {
+    const dek = unwrapDEK(env.passkeyWrap, derivePasskeyKEK(prfOutput));
+    return openControl(env, dek);
+  } catch {
+    return null;
+  }
+}
+
+/** Unlock via the recovery-code factor (`cv:wr`). */
+async function unlockViaRecovery(
+  adapter: StellarAdapter,
+  address: string,
+  code: string,
+): Promise<Unlocked | null> {
+  const env = await loadEnvelope(adapter, address);
+  if (!env.recoveryWrap) return null;
+  try {
+    const dek = unwrapDEK(env.recoveryWrap, deriveRecoveryKEK(code));
+    return openControl(env, dek);
+  } catch {
+    return null;
+  }
+}
+
+async function loadEnvelope(adapter: StellarAdapter, address: string): Promise<AccountEnvelope> {
+  return fromDataEntries(await adapter.loadDataEntries(address));
+}
+
+function openControl(env: AccountEnvelope, dek: Uint8Array): Unlocked {
+  const controlSeed = openControlSeed(env.ct, dek);
+  return { control: controlKeypairFromSeed(controlSeed), dek };
+}

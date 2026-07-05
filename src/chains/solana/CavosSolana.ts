@@ -174,19 +174,24 @@ export class CavosSolana {
       );
     }
 
-    const address = adapter.computeAddress(addressSeed, devicePubkey);
+    const address = adapter.computeAddress(addressSeed);
     const deployed = (await connection.getAccountInfo(new PublicKey(address))) !== null;
 
     if (!deployed) {
+      // Deploy: register the first device signer via `initialize`. Anti-squatting
+      // is NOT enforced on-chain — it is the integrator's responsibility to keep
+      // `appSalt` secret and to deploy each account on the user's first login.
+      //
       // Whoever pays must be the `initialize` payer/fee payer: the relayer (when
-      // sponsoring) or the self-funded feePayer.
+      // sponsoring) or the self-funded feePayer. buildInitialize returns the
+      // program ix to register the first signer.
       if (relayer) {
         const payer = await relayer.getFeePayer();
-        const ix = adapter.buildInitialize(addressSeed, payer.toBase58(), devicePubkey);
-        await relayer.send([ix]);
+        const ixs = adapter.buildInitialize(addressSeed, payer.toBase58(), devicePubkey);
+        await relayer.send(ixs);
       } else if (opts.feePayer) {
-        const ix = adapter.buildInitialize(addressSeed, opts.feePayer.publicKey.toBase58(), devicePubkey);
-        await sendAndConfirmTransaction(connection, new Transaction().add(ix), [opts.feePayer]);
+        const ixs = adapter.buildInitialize(addressSeed, opts.feePayer.publicKey.toBase58(), devicePubkey);
+        await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [opts.feePayer]);
       } else {
         throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize a new account");
       }

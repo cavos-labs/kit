@@ -1,83 +1,84 @@
-import { p256 } from "@noble/curves/p256";
-import { scValToNative, StrKey } from "@stellar/stellar-sdk";
-import {
-  StellarAdapter,
-  sec1Pubkey,
-  encodeLowSSignature,
-  deviceSignatureScVal,
-} from "./StellarAdapter";
-import { bytesToBigInt } from "../../crypto/encoding";
-import type { DevicePublicKey, DeviceSignature } from "../../signer/DeviceSigner";
+import { Account, Operation, xdr } from "@stellar/stellar-sdk";
+import { StellarAdapter } from "./StellarAdapter";
+import { deriveStellarMasterKeypair, generateControlKey } from "./keys";
+import { generateDEK, sealControlSeed } from "./envelope";
+import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
+import { eciesWrapDEK } from "./envelope";
+import type { AccountEnvelope } from "./datamap";
 
-function devicePubkey(priv: Uint8Array): DevicePublicKey {
-  const uncompressed = p256.getPublicKey(priv, false); // 0x04 || x || y
-  return {
-    x: bytesToBigInt(uncompressed.slice(1, 33)),
-    y: bytesToBigInt(uncompressed.slice(33, 65)),
-  };
+const identity = { userId: "u1", appSalt: "app" };
+
+/** Minimal Horizon stub: only loadAccount is exercised by the builders. */
+function stubServer(adapter: StellarAdapter, seq = "100") {
+  const fake = { loadAccount: async (addr: string) => new Account(addr, seq) };
+  (adapter as unknown as { server: () => unknown }).server = () => fake;
 }
 
-// A signer with no network access — computeAddress / encoders are pure.
-const adapter = new StellarAdapter({
-  network: "stellar-testnet",
-  signer: {
-    getPublicKey: async () => ({ x: 0n, y: 0n }),
-    sign: async () => ({ r: 0n, s: 0n, yParity: false }),
-  },
-});
+describe("StellarAdapter tx building", () => {
+  it("buildCreateTx: createAccount + data entries + master-zeroing setOptions", async () => {
+    const adapter = new StellarAdapter({ network: "stellar-testnet" });
+    stubServer(adapter);
 
-describe("StellarAdapter", () => {
-  it("builds a 65-byte SEC-1 uncompressed pubkey matching noble", () => {
-    const priv = p256.utils.randomPrivateKey();
-    const pk = devicePubkey(priv);
-    const sec1 = sec1Pubkey(pk);
-    expect(sec1.length).toBe(65);
-    expect(sec1[0]).toBe(0x04);
-    expect(Buffer.from(sec1)).toEqual(Buffer.from(p256.getPublicKey(priv, false)));
-  });
-
-  it("normalizes signatures to low-S in the 64-byte r||s encoding", () => {
-    const n = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
-    const highS: DeviceSignature = { r: 5n, s: n - 10n, yParity: false };
-    const enc = encodeLowSSignature(highS);
-    expect(enc.length).toBe(64);
-    // high-S (> n/2) must be flipped to n - s = 10.
-    expect(bytesToBigInt(enc.slice(32, 64))).toBe(10n);
-    // low-S passes through unchanged.
-    expect(bytesToBigInt(encodeLowSSignature({ r: 5n, s: 10n, yParity: false }).slice(32, 64))).toBe(10n);
-  });
-
-  it("encodes Vec<DeviceSignature> as a symbol-keyed struct the contract decodes", () => {
-    const priv = p256.utils.randomPrivateKey();
-    const pk = devicePubkey(priv);
-    const sig: DeviceSignature = { r: 123n, s: 456n, yParity: false };
-    const scval = deviceSignatureScVal(pk, sig);
-    const native = scValToNative(scval) as Array<{ public_key: Buffer; signature: Buffer }>;
-    expect(native).toHaveLength(1);
-    expect(Buffer.from(native[0].public_key)).toEqual(Buffer.from(sec1Pubkey(pk)));
-    expect(Buffer.from(native[0].signature)).toEqual(Buffer.from(encodeLowSSignature(sig)));
-  });
-
-  it("computes the deterministic account address off-chain, matching the on-chain factory", () => {
-    // Cross-check vector recorded in account-contracts/stellar/deployments/testnet.json:
-    // seed = 0x01*32, signer = 0x04 || 0x02*64  ->  the factory's account_address.
-    const seed = new Uint8Array(32).fill(0x01);
-    const pk: DevicePublicKey = {
-      x: bytesToBigInt(new Uint8Array(32).fill(0x02)),
-      y: bytesToBigInt(new Uint8Array(32).fill(0x02)),
+    const master = deriveStellarMasterKeypair(identity);
+    const { keypair: control, seed: controlSeed } = generateControlKey();
+    const dek = generateDEK();
+    const device = LocalDeviceUnwrapKey.generate();
+    const envelope: AccountEnvelope = {
+      ct: sealControlSeed(controlSeed, dek),
+      deviceWraps: { [device.slotId()]: eciesWrapDEK(dek, device.publicKeySec1()) },
     };
-    const address = adapter.computeAddress(seed, pk);
-    expect(address).toBe("CCGXWAHSSXAFW3O7ULH6CPPYHZ5FXCCLIJFRDLH665QIZXBBG7S6THW2");
-    expect(StrKey.isValidContract(address)).toBe(true);
+
+    const tx = await adapter.buildCreateTx({
+      funder: master.publicKey(), // any funded G in the stub
+      masterAddress: master.publicKey(),
+      controlAddress: control.publicKey(),
+      envelope,
+      startingBalance: 20_000_000n,
+    });
+
+    const ops = tx.operations;
+    expect(ops[0].type).toBe("createAccount");
+
+    const setOptions = ops.find((o) => o.type === "setOptions") as Operation.SetOptions;
+    expect(setOptions).toBeDefined();
+    expect(setOptions.masterWeight).toBe(0);
+    expect(setOptions.lowThreshold).toBe(1);
+    expect(setOptions.medThreshold).toBe(1);
+    expect(setOptions.highThreshold).toBe(1);
+    expect((setOptions.signer as { ed25519PublicKey: string }).ed25519PublicKey).toBe(control.publicKey());
+
+    // Data-entry ops carry the envelope, sourced by the master (so they're
+    // authorized while master is still weight 1) and come BEFORE the setOptions.
+    const dataOps = ops.filter((o) => o.type === "manageData") as Operation.ManageData[];
+    expect(dataOps.length).toBeGreaterThan(0);
+    expect(dataOps.every((o) => o.source === master.publicKey())).toBe(true);
+    const setOptionsIdx = ops.indexOf(setOptions);
+    expect(ops.lastIndexOf(dataOps[dataOps.length - 1])).toBeLessThan(setOptionsIdx);
   });
 
-  it("is deterministic and sensitive to seed + signer", () => {
-    const seed = new Uint8Array(32).fill(7);
-    const pkA: DevicePublicKey = { x: 11n, y: 22n };
-    const pkB: DevicePublicKey = { x: 11n, y: 24n };
-    const base = adapter.computeAddress(seed, pkA);
-    expect(adapter.computeAddress(seed, pkA)).toBe(base);
-    expect(adapter.computeAddress(new Uint8Array(32).fill(8), pkA)).not.toBe(base);
-    expect(adapter.computeAddress(seed, pkB)).not.toBe(base);
+  it("buildPaymentTx: single native payment sourced by the account", async () => {
+    const adapter = new StellarAdapter({ network: "stellar-testnet" });
+    stubServer(adapter);
+    const g = deriveStellarMasterKeypair(identity).publicKey();
+
+    const tx = await adapter.buildPaymentTx({ from: g, to: g, amount: 5_000_000n });
+    expect(tx.operations).toHaveLength(1);
+    const pay = tx.operations[0] as Operation.Payment;
+    expect(pay.type).toBe("payment");
+    expect(pay.amount).toBe("0.5000000");
+    expect(tx.source).toBe(g);
+  });
+
+  it("wrapFeeBump: relayer becomes the fee source over a control-signed inner tx", async () => {
+    const adapter = new StellarAdapter({ network: "stellar-testnet" });
+    stubServer(adapter);
+    const g = deriveStellarMasterKeypair(identity).publicKey();
+    const relayer = generateControlKey().keypair; // any G as fee source
+
+    const inner = await adapter.buildPaymentTx({ from: g, to: g, amount: 1n });
+    inner.sign(generateControlKey().keypair);
+    const bump = adapter.wrapFeeBump(inner, relayer.publicKey());
+    expect(bump.feeSource).toBe(relayer.publicKey());
+    expect(bump.innerTransaction.hash().equals(inner.hash())).toBe(true);
   });
 });

@@ -68,37 +68,42 @@ export class SolanaAdapter {
     this.programId = new PublicKey(opts.programId ?? DEVICE_ACCOUNT_PROGRAM_ID);
   }
 
-  /** Deterministic account address: PDA of [seed, address_seed, initial_signer_x]. */
-  computeAddress(addressSeed: Uint8Array, initialSigner: DevicePublicKey): string {
-    return this.pda(addressSeed, compressedPubkey(initialSigner)).toBase58();
+  /**
+   * Deterministic account address: PDA of [ACCOUNT_SEED, addressSeed] — the
+   * device pubkey is NOT part of the seeds, so the address is recomputable
+   * from (userId, appSalt) alone. Anti-squatting is the integrator's
+   * responsibility (keep `appSalt` secret; deploy on first login).
+   */
+  computeAddress(addressSeed: Uint8Array): string {
+    return this.pda(addressSeed).toBase58();
   }
 
-  private pda(addressSeed: Uint8Array, initialCompressed: Uint8Array): PublicKey {
+  private pda(addressSeed: Uint8Array): PublicKey {
     const [pda] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from(ACCOUNT_SEED),
-        Buffer.from(addressSeed),
-        Buffer.from(initialCompressed.slice(1, 33)), // x-coordinate
-      ],
-      this.programId
+      [Buffer.from(ACCOUNT_SEED), Buffer.from(addressSeed)],
+      this.programId,
     );
     return pda;
   }
 
-  /** `initialize` instruction creating the account with its first device signer. */
+  /**
+   * `initialize` instruction: creates the account PDA and registers the first
+   * device signer. No attestation is required — anti-squatting is NOT enforced
+   * on-chain.
+   */
   buildInitialize(
     addressSeed: Uint8Array,
     payer: string,
-    initialSigner: DevicePublicKey
-  ): TransactionInstruction {
+    initialSigner: DevicePublicKey,
+  ): TransactionInstruction[] {
     const initialCompressed = compressedPubkey(initialSigner);
-    const account = this.pda(addressSeed, initialCompressed);
+    const account = this.pda(addressSeed);
     const data = Buffer.concat([
       anchorDiscriminator("initialize"),
       Buffer.from(addressSeed), // [u8;32]
       Buffer.from(initialCompressed), // [u8;33]
     ]);
-    return new TransactionInstruction({
+    const programIx = new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: account, isSigner: false, isWritable: true },
@@ -107,6 +112,7 @@ export class SolanaAdapter {
       ],
       data,
     });
+    return [programIx];
   }
 
   /** `[precompile, add_signer]` bundle, authorized by an existing device signer. */

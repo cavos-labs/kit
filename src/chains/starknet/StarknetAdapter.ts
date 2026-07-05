@@ -21,21 +21,34 @@ export class StarknetAdapter implements ChainAdapter {
 
   constructor(private readonly opts: StarknetAdapterOptions) {}
 
-  computeAddress({ addressSeed, initialSigner, salt }: ComputeAddressParams): string {
+  /**
+   * Deterministic address = f(addressSeed) ONLY. The device pubkey is NOT
+   * part of the derivation — anti-squatting is the integrator's responsibility
+   * (keep `appSalt` secret; deploy on first login). This makes the address
+   * recomputable by the user from (userId, appSalt) alone, even after losing
+   * every device.
+   *
+   * `initialSigner` in `ComputeAddressParams` is IGNORED on Starknet (kept in
+   * the shared type for Solana/Stellar, which still include it).
+   */
+  computeAddress({ addressSeed, salt }: ComputeAddressParams): string {
     return hash.calculateContractAddressFromHash(
       num.toHex(salt ?? addressSeed),
       this.opts.classHash,
-      this.constructorCalldata(addressSeed, initialSigner),
+      this.constructorCalldata(addressSeed),
       0, // deployerAddress 0 => deterministic counterfactual address
     );
   }
 
-  /** Single UDC deploy; the constructor registers the first device signer, so
-   * the account is ready the moment it is deployed (fits the paymaster's
-   * deploy + execute_from_outside bundle). */
+  /**
+   * UDC deploy call. The constructor takes ONLY the seed — no device pubkey —
+   * so the account is born with no signers. The caller MUST follow up with
+   * `buildInitialize` in the same multicall (or a separate tx) to register the
+   * first device signer; otherwise the account is unusable.
+   */
   buildDeploy(params: ComputeAddressParams): ChainCall[] {
     const salt = params.salt ?? params.addressSeed;
-    const calldata = this.constructorCalldata(params.addressSeed, params.initialSigner);
+    const calldata = this.constructorCalldata(params.addressSeed);
     return [
       {
         contractAddress: UDC_ADDRESS,
@@ -51,9 +64,23 @@ export class StarknetAdapter implements ChainAdapter {
     ];
   }
 
-  /** Constructor calldata: [address_seed, pub_x_low, pub_x_high, pub_y_low, pub_y_high]. */
-  constructorCalldata(addressSeed: bigint, initialSigner: DevicePublicKey): string[] {
-    return [num.toHex(addressSeed), ...pubkeyCalldata(initialSigner)];
+  /** Constructor calldata: [address_seed]. Device pubkey is registered post-deploy via initialize. */
+  constructorCalldata(addressSeed: bigint): string[] {
+    return [num.toHex(addressSeed)];
+  }
+
+  /**
+   * `initialize` call: registers the first device signer. Callable only while
+   * the account has no signers (one-shot). In production this is bundled with
+   * the UDC deploy in a single sponsored multicall — see `connectStarknet`.
+   * Anti-squatting is NOT enforced on-chain.
+   */
+  buildInitialize(accountAddress: string, devicePubkey: DevicePublicKey): ChainCall {
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "initialize",
+      calldata: pubkeyCalldata(devicePubkey),
+    };
   }
 
   buildAddSigner(accountAddress: string, signer: DevicePublicKey): ChainCall {

@@ -13,8 +13,7 @@ import { Cavos } from '../Cavos';
 import type { Chain, NetworkEnv, CavosWallet } from '../Cavos';
 import { CavosSolana } from '../chains/solana/CavosSolana';
 import type { SolanaNetwork } from '../chains/solana/constants';
-import { CavosStellar } from '../chains/stellar/CavosStellar';
-import type { StellarNetwork } from '../chains/stellar/constants';
+import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall } from '../chains/ChainAdapter';
@@ -368,6 +367,11 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const enrollPasskey = useCallback(
     async (passkey: PasskeySigner, params: PasskeyEnrollParams) => {
       if (!wallet) throw new Error('Not logged in');
+      if (wallet.chain === 'stellar') {
+        throw new Error(
+          'kit: on Stellar, use enrollPasskeyDefault() — the passkey factor is a WebAuthn PRF secret, not a signer object.',
+        );
+      }
       return wallet.enrollPasskey(passkey, params);
     },
     [wallet],
@@ -379,6 +383,18 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const enrollPasskeyDefault = useCallback(async () => {
     if (!wallet || !identity) throw new Error('Not logged in');
     if (wallet.status !== 'ready') throw new Error('kit: no ready device to enroll a passkey on');
+    if (wallet.chain === 'stellar') {
+      // Classic Stellar uses a WebAuthn PRF secret (not an on-chain assertion) as
+      // the passkey factor that wraps the account DEK.
+      const prf = new PasskeyPrf({ rpName });
+      const { secret } = await prf.enroll({
+        userId: identity.userId,
+        userName: identity.email ?? identity.userId,
+        ...(identity.email ? { displayName: identity.email } : {}),
+      });
+      await wallet.enrollPasskey(secret ?? (await prf.getSecret()));
+      return;
+    }
     const passkey = new PasskeySigner({ rpName });
     await wallet.enrollPasskey(passkey, {
       userId: identity.userId,
@@ -395,10 +411,14 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       await connect(identity);
       return;
     }
-    const passkey = new PasskeySigner({ rpName });
-    if (wallet.chain === 'starknet') {
+    if (wallet.chain === 'stellar') {
+      const prf = new PasskeyPrf({ rpName });
+      await wallet.approveThisDeviceWithPasskey(await prf.getSecret());
+    } else if (wallet.chain === 'starknet') {
+      const passkey = new PasskeySigner({ rpName });
       await wallet.approveThisDeviceWithPasskey({ passkey });
     } else {
+      const passkey = new PasskeySigner({ rpName });
       await wallet.approveThisDeviceWithPasskey(passkey);
     }
     // The on-chain add_signer isn't indexed the instant the tx submits — show the
@@ -449,15 +469,21 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
           ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         });
       } else if (chain === 'stellar') {
-        w = await CavosStellar.recover({
-          code,
+        // Classic `G…`: reconnect this (fresh) device, then use the recovery code
+        // to approve it — the code unlocks the control key which authorizes adding
+        // this device's slot. The account already exists, so no funder is needed.
+        const sw = await Cavos.connect({
+          chain: 'stellar',
+          network: cfg.network,
           identity,
-          network: (cfg.network === 'mainnet' ? 'stellar-mainnet' : 'stellar-testnet') as StellarNetwork,
           appSalt: cfg.appSalt,
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
-          ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         });
+        if (sw.chain === 'stellar' && sw.status === 'needs-device-approval') {
+          await sw.approveThisDeviceWithRecovery(code);
+        }
+        w = sw;
       } else {
         w = await Cavos.recover({
           code,

@@ -8,25 +8,31 @@ export interface StellarRelayerOptions {
   network: StellarNetwork;
 }
 
+/** What the transaction is, so the backend applies the right validation gate.
+ *  - `create`         sponsored account creation (relayer = source + sponsor)
+ *  - `fee-bump`       a control-signed payment wrapped in a relayer fee-bump
+ *  - `sponsored-data` a control-signed data write (add factor/device slot) whose
+ *                     new subentry reserves the relayer sponsors */
+export type StellarRelayKind = "create" | "fee-bump" | "sponsored-data";
+
 /**
- * Client for the Cavos Stellar sponsoring relayer. On Stellar the account is a
- * *contract*, which cannot be a transaction source — so the relayer's own
- * G-account is the transaction source AND fee payer. The user's silent device
- * key never pays: it only signs the Soroban *authorization entry* (verified by
- * the account's `__check_auth`), which is independent of who submits or pays.
- * That gives a seedless, gasless experience with no fee-payer keypair on the
- * integrator side — the same "relayer pays, device authorizes" split as Solana.
+ * Client for the classic-G sponsoring relayer. Unlike the Soroban relayer (which
+ * is the tx *source*), the classic relayer plays two roles:
+ *   - **create**: it is the tx source + fee payer AND sponsors the new account's
+ *     reserves (`begin/endSponsoringFutureReserves`), so the user locks no XLM.
+ *     The SDK sends a master-signed create tx; the relayer co-signs + submits.
+ *   - **fee-bump**: the user's control-signed inner tx (source = their `G…`) is
+ *     wrapped in a fee-bump whose fee source is the relayer. The relayer signs the
+ *     outer envelope only — it pays the fee, never moves the user's funds.
  *
- * The SDK builds the fully-assembled transaction (source = relayer, Soroban auth
- * entries already device-signed) and hands its unsigned XDR to the relayer, which
- * validates it against its allowlist, signs the envelope and submits.
+ * Either way the relayer is a fee payer / reserve sponsor, never a custodian.
  */
 export class StellarRelayer {
   private source?: string;
 
   constructor(private readonly opts: StellarRelayerOptions) {}
 
-  /** The relayer's source/fee-payer G-account (fetched + cached from the backend). */
+  /** The relayer's source/fee-payer/sponsor G-account (fetched + cached). */
   async getSource(): Promise<string> {
     if (this.source) return this.source;
     const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay?network=${this.opts.network}`);
@@ -36,17 +42,16 @@ export class StellarRelayer {
     return this.source;
   }
 
-  /**
-   * POST the assembled, device-authorized transaction XDR to the relayer to sign
-   * the envelope + submit. Returns the confirmed transaction hash.
-   */
-  async submit(transactionXdr: string): Promise<string> {
+  /** POST a (partially) signed transaction XDR for the relayer to co-sign + submit.
+   *  `kind` selects the validation gate. Returns the confirmed transaction hash. */
+  async submit(kind: StellarRelayKind, transactionXdr: string): Promise<string> {
     const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         app_id: this.opts.appId,
         network: this.opts.network,
+        kind,
         transaction: transactionXdr,
       }),
     });

@@ -44,14 +44,25 @@ describe("SolanaAdapter", () => {
     expect(s <= SECP256R1_N / 2n).toBe(true);
   });
 
-  it("derives a deterministic PDA off the program id and seeds", () => {
+  it("derives a deterministic PDA off the program id and seed (Option D: device pubkey ignored)", () => {
     const seed = deriveAddressSeedSolana({ userId: "user-123", appSalt: "app-xyz" });
     expect(seed.length).toBe(32);
-    const priv = p256.utils.randomPrivateKey();
-    const addr = adapter.computeAddress(seed, devicePubkey(priv));
+    // The address is recomputable from the seed alone — two different devices
+    // for the same user resolve to the SAME address. This is what makes
+    // recovery self-custodial on Solana too.
+    const privA = p256.utils.randomPrivateKey();
+    const privB = p256.utils.randomPrivateKey();
+    const addr = adapter.computeAddress(seed);
+    const addrAgain = adapter.computeAddress(seed);
     // valid base58 pubkey + stable across calls
     expect(() => new PublicKey(addr)).not.toThrow();
-    expect(adapter.computeAddress(seed, devicePubkey(priv))).toBe(addr);
+    expect(addrAgain).toBe(addr);
+    // Different seed → different address.
+    const seed2 = deriveAddressSeedSolana({ userId: "user-456", appSalt: "app-xyz" });
+    expect(adapter.computeAddress(seed2)).not.toBe(addr);
+    // Sanity: the two devices we generated are actually distinct keys (else the
+    // address-sensitivity claim would be trivially true for the wrong reason).
+    expect(devicePubkey(privA).x).not.toBe(devicePubkey(privB).x);
   });
 
   it("builds a secp256r1 precompile ix the precompile program owns, verifiable by noble", () => {

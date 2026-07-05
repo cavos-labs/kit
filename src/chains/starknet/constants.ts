@@ -27,11 +27,15 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
  * DeviceAccount class hash, per network. Populated from
  * `account-contracts/starknet/deployments/<network>.json` after declaring.
  *
- * Sepolia re-declared 2026-07-01 with the passkey-approval surface + BATCHED
- * multi-chain challenge (one passkey prompt approves a device on all chains).
- * Mainnet still runs the prior class (no passkey) until it is re-declared.
+ * Sepolia re-declared 2026-07-04:
+ *   - Deploy attestation REMOVED — `initialize` takes only the device pubkey.
+ *   - `is_valid_signature` returns VALIDATED pre-init so the SNIP-9 outside-
+ *     execution path (used by the paymaster's `deploy_and_invoke`) can carry
+ *     the `initialize` call before any signer is registered. `__execute__`
+ *     still enforces that ONLY `initialize` runs in that state.
+ * Mainnet still runs the prior class (with attestation) until it is re-declared.
  */
 export const DEVICE_ACCOUNT_CLASS_HASH: Record<StarknetNetwork, string> = {
-  sepolia: "0x25cbc5423e8ee895febb0ef2c3945b408da44d0039d915fbdd681fe6b6ba66b",
+  sepolia: "0x765f000b7021577aa0d6c206fb3d8ac73571686b3e76b9dc9b6d59a372e8c2c",
   mainnet: "0x1840aded59e8a0d2b440a134cb9079a7fc11b06c77f58ed189ab436a034ca6a",
 };

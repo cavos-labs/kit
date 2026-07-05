@@ -10,6 +10,8 @@ import type { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 import type { SolanaNetwork } from "./chains/solana/constants";
 import { CavosStellar } from "./chains/stellar/CavosStellar";
 import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
+import { WebCryptoDeviceUnwrapKey } from "./chains/stellar/WebCryptoDeviceUnwrapKey";
+import type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
 import type { StellarNetwork } from "./chains/stellar/constants";
 import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
 import type { ChainCall } from "./chains/ChainAdapter";
@@ -101,13 +103,17 @@ export interface ConnectOptions {
   /** Self-funded fee-payer fallback when no relayer is configured. */
   feePayer?: Keypair;
 
-  // --- Stellar-only ---
+  // --- Stellar-only (classic `G…` multisig) ---
   /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
   stellarRelayer?: StellarRelayer;
   /** Self-funded source/fee-payer Stellar keypair when no relayer is configured. */
   stellarSourceKeypair?: StellarKeypair;
-  /** Factory contract id override (else the per-network default). */
-  factoryId?: string;
+  /**
+   * This device's ECDH unwrap key for the Stellar control-key envelope. Defaults
+   * to a persisted `WebCryptoDeviceUnwrapKey` in the browser; pass your own on
+   * React Native / server.
+   */
+  stellarDeviceKey?: DeviceUnwrapKey;
 }
 
 /** The Starknet-specific connect options, resolved from the unified ones. */
@@ -147,6 +153,13 @@ export interface RecoveryOptions {
   classHash?: string;
   /** Off-chain user_id -> wallet map. Defaults to the hosted registry. */
   registry?: WalletRegistry;
+  /**
+   * Skip the registry entirely by passing the account address directly. With
+   * the seed-only derivation, the user can recompute the address from
+   * (userId, appSalt) alone — so recovery no longer depends on the Cavos
+   * backend. Pass this to make recovery fully self-custodial.
+   */
+  address?: string;
   /** Override the new device's signer (native / tests); default WebCrypto. */
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
 }
@@ -211,17 +224,20 @@ export class Cavos {
       });
     }
     if (opts.chain === "stellar") {
+      // Classic `G…` account: resolve identity up-front so we can provision this
+      // device's ECDH unwrap key (keyed by user + app) before connecting.
+      const identity = opts.identity ?? (opts.auth ? await opts.auth.authenticate() : undefined);
+      if (!identity) throw new Error("kit: Stellar connect requires `identity` or `auth`");
+      const deviceKey =
+        opts.stellarDeviceKey ??
+        (await WebCryptoDeviceUnwrapKey.loadOrCreate({ keyId: `${identity.userId}:${opts.appSalt}` }));
       return CavosStellar.connect({
         network: STELLAR_ENV[opts.network],
-        ...(opts.auth ? { auth: opts.auth } : {}),
-        ...(opts.identity ? { identity: opts.identity } : {}),
+        identity,
         appSalt: opts.appSalt,
+        deviceKey,
         ...(opts.appId ? { appId: opts.appId } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
-        ...(opts.registry ? { registry: opts.registry } : {}),
-        ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
-        ...(opts.factoryId ? { factoryId: opts.factoryId } : {}),
-        ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
         ...(opts.stellarRelayer ? { relayer: opts.stellarRelayer } : {}),
         ...(opts.stellarSourceKeypair ? { sourceKeypair: opts.stellarSourceKeypair } : {}),
       });
@@ -339,24 +355,34 @@ export class Cavos {
       return cavos;
     }
 
-    // Compute the deterministic address for (identity, this device). The address
-    // is device-bound, so it's NOT in the registry for a new device — but it may
-    // already be deployed on-chain (same device reconnecting, or a re-run after a
-    // deploy that succeeded before a timeout). Ask the chain before deploying:
-    // re-deploying an existing account reverts ("contract already deployed").
-    const address = adapter.computeAddress({ addressSeed, initialSigner: devicePubkey });
+    // Compute the deterministic address = f(addressSeed) ONLY. The device pubkey
+    // no longer enters the derivation, so the address is recomputable from
+    // (userId, appSalt) alone — recovery is self-custodial. The address may
+    // already be deployed on-chain (same device reconnecting, or a re-run after
+    // a deploy that succeeded before a timeout). Ask the chain before
+    // deploying: re-deploying an existing account reverts.
+    const address = adapter.computeAddress({ addressSeed });
     const account = makeAccount(address);
     const alreadyDeployed = await isDeployed(provider, address);
 
     if (!alreadyDeployed) {
+      // Deploy + initialize atomically. The constructor takes only the seed
+      // (so the address is seed-bound); `initialize` registers the first device
+      // signer. Anti-squatting is NOT enforced on-chain — it is the integrator's
+      // responsibility to keep `appSalt` secret and to deploy each account on
+      // the user's first login.
       const deploymentData = {
         address,
         class_hash: classHash,
         salt: num.toHex(addressSeed),
-        calldata: adapter.constructorCalldata(addressSeed, devicePubkey),
+        calldata: adapter.constructorCalldata(addressSeed),
         version: 1 as const,
       };
-      const deployRes = await account.executePaymasterTransaction([], {
+      // The initialize call rides in the same sponsored multicall as the deploy.
+      // The paymaster submits deploy + initialize atomically; if initialize
+      // fails, the deploy reverts too.
+      const initCall = adapter.buildInitialize(address, devicePubkey);
+      const deployRes = await account.executePaymasterTransaction([initCall], {
         feeMode: { mode: "sponsored" },
         deploymentData,
       });
@@ -591,15 +617,16 @@ export class Cavos {
     const backupAdapter = new StarknetAdapter({ classHash, signer: backup, provider });
 
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
-    const registry =
-      opts.registry ??
-      (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network })
-        : defaultRegistry);
-    const existing = await registry.lookup(opts.identity.userId);
-    if (!existing) {
+    // Address discovery: prefer an explicit `address` (self-custodial recovery
+    // — the caller recomputed it from (userId, appSalt) alone), else fall back
+    // to the hosted registry. With the seed-only derivation, the address no
+    // longer depends on the (lost) device pubkey, so the caller can always
+    // recompute it without the backend.
+    const address = opts.address ?? (await lookupAddress(opts, backendUrl, network));
+    if (!address) {
       throw new Error("kit: no account found for this identity — nothing to recover");
     }
+    const existing = { address } as { address: string };
 
     // Authorise the new device, signed by the backup key (sponsored).
     const backupAccount = new Account({
@@ -661,8 +688,31 @@ async function isDeployed(provider: RpcProvider, address: string): Promise<boole
   }
 }
 
-/** A chain wallet that can approve THIS device via a passkey (implemented by
- * `Cavos`, `CavosSolana`, `CavosStellar`). */
+/**
+ * Resolve the wallet address for a user via the registry. Used by `recover()`
+ * when the caller didn't pass `address` explicitly. With the seed-only
+ * derivation the caller can recompute the address from (userId, appSalt) and
+ * bypass this entirely — but the registry is still convenient for the common
+ * case where the user has Cavos available.
+ */
+async function lookupAddress(
+  opts: RecoveryOptions,
+  backendUrl: string,
+  network: StarknetNetwork,
+): Promise<string | null> {
+  const registry =
+    opts.registry ??
+    (opts.appId
+      ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network })
+      : defaultRegistry);
+  const existing = await registry.lookup(opts.identity.userId);
+  return existing?.address ?? null;
+}
+
+/** A chain wallet that can approve THIS device via a batched WebAuthn assertion
+ * (implemented by `Cavos` and `CavosSolana`). Classic Stellar uses a WebAuthn PRF
+ * factor instead (`CavosStellar.approveThisDeviceWithPasskey`), so it is
+ * not part of this batch. */
 export interface PasskeyApprovable {
   readonly chain: string;
   readonly status: string;
@@ -682,7 +732,7 @@ export interface PasskeyApprovable {
  * for all of them. Only wallets whose status is `needs-device-approval` are
  * touched. Returns the per-chain tx hashes.
  *
- *   await approveDeviceEverywhere([starknet, solana, stellar], passkey);
+ *   await approveDeviceEverywhere([starknet, solana], passkey);
  */
 export async function approveDeviceEverywhere(
   wallets: PasskeyApprovable[],

@@ -9,8 +9,12 @@ export interface ChainCall {
 
 export interface ComputeAddressParams {
   addressSeed: bigint;
-  /** First device signer — part of the address, making it unforgeable. */
-  initialSigner: DevicePublicKey;
+  /**
+   * First device signer. Required by chains whose address derivation still
+   * includes the device pubkey (Solana PDA seeds, Stellar factory salt). The
+   * Starknet adapter IGNORES this — its address is `f(addressSeed)` only.
+   */
+  initialSigner?: DevicePublicKey;
   /** Defaults to `addressSeed` when omitted. */
   salt?: bigint;
 }
@@ -22,7 +26,12 @@ export interface ComputeAddressParams {
 export interface ChainAdapter {
   readonly chain: "starknet" | "stellar" | "solana";
 
-  /** Deterministic address from identity seed + the first device signer. */
+  /**
+   * Deterministic account address. Starknet: `f(addressSeed)` only (device
+   * pubkey not in the derivation — recovery is self-custodial). Solana: also
+   * `f(addressSeed)` (PDA seeds use only the seed). Stellar: classic `G…`
+   * multisig where the address is the source account.
+   */
   computeAddress(params: ComputeAddressParams): string;
 
   /** Call(s) to deploy the account with its first device signer (UDC). */

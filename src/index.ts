@@ -81,25 +81,53 @@ export type { ConnectSolanaOptions, RecoverSolanaOptions } from "./chains/solana
 export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 
-// Stellar (Soroban) — device-native custom account via __check_auth + secp256r1
-export {
-  StellarAdapter,
-  sec1Pubkey,
-  encodeLowSSignature as encodeStellarLowSSignature,
-  deviceSignatureScVal,
-} from "./chains/stellar/StellarAdapter";
-export type { StellarAdapterOptions } from "./chains/stellar/StellarAdapter";
-export {
-  STELLAR_NETWORKS,
-  FACTORY_CONTRACT_ID,
-  DEVICE_ACCOUNT_WASM_HASH,
-  NATIVE_SAC_ID,
-} from "./chains/stellar/constants";
+// Stellar — classic `G…` multisig account (self-custodial, no backend/registry).
+// This is THE Stellar implementation: the Soroban `C…` device-account path was
+// removed in favour of classic G accounts (partner requirement + simpler model).
+export { STELLAR_NETWORKS, HORIZON_URL, XLM_DECIMALS } from "./chains/stellar/constants";
 export type { StellarNetwork } from "./chains/stellar/constants";
 export { CavosStellar } from "./chains/stellar/CavosStellar";
-export type { ConnectStellarOptions, RecoverStellarOptions } from "./chains/stellar/CavosStellar";
+export type {
+  ConnectStellarOptions,
+  StellarConnectStatus,
+} from "./chains/stellar/CavosStellar";
+export { StellarAdapter } from "./chains/stellar/StellarAdapter";
+export type { StellarAdapterOptions } from "./chains/stellar/StellarAdapter";
 export { StellarRelayer } from "./chains/stellar/StellarRelayer";
-export type { StellarRelayerOptions } from "./chains/stellar/StellarRelayer";
+export type {
+  StellarRelayerOptions,
+  StellarRelayKind,
+} from "./chains/stellar/StellarRelayer";
+export {
+  LocalDeviceUnwrapKey,
+  deviceSlotId,
+} from "./chains/stellar/DeviceUnwrapKey";
+export type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
+export { WebCryptoDeviceUnwrapKey } from "./chains/stellar/WebCryptoDeviceUnwrapKey";
+export type { WebCryptoUnwrapKeyOptions } from "./chains/stellar/WebCryptoDeviceUnwrapKey";
+export { PasskeyPrf } from "./chains/stellar/PasskeyPrf";
+export type { PasskeyPrfOptions, PasskeyPrfEnrollParams } from "./chains/stellar/PasskeyPrf";
+export {
+  deriveStellarAddress,
+  deriveStellarMasterKeypair,
+  generateControlKey,
+} from "./chains/stellar/keys";
+export {
+  generateDEK,
+  sealControlSeed,
+  openControlSeed,
+  wrapDEK,
+  unwrapDEK,
+  eciesWrapDEK,
+  eciesUnwrapDEK,
+  derivePasskeyKEK,
+  deriveRecoveryKEK,
+} from "./chains/stellar/envelope";
+export {
+  toDataEntries,
+  fromDataEntries,
+  type AccountEnvelope,
+} from "./chains/stellar/datamap";
 
 // Low-level crypto / encoding (advanced use)
 export { signatureToFelts, recoverYParity } from "./crypto/signature";
