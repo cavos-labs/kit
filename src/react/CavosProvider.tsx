@@ -49,6 +49,16 @@ export interface CavosModalConfig {
   primaryColor?: string;
   /** 'light' (default) or 'dark'. */
   theme?: 'light' | 'dark';
+  /**
+   * Controls the one-time "secure your account" step (passkey / recovery
+   * phrase) shown after a brand-new account is created.
+   *  - 'optional' (default): show the screen with a "Skip for now" button.
+   *  - 'required': show the screen without Skip — the user must set up a
+   *    passkey or recovery phrase before finishing onboarding.
+   *  - 'off': skip the screen entirely; onboarding ends right after the
+   *    account is ready (use this to avoid interrupting your own flow).
+   */
+  secureStep?: 'optional' | 'required' | 'off';
   onSuccess?: (address: string) => void;
 }
 
@@ -595,6 +605,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
           emailMode={modal.emailMode}
           primaryColor={modal.primaryColor}
           theme={modal.theme}
+          secureStep={modal.secureStep}
         />
       )}
     </CavosContext.Provider>
