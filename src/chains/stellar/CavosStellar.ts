@@ -29,6 +29,11 @@ import { StellarRelayer } from "./StellarRelayer";
 import type { StellarNetwork } from "./constants";
 import type { Transaction } from "@stellar/stellar-sdk";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
+import {
+  prefixedMessageBytes,
+  type MessageSignature,
+  type StellarSignedTransaction,
+} from "../../signing";
 
 /** Default starting balance (stroops) for a new account: covers the 1 XLM base
  *  reserve + ~0.5 XLM per subentry (data entries + control signer) with headroom
@@ -233,6 +238,45 @@ export class CavosStellar {
     const control = this.requireControl();
     const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
     return this.submitInner(inner, control, opts);
+  }
+
+  /**
+   * Sign an arbitrary message off-chain with the control key. Nothing is
+   * submitted. Stellar's model differs from Starknet/Solana: the signing key is
+   * the ed25519 **control key** (not a P-256 device key), so `curve` is
+   * `"ed25519"` and `publicKey` is the control key's `G…` address.
+   *
+   * A verifier calls `Keypair.fromPublicKey(controlAddress).verify(messageBytes,
+   * signature)` — standard ed25519 math. The message is prefixed with the Cavos
+   * domain prefix (`"Cavos Signed Message:\n<len>\n"`) before signing.
+   */
+  async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
+    const control = this.requireControl();
+    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const prefixed = prefixedMessageBytes(msgBytes);
+    // stellar-sdk Keypair.sign expects a Buffer and returns a 64-byte Buffer.
+    const sig = control.sign(Buffer.from(prefixed));
+    return {
+      signature: new Uint8Array(sig),
+      publicKey: control.publicKey(),
+      curve: "ed25519",
+    };
+  }
+
+  /**
+   * Build + sign a native XLM payment WITHOUT submitting it. Returns the signed
+   * inner Transaction as base64 XDR. A relayer can fee-bump it (the control
+   * signature stays valid through the fee-bump wrap); or the caller can submit
+   * it directly via Horizon.
+   *
+   * The signature binds to the account's sequence number and the tx has a 180s
+   * timeout, so it is single-use — submit (or fee-bump) promptly.
+   */
+  async signTransaction(amount: bigint, destination: string): Promise<StellarSignedTransaction> {
+    const control = this.requireControl();
+    const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
+    inner.sign(control);
+    return { chain: "stellar", xdr: inner.toXDR() };
   }
 
   /**

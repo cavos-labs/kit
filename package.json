@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Cavos Kit - device-native verifiable smart accounts (secp256r1 device signers). Starknet first, multi-chain by design.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

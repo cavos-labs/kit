@@ -50,6 +50,17 @@ export type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/De
 export { WebCryptoSigner } from "./signer/WebCryptoSigner";
 export type { WebCryptoSignerOptions } from "./signer/WebCryptoSigner";
 
+// Off-chain message signing + sign-without-submit
+export type {
+  MessageSignature,
+  SignedTransaction,
+  StarknetSignedTransaction,
+  StellarSignedTransaction,
+  SolanaSignedTransaction,
+  SignatureCurve,
+} from "./signing";
+export { CAVOS_MESSAGE_PREFIX, prefixedMessageBytes } from "./signing";
+
 // Chain adapters
 export type { ChainAdapter, ChainCall, ComputeAddressParams, ExecuteOptions } from "./chains/ChainAdapter";
 export { StarknetAdapter } from "./chains/starknet/StarknetAdapter";

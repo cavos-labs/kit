@@ -1,4 +1,4 @@
-import { Account, RpcProvider, PaymasterRpc, hash, num, type Call } from "starknet";
+import { Account, RpcProvider, PaymasterRpc, hash, num, ETransactionVersion3, type Call } from "starknet";
 import type { Keypair } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
@@ -25,6 +25,12 @@ import { deriveAddressSeed } from "./identity";
 import type { PasskeySigner, PasskeyEnrollParams } from "./signer/PasskeySigner";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "./crypto/webauthn";
 import type { PasskeyAssertion } from "./crypto/webauthn";
+import { bytesToHex, bigIntTo32Bytes } from "./crypto/encoding";
+import {
+  prefixedMessageBytes,
+  type MessageSignature,
+  type StarknetSignedTransaction,
+} from "./signing";
 import {
   CAVOS_PAYMASTER_URL,
   DEVICE_ACCOUNT_CLASS_HASH,
@@ -449,6 +455,88 @@ export class Cavos {
       feeMode: { mode: "sponsored" },
     });
     return { transactionHash: res.transaction_hash };
+  }
+
+  /**
+   * Sign an arbitrary message off-chain with the device key. Nothing is
+   * submitted; no gas is paid. The signature is over `sha256(prefixedMessage)`
+   * where the prefix is `"Cavos Signed Message:\n<len>\n"` (EIP-191-style).
+   * A verifier recovers the secp256r1 pubkey from `(r, s, yParity)` over that
+   * digest and compares it to the wallet's device pubkey.
+   *
+   * `publicKey` in the result is the uncompressed hex `04‖x‖y` of the device key.
+   */
+  async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
+    if (this.status !== "ready") {
+      throw new Error("kit: this device is not yet an authorized signer of the wallet");
+    }
+    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const prefixed = prefixedMessageBytes(msgBytes);
+    const sig = await this.adapter.signMessageRaw(prefixed);
+    // 64-byte r‖s (Starknet's contract normalizes high-s, so no low-S needed here).
+    const signature = new Uint8Array(64);
+    signature.set(bigIntTo32Bytes(sig.r), 0);
+    signature.set(bigIntTo32Bytes(sig.s), 32);
+    const pk = this.devicePubkey;
+    const publicKey =
+      "04" + bytesToHex(bigIntTo32Bytes(pk.x)).slice(2) + bytesToHex(bigIntTo32Bytes(pk.y)).slice(2);
+    return { signature, publicKey, curve: "secp256r1" };
+  }
+
+  /**
+   * Build + sign a multicall WITHOUT submitting it. Returns the signed invoke
+   * (calldata + 5-felt device signature + nonce + resource bounds). A relayer
+   * can broadcast it later via the account's `invokeFunction`.
+   *
+   * The signature binds to the nonce and resource bounds at sign time — if any
+   * other transaction from this account is submitted first, this signature is
+   * invalid. Broadcast promptly.
+   */
+  async signTransaction(calls: ChainCall[]): Promise<StarknetSignedTransaction> {
+    if (this.status !== "ready") {
+      throw new Error("kit: this device is not yet an authorized signer of the wallet");
+    }
+    // Estimate fee to obtain nonce + resource bounds, then build + sign the
+    // invocation without invoking `invokeFunction` (no submission).
+    const fee = await this.account.estimateInvokeFee(calls as Call[], {
+      skipValidate: false,
+    });
+    const nonce = await this.account.getNonce();
+    const built = await this.account.accountInvocationsFactory(
+      [{ type: "INVOKE" as const, payload: calls as Call[] }],
+      {
+        versions: [ETransactionVersion3.V3],
+        nonce,
+        resourceBounds: fee.resourceBounds,
+        skipValidate: false,
+      },
+    );
+    const inv = built[0] as unknown as {
+      calldata: string[];
+      signature: string | string[];
+      nonce: string;
+      resourceBounds: typeof fee.resourceBounds;
+      version: string;
+    };
+    const signature = Array.isArray(inv.signature) ? inv.signature.map(String) : [String(inv.signature)];
+    const rb = inv.resourceBounds ?? fee.resourceBounds;
+    return {
+      chain: "starknet",
+      calldata: inv.calldata ?? [],
+      signature,
+      nonce: String(inv.nonce ?? nonce),
+      resourceBounds: {
+        l1Gas: {
+          maxAmount: String((rb as { l1_gas: { max_amount: bigint } }).l1_gas.max_amount),
+          maxPricePerUnit: String((rb as { l1_gas: { max_price_per_unit: bigint } }).l1_gas.max_price_per_unit),
+        },
+        l2Gas: {
+          maxAmount: String((rb as { l2_gas: { max_amount: bigint } }).l2_gas.max_amount),
+          maxPricePerUnit: String((rb as { l2_gas: { max_price_per_unit: bigint } }).l2_gas.max_price_per_unit),
+        },
+      },
+      version: String(inv.version ?? ETransactionVersion3.V3),
+    };
   }
 
   /**

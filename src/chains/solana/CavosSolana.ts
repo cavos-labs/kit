@@ -22,6 +22,8 @@ import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySig
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
+import { bytesToHex } from "../../crypto/encoding";
+import { prefixedMessageBytes, type MessageSignature, type SolanaSignedTransaction } from "../../signing";
 
 export interface ConnectSolanaOptions {
   network: SolanaNetwork;
@@ -334,6 +336,49 @@ export class CavosSolana {
     }
     const ixs = await this.adapter.buildExecute(this.address, instructions);
     return this.send(ixs, opts);
+  }
+
+  /**
+   * Sign an arbitrary message off-chain with the device key. Nothing is
+   * submitted and no Solana transaction is involved. The device signs
+   * `sha256(prefixedMessage)` with the Solana-standard prefix
+   * `"\x18Solana Signed Message:\n<len>\n"`, so the signature is verifiable by
+   * any Solana wallet/library that expects the `signMessage` convention.
+   *
+   * `publicKey` is the 33-byte compressed P-256 device key as hex.
+   */
+  async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    }
+    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const prefixed = prefixedMessageBytes(msgBytes);
+    const { signature, pubkey } = await this.adapter.signRaw(prefixed);
+    return { signature, publicKey: bytesToHex(pubkey), curve: "secp256r1" };
+  }
+
+  /**
+   * Build + sign the device's contribution to a SOL transfer WITHOUT submitting.
+   *
+   * **This is not a signed Solana transaction.** The device P-256 key never
+   * signs the Solana transaction itself — it signs a domain-tagged message
+   * (`DOMAIN_TRANSFER ‖ account ‖ destination ‖ amount ‖ nonce`) verified on-chain
+   * by the native secp256r1 precompile. A relayer/feePayer must take this
+   * `(message, signature, publicKey)` triple, assemble the
+   * `[secp256r1 precompile ix, execute_transfer ix]` bundle, add a recent
+   * blockhash + the feePayer's signature, and submit.
+   *
+   * The signature binds to the on-chain account nonce, so it is single-use: if
+   * any other device-signed action from this account lands first, this signature
+   * is invalid.
+   */
+  async signTransaction(amount: bigint, destination: string): Promise<SolanaSignedTransaction> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    }
+    const message = await this.adapter.buildTransferMessage(this.address, destination, amount);
+    const { signature, pubkey } = await this.adapter.signRaw(message);
+    return { chain: "solana", message, signature, publicKey: pubkey };
   }
 
   /**

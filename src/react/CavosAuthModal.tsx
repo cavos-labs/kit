@@ -17,11 +17,23 @@ export interface CavosAuthModalProps {
   onSuccess?: (address: string) => void;
   appName?: string;
   appLogo?: string;
+  /** Logo height in px. Applies to both a custom `appLogo` (img) and the
+   *  default Cavos star. Defaults to 40 (img) / 34 (star). */
+  appLogoSize?: number;
   providers?: ('google' | 'apple' | 'email')[];
   emailMode?: 'magic-link' | 'otp';
   primaryColor?: string;
   /** 'light' (default) or 'dark' */
   theme?: 'light' | 'dark';
+  /** Override the card background color (defaults to white/#111 per theme). */
+  backgroundColor?: string;
+  /** Card / button corner radius in px (card defaults to 16, buttons to 8). */
+  radius?: number;
+  /**
+   * Render the card in-flow (no full-screen overlay/backdrop) so it can be
+   * embedded as a live preview. When true, `open` is ignored (always shown).
+   */
+  inline?: boolean;
   /**
    * Controls the one-time "secure your account" step shown after a new
    * account is created. Defaults to 'optional'.
@@ -50,6 +62,27 @@ function CavosWordmark({ height = 15, color = 'currentColor' }: { height?: numbe
       fill={color}
       xmlns="http://www.w3.org/2000/svg"
       style={{ display: 'block', flexShrink: 0 }}
+      aria-label="Cavos"
+      role="img"
+    >
+      <g transform="translate(0,82) scale(0.1,-0.1)">
+        <path d="M148 630 l-148 -185 68 -3 c193 -9 236 39 230 264 l-3 108 -147 -184z M360 705 c1 -225 37 -269 217 -263 l83 3 -136 170 c-74 94 -142 177 -150 185 -12 12 -14 0 -14 -95z M125 223 c69 -87 136 -171 150 -188 l26 -30 -4 135 c-6 212 -29 240 -201 240 l-96 0 125 -157z M433 364 c-53 -26 -67 -70 -71 -224 -3 -118 -2 -133 11 -120 8 8 76 93 151 188 l136 172 -97 0 c-68 0 -108 -5 -130 -16z" />
+      </g>
+    </svg>
+  );
+}
+
+// Cavos star mark (the 4-point pinwheel). Uses currentColor so it adapts to the
+// modal's theme text color — black on light, white on dark.
+function CavosStar({ size = 34 }: { size?: number }) {
+  return (
+    <svg
+      width={Math.round(size * (66 / 82))}
+      height={size}
+      viewBox="0 0 66 82"
+      fill="currentColor"
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ display: 'block' }}
       aria-label="Cavos"
       role="img"
     >
@@ -300,10 +333,21 @@ function baseOverlay(isMobile: boolean): CSSProperties {
   };
 }
 
-function lightCard(isMobile: boolean, bg: string): CSSProperties {
+function lightCard(isMobile: boolean, bg: string, radius: number, inline: boolean): CSSProperties {
+  if (inline) {
+    return {
+      background: bg,
+      borderRadius: `${radius}px`,
+      width: '100%',
+      maxWidth: '400px',
+      boxShadow: '0 1px 3px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.06)',
+      overflow: 'hidden',
+      transition: 'background-color 0.3s ease, border-radius 0.2s ease',
+    };
+  }
   return isMobile ? {
     background: bg,
-    borderRadius: '20px 20px 0 0',
+    borderRadius: `${radius}px ${radius}px 0 0`,
     width: '100%',
     maxWidth: '100%',
     boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
@@ -311,16 +355,17 @@ function lightCard(isMobile: boolean, bg: string): CSSProperties {
     overflow: 'hidden',
   } : {
     background: bg,
-    borderRadius: '16px',
+    borderRadius: `${radius}px`,
     width: '100%',
     maxWidth: '400px',
     boxShadow: '0 24px 60px rgba(0,0,0,0.22), 0 0 0 1px rgba(0,0,0,0.05)',
     animation: 'cavos-up 0.25s cubic-bezier(0.22,1,0.36,1)',
     overflow: 'hidden',
+    transition: 'background-color 0.3s ease, border-radius 0.2s ease',
   };
 }
 
-function providerBtn(textColor: string): CSSProperties {
+function providerBtn(textColor: string, radius: number): CSSProperties {
   const isLight = textColor === '#111111' || textColor === '#111';
   return {
     width: '100%',
@@ -328,13 +373,13 @@ function providerBtn(textColor: string): CSSProperties {
     padding: '12px 16px',
     background: isLight ? '#fff' : 'rgba(255,255,255,0.04)',
     border: `1px solid ${isLight ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.12)'}`,
-    borderRadius: '8px',
+    borderRadius: `${radius}px`,
     cursor: 'pointer',
     fontSize: '14px',
     fontWeight: 500,
     color: textColor,
     fontFamily: 'inherit',
-    transition: 'background 0.15s, transform 0.1s, border-color 0.15s',
+    transition: 'background 0.15s, transform 0.1s, border-color 0.15s, color 0.25s ease',
     position: 'relative',
   };
 }
@@ -381,10 +426,15 @@ export function CavosAuthModal({
   open,
   onClose,
   appName,
+  appLogo,
+  appLogoSize,
   providers = ['google', 'apple', 'email'],
   emailMode = 'magic-link',
   primaryColor = '#402AFF',
   theme = 'light',
+  backgroundColor: backgroundColorProp,
+  radius,
+  inline = false,
   secureStep = 'optional',
 }: CavosAuthModalProps) {
   const {
@@ -408,7 +458,7 @@ export function CavosAuthModal({
 
   // Theme-derived values
   const isLight = theme !== 'dark';
-  const backgroundColor = isLight ? '#ffffff' : '#111111';
+  const backgroundColor = backgroundColorProp ?? (isLight ? '#ffffff' : '#111111');
   const textColor = isLight ? '#111111' : '#ffffff';
   const subTextColor = isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)';
   const inputBg = isLight ? '#fff' : 'rgba(255,255,255,0.06)';
@@ -416,12 +466,16 @@ export function CavosAuthModal({
   const errBg = isLight ? 'rgba(239,68,68,0.06)' : 'rgba(239,68,68,0.08)';
   const errColor = isLight ? '#dc2626' : '#f87171';
   const errBorder = isLight ? 'rgba(239,68,68,0.18)' : 'rgba(239,68,68,0.2)';
-  const card = lightCard(isMobile, backgroundColor);
-  const overlay = baseOverlay(isMobile);
+  const cardRadius = radius ?? 16;
+  const btnRadius = Math.min(radius ?? 8, 12);
+  const card = lightCard(isMobile, backgroundColor, cardRadius, inline);
+  const overlay: CSSProperties = inline
+    ? { display: 'flex', justifyContent: 'center', width: '100%', fontFamily: FONT }
+    : baseOverlay(isMobile);
   const handle = mobileHandle();
   const footer = footerBar(textColor);
   const close = closeBtn(textColor);
-  const pBtn = providerBtn(textColor);
+  const pBtn = providerBtn(textColor, btnRadius);
 
   const [screen, setScreen] = useState<Screen>('select');
   const [email, setEmail] = useState('');
@@ -718,7 +772,7 @@ export function CavosAuthModal({
     return () => clearTimeout(t);
   }, [resendCountdown]);
 
-  if (!open) return null;
+  if (!open && !inline) return null;
 
   // ── Device approval (waiting for the owner to approve from another device) ─
 
@@ -767,7 +821,7 @@ export function CavosAuthModal({
 
             {passkeySupported ? (
               <>
-                <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s, transform 0.1s' }} onClick={handleSetupPasskey} disabled={pkBusy}>
+                <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s, transform 0.1s' }} onClick={handleSetupPasskey} disabled={pkBusy}>
                   {pkBusy ? <Spinner size={16} color="#fff" /> : <FingerprintIcon size={18} color="#fff" />}
                   {pkBusy ? 'Setting up…' : 'Set up a passkey'}
                 </button>
@@ -779,12 +833,12 @@ export function CavosAuthModal({
                   <span style={{ fontSize: '11px', color: subTextColor, textTransform: 'uppercase', letterSpacing: '0.06em' }}>or</span>
                   <span className="cavos-divider-line" style={{ background: isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)' }} />
                 </div>
-                <button className="cavos-submit-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: inputBorder, background: 'transparent', color: textColor, fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'background 0.15s', opacity: pkBusy ? 0.6 : 1 }} onClick={handleSaveRecovery} disabled={pkBusy}>
+                <button className="cavos-submit-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: inputBorder, background: 'transparent', color: textColor, fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'background 0.15s', opacity: pkBusy ? 0.6 : 1 }} onClick={handleSaveRecovery} disabled={pkBusy}>
                   Save a recovery phrase instead
                 </button>
               </>
             ) : (
-              <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s' }} onClick={handleSaveRecovery} disabled={pkBusy}>
+              <button className="cavos-primary-btn" style={{ width: '100%', padding: '13px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '9px', opacity: pkBusy ? 0.65 : 1, transition: 'opacity 0.15s' }} onClick={handleSaveRecovery} disabled={pkBusy}>
                 {pkBusy && <Spinner size={16} color="#fff" />}
                 {pkBusy ? 'Setting up…' : 'Save a recovery phrase'}
               </button>
@@ -816,13 +870,13 @@ export function CavosAuthModal({
             <p style={{ margin: '0 0 18px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
               Write this down and keep it somewhere safe. It's the only way to get back in if you lose your devices, and we can't recover it for you.
             </p>
-            <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.05)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'}`, borderRadius: '8px', padding: '16px', marginBottom: '12px', fontSize: '14px', fontWeight: 500, color: textColor, wordBreak: 'break-word', lineHeight: 1.6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAlign: 'center' }}>
+            <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.05)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'}`, borderRadius: `${btnRadius}px`, padding: '16px', marginBottom: '12px', fontSize: '14px', fontWeight: 500, color: textColor, wordBreak: 'break-word', lineHeight: 1.6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAlign: 'center' }}>
               {savedRecoveryCode}
             </div>
             <button className="cavos-provider" style={{ ...pBtn, marginBottom: '10px' }} onClick={handleCopyRecovery}>
               <span>{copied ? 'Copied ✓' : 'Copy to clipboard'}</span>
             </button>
-            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s' }} onClick={finishSecureStep}>
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s' }} onClick={finishSecureStep}>
               I've saved it
             </button>
           </div>
@@ -849,7 +903,7 @@ export function CavosAuthModal({
               Confirm with Face ID, Touch ID, or your device PIN to add this device to your account.
             </p>
             {pkError && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{pkError}</div>}
-            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: pkBusy ? 0.65 : 1 }} onClick={handlePasskeyApprove} disabled={pkBusy}>
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: pkBusy ? 'default' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: pkBusy ? 0.65 : 1 }} onClick={handlePasskeyApprove} disabled={pkBusy}>
               {pkBusy && <Spinner size={15} color="#fff" />}
               {pkBusy ? 'Verifying…' : 'Continue with passkey'}
             </button>
@@ -889,12 +943,12 @@ export function CavosAuthModal({
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{error}</div>}
             {expired ? (
-              <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: deviceResendBusy ? 0.65 : 1 }} onClick={handleDeviceResend} disabled={deviceResendBusy}>
+              <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', opacity: deviceResendBusy ? 0.65 : 1 }} onClick={handleDeviceResend} disabled={deviceResendBusy}>
                 {deviceResendBusy && <Spinner size={15} color="#fff" />}
                 {deviceResendBusy ? 'Sending…' : 'Request a new link'}
               </button>
             ) : (
-              <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}`, borderRadius: '8px', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center', marginBottom: '14px' }}>
+              <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}`, borderRadius: `${btnRadius}px`, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center', marginBottom: '14px' }}>
                 <Spinner size={14} color={subTextColor} />
                 <span style={{ fontSize: '12px', color: subTextColor }}>Waiting for approval…</span>
               </div>
@@ -951,7 +1005,7 @@ export function CavosAuthModal({
             <form onSubmit={handleRecoverSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <textarea
                 className="cavos-input-inner"
-                style={{ width: '100%', padding: '12px 14px', border: inputBorder, borderRadius: '8px', fontSize: '14px', color: textColor, background: inputBg, fontFamily: 'inherit', boxSizing: 'border-box', resize: 'vertical', minHeight: 72, lineHeight: 1.5 }}
+                style={{ width: '100%', padding: '12px 14px', border: inputBorder, borderRadius: `${btnRadius}px`, fontSize: '14px', color: textColor, background: inputBg, fontFamily: 'inherit', boxSizing: 'border-box', resize: 'vertical', minHeight: 72, lineHeight: 1.5 }}
                 placeholder="Enter your recovery phrase"
                 value={recoverCode}
                 onChange={e => setRecoverCode(e.target.value)}
@@ -959,7 +1013,7 @@ export function CavosAuthModal({
                 disabled={recoverBusy}
                 autoFocus
               />
-              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: recoverBusy ? 0.65 : 1 }} disabled={recoverBusy}>
+              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: recoverBusy ? 0.65 : 1 }} disabled={recoverBusy}>
                 {recoverBusy && <Spinner size={15} color="#fff" />}
                 {recoverBusy ? 'Restoring access…' : 'Restore access'}
               </button>
@@ -1025,7 +1079,7 @@ export function CavosAuthModal({
               We sent a sign-in link to <strong style={{ color: textColor, fontWeight: 500 }}>{email}</strong>.<br />Open it on this device to continue.
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{error}</div>}
-            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : primaryColor, color: resendCountdown > 0 ? subTextColor : '#fff', fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginBottom: '8px' }} onClick={handleResend} disabled={resendCountdown > 0}>
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : primaryColor, color: resendCountdown > 0 ? subTextColor : '#fff', fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginBottom: '8px' }} onClick={handleResend} disabled={resendCountdown > 0}>
               {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : 'Resend link'}
             </button>
             <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '8px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('magic-link'); setError(''); }}>
@@ -1067,7 +1121,7 @@ export function CavosAuthModal({
                       height: '52px',
                       padding: 0,
                       border: inputBorder,
-                      borderRadius: '8px',
+                      borderRadius: `${btnRadius}px`,
                       fontSize: '22px',
                       fontWeight: 600,
                       color: textColor,
@@ -1089,12 +1143,12 @@ export function CavosAuthModal({
                   />
                 ))}
               </div>
-              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy || otpCode.length !== 6 ? 0.65 : 1 }} disabled={busy || otpCode.length !== 6}>
+              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy || otpCode.length !== 6 ? 0.65 : 1 }} disabled={busy || otpCode.length !== 6}>
                 {busy && <Spinner size={15} color="#fff" />}
                 {busy ? 'Verifying…' : 'Continue'}
               </button>
             </form>
-            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : 'transparent', color: resendCountdown > 0 ? subTextColor : primaryColor, fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginTop: '8px' }} onClick={handleResend} disabled={resendCountdown > 0 || busy}>
+            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : 'transparent', color: resendCountdown > 0 ? subTextColor : primaryColor, fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginTop: '8px' }} onClick={handleResend} disabled={resendCountdown > 0 || busy}>
               {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : 'Resend code'}
             </button>
             <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '8px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('magic-link'); setError(''); setOtpCode(''); }}>
@@ -1126,8 +1180,8 @@ export function CavosAuthModal({
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{error}</div>}
             <form onSubmit={isOtp ? handleOtpRequestSubmit : handleMagicLinkSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <input className="cavos-input-inner" style={{ width: '100%', padding: '12px 14px', border: inputBorder, borderRadius: '8px', fontSize: '14px', color: textColor, background: inputBg, fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color 0.15s' }} type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} required disabled={busy} autoFocus />
-              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: '8px', border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy ? 0.65 : 1 }} disabled={busy}>
+              <input className="cavos-input-inner" style={{ width: '100%', padding: '12px 14px', border: inputBorder, borderRadius: `${btnRadius}px`, fontSize: '14px', color: textColor, background: inputBg, fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color 0.15s' }} type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} required disabled={busy} autoFocus />
+              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy ? 0.65 : 1 }} disabled={busy}>
                 {busy && <Spinner size={15} color="#fff" />}
                 {busy ? 'Sending…' : (isOtp ? 'Send code' : 'Send magic link')}
               </button>
@@ -1149,7 +1203,7 @@ export function CavosAuthModal({
   // Privy/Clerk full-width button look) instead of shifting when text changes.
   // No background box — the brand logos render clean, like native sign-in buttons.
   const btnIcon = (icon: React.ReactNode, busyIcon: React.ReactNode, color: string) => (
-    <span style={{ position: 'absolute', left: '16px', width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color, flexShrink: 0 }}>
+    <span style={{ position: 'absolute', left: '16px', width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color, flexShrink: 0, transition: 'color 0.25s ease' }}>
       {busy ? busyIcon : icon}
     </span>
   );
@@ -1161,8 +1215,23 @@ export function CavosAuthModal({
         <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
 
         <div style={{ padding: isMobile ? '24px 20px 32px' : '40px 24px 24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
+            {appLogo ? (
+              <img
+                src={appLogo}
+                alt={appName || 'Logo'}
+                style={{ display: 'block', height: `${appLogoSize ?? 40}px`, width: 'auto', maxWidth: `${(appLogoSize ?? 40) * 4}px`, objectFit: 'contain' }}
+              />
+            ) : (
+              // Default brand mark: the Cavos star, inheriting the theme text
+              // color so it stays visible on light and dark backgrounds.
+              <span style={{ color: textColor, display: 'flex' }}>
+                <CavosStar size={appLogoSize ?? 34} />
+              </span>
+            )}
+          </div>
           <h2 style={{ margin: '0 0 22px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em', textAlign: 'center' }}>
-            {appName ? `Sign in to ${appName}` : 'Log in or sign up'}
+            {appName ? `Sign in to ${appName}` : 'Sign in or sign up'}
           </h2>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -1190,7 +1259,7 @@ export function CavosAuthModal({
 
             {showEmail && (
               <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => setScreen('magic-link')} disabled={busy}>
-                {btnIcon(<EmailIcon />, <Spinner size={14} color={subTextColor} />, subTextColor)}
+                {btnIcon(<EmailIcon />, <Spinner size={14} color={primaryColor} />, primaryColor)}
                 <span>Continue with email</span>
               </button>
             )}

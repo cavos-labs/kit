@@ -413,6 +413,41 @@ export class SolanaAdapter {
     return { precompileIx };
   }
 
+  /**
+   * Sign `message` with the device key WITHOUT building a precompile ix. Returns
+   * the 64-byte low-S signature + the compressed pubkey. Used by
+   * `CavosSolana.signMessage` (off-chain message) and `signTransaction` (the
+   * device's contribution to a future relayed transaction).
+   */
+  async signRaw(message: Uint8Array): Promise<{ signature: Uint8Array; pubkey: Uint8Array }> {
+    if (!this.opts.signer) throw new Error("kit/solana: signer required to sign");
+    const pubkey = await this.opts.signer.getPublicKey();
+    const sig = await this.opts.signer.sign(message);
+    return { signature: encodeLowSSignature(sig.r, sig.s), pubkey: compressedPubkey(pubkey) };
+  }
+
+  /**
+   * Build the domain-tagged transfer message the device signs (without building
+   * the instructions). Used by `CavosSolana.signTransaction` to expose the
+   * signed transfer message for a relayer to assemble.
+   */
+  async buildTransferMessage(
+    account: string,
+    destination: string,
+    amount: bigint,
+  ): Promise<Uint8Array> {
+    const accountPk = new PublicKey(account);
+    const destPk = new PublicKey(destination);
+    const nonce = await this.fetchNonce(accountPk);
+    return concatBytes(
+      Buffer.from(DOMAIN_TRANSFER),
+      accountPk.toBuffer(),
+      destPk.toBuffer(),
+      u64le(amount),
+      u64le(nonce),
+    );
+  }
+
   private async fetchNonce(account: PublicKey): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(account);
     if (!info) return 0n;

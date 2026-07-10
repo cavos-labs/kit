@@ -1,7 +1,7 @@
 import { hash, num } from "starknet";
 import { sha256 } from "@noble/hashes/sha256";
 import type { ChainAdapter, ChainCall, ComputeAddressParams } from "../ChainAdapter";
-import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
+import type { DeviceSigner, DevicePublicKey, DeviceSignature } from "../../signer/DeviceSigner";
 import { signatureToFelts } from "../../crypto/signature";
 import { u256ToFelts, bigIntTo32Bytes, bytesToByteArrayCalldata, bytesToBigInt } from "../../crypto/encoding";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
@@ -105,6 +105,16 @@ export class StarknetAdapter implements ChainAdapter {
     if (!this.opts.signer) throw new Error("kit/starknet: signer required to sign");
     const sig = await this.opts.signer.sign(bigIntTo32Bytes(txHash));
     return signatureToFelts(sig).map((f) => num.toHex(f));
+  }
+
+  /**
+   * Sign arbitrary bytes (an off-chain message) with the device key. The signer
+   * signs `sha256(bytes)` and returns the raw `(r, s, yParity)` — callers encode
+   * it per chain. Used by `Cavos.signMessage`.
+   */
+  async signMessageRaw(bytes: Uint8Array): Promise<DeviceSignature> {
+    if (!this.opts.signer) throw new Error("kit/starknet: signer required to sign");
+    return this.opts.signer.sign(bytes);
   }
 
   // --- passkey approvers ---

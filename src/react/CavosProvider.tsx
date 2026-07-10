@@ -22,6 +22,7 @@ import type { PasskeyEnrollParams } from '../signer/PasskeySigner';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import { CavosAuthModal } from './CavosAuthModal';
+import type { MessageSignature } from '../signing';
 
 export interface CavosConfig {
   /** Cavos App ID from the dashboard. */
@@ -43,12 +44,19 @@ export interface CavosConfig {
 export interface CavosModalConfig {
   appName?: string;
   appLogo?: string;
+  /** Logo height in px. Applies to both a custom `appLogo` (img) and the
+   *  default Cavos star. Defaults to 40 (img) / 34 (star). */
+  appLogoSize?: number;
   providers?: ('google' | 'apple' | 'email')[];
   /** How the built-in email provider authenticates. Defaults to magic link. */
   emailMode?: 'magic-link' | 'otp';
   primaryColor?: string;
   /** 'light' (default) or 'dark'. */
   theme?: 'light' | 'dark';
+  /** Override the modal card background color (defaults to white/#111 per theme). */
+  backgroundColor?: string;
+  /** Card / button corner radius in px (card defaults to 16, buttons to 8). */
+  radius?: number;
   /**
    * Controls the one-time "secure your account" step (passkey / recovery
    * phrase) shown after a brand-new account is created.
@@ -127,6 +135,14 @@ export interface CavosContextValue {
    * own fee.
    */
   execute: (calls: ChainCall[], opts?: ExecuteOptions) => Promise<{ transactionHash: string }>;
+  /**
+   * Sign an arbitrary message off-chain with the wallet's signing key. Chain-
+   * agnostic (uniform `MessageSignature` return); delegates to
+   * `wallet.signMessage` after narrowing on `wallet.chain`. See
+   * [After sign-in](https://docs.cavos.xyz/docs/post-login) for per-chain formats
+   * and verification.
+   */
+  signMessage: (message: string | Uint8Array) => Promise<MessageSignature>;
   /** Authorize another device signer on this wallet (sponsored add_signer). */
   addSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
   /** Re-request the device-approval email for the current pending request. */
@@ -368,6 +384,16 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     return wallet.execute(calls, opts);
   }, [wallet]);
 
+  // Chain-agnostic off-chain message signing. Every chain's wallet exposes the
+  // same `signMessage(message)` signature returning a uniform `MessageSignature`.
+  const signMessage = useCallback(
+    async (message: string | Uint8Array): Promise<MessageSignature> => {
+      if (!wallet) throw new Error('Not logged in');
+      return wallet.signMessage(message);
+    },
+    [wallet],
+  );
+
   const addSigner = useCallback(
     async (pubkey: { x: bigint; y: bigint }) => {
       if (!wallet) throw new Error('Not logged in');
@@ -581,6 +607,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     verifyOtp,
     handleCallback,
     execute,
+    signMessage,
     addSigner,
     enrollPasskey,
     passkeySupported,
@@ -601,10 +628,13 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
           onClose={closeModal}
           appName={branding.appName ?? modal.appName}
           appLogo={branding.appLogo ?? modal.appLogo}
+          appLogoSize={modal.appLogoSize}
           providers={modal.providers}
           emailMode={modal.emailMode}
           primaryColor={modal.primaryColor}
           theme={modal.theme}
+          backgroundColor={modal.backgroundColor}
+          radius={modal.radius}
           secureStep={modal.secureStep}
         />
       )}
