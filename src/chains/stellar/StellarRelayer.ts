@@ -12,8 +12,11 @@ export interface StellarRelayerOptions {
  *  - `create`         sponsored account creation (relayer = source + sponsor)
  *  - `fee-bump`       a control-signed payment wrapped in a relayer fee-bump
  *  - `sponsored-data` a control-signed data write (add factor/device slot) whose
- *                     new subentry reserves the relayer sponsors */
-export type StellarRelayKind = "create" | "fee-bump" | "sponsored-data";
+ *                     new subentry reserves the relayer sponsors
+ *  - `soroban`        a control-signed Soroban contract invocation wrapped in a
+ *                     relayer fee-bump (the relayer pays the resource + inclusion
+ *                     fees; the account's control key signs the auth entries) */
+export type StellarRelayKind = "create" | "fee-bump" | "sponsored-data" | "soroban";
 
 /**
  * Client for the classic-G sponsoring relayer. Unlike the Soroban relayer (which

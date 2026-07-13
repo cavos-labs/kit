@@ -95,7 +95,9 @@ export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 // Stellar — classic `G…` multisig account (self-custodial, no backend/registry).
 // This is THE Stellar implementation: the Soroban `C…` device-account path was
 // removed in favour of classic G accounts (partner requirement + simpler model).
-export { STELLAR_NETWORKS, HORIZON_URL, XLM_DECIMALS } from "./chains/stellar/constants";
+export { STELLAR_NETWORKS, HORIZON_URL, SOROBAN_RPC_URL, XLM_DECIMALS } from "./chains/stellar/constants";
+export { TrustlessWorkEscrow, deployEscrow, buildEscrowScVal } from "./integrations/trustlesswork";
+export type { EscrowInput, MilestoneInput, EscrowState } from "./integrations/trustlesswork";
 export type { StellarNetwork } from "./chains/stellar/constants";
 export { CavosStellar } from "./chains/stellar/CavosStellar";
 export type {

@@ -2,24 +2,40 @@ import {
   Account,
   Asset,
   BASE_FEE,
+  Config,
+  Contract,
   Horizon,
   Keypair,
   Operation,
   TransactionBuilder,
+  rpc,
+  scValToNative,
   type Transaction,
   type FeeBumpTransaction,
+  type xdr,
 } from "@stellar/stellar-sdk";
-import { HORIZON_URL, STELLAR_NETWORKS, type StellarNetwork } from "./constants";
+import { HORIZON_URL, SOROBAN_RPC_URL, STELLAR_NETWORKS, type StellarNetwork } from "./constants";
 import { toDataEntries, type AccountEnvelope } from "./datamap";
 
 export interface StellarAdapterOptions {
   network: StellarNetwork;
   /** Horizon URL override (else the per-network default). */
   horizonUrl?: string;
+  /** Soroban RPC URL override (else the per-network default). Only used for
+   *  contract invocation; classic account state/pay still goes through Horizon. */
+  rpcUrl?: string;
+  /** Per-request network timeout (ms) for Horizon/RPC calls. Without this the
+   *  Stellar SDK's axios client never aborts, so a slow/stalled Horizon hangs
+   *  `loadAccount` forever — which surfaces as the login stuck on "Setting up
+   *  your account". Defaults to 20s. */
+  requestTimeoutMs?: number;
 }
 
 /** How long a built transaction stays valid before it must be rebuilt. */
 const TX_TIMEOUT = 180;
+
+/** Default per-request timeout for Horizon/RPC reads and submits. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
  * Classic-Stellar (`G…`) multisig account adapter.
@@ -42,12 +58,21 @@ export class StellarAdapter {
   readonly network: StellarNetwork;
   readonly passphrase: string;
   private readonly horizonUrl: string;
+  private readonly rpcUrl: string;
+  private readonly requestTimeoutMs: number;
   private _server?: Horizon.Server;
+  private _rpc?: rpc.Server;
 
   constructor(opts: StellarAdapterOptions) {
     this.network = opts.network;
     this.passphrase = STELLAR_NETWORKS[opts.network].passphrase;
     this.horizonUrl = opts.horizonUrl ?? HORIZON_URL[opts.network];
+    this.rpcUrl = opts.rpcUrl ?? SOROBAN_RPC_URL[opts.network];
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    // Horizon's Server.Options has no per-instance `timeout`; the SDK exposes it
+    // only through the global Config. Without it, a stalled Horizon hangs
+    // `loadAccount` forever (login stuck on "Setting up your account").
+    if (this.requestTimeoutMs > 0) Config.setTimeout(this.requestTimeoutMs);
   }
 
   server(): Horizon.Server {
@@ -57,6 +82,17 @@ export class StellarAdapter {
       });
     }
     return this._server;
+  }
+
+  /** Soroban RPC server (lazily created). Used for contract simulation + submit. */
+  rpc(): rpc.Server {
+    if (!this._rpc) {
+      this._rpc = new rpc.Server(this.rpcUrl, {
+        allowHttp: this.rpcUrl.startsWith("http://"),
+        timeout: this.requestTimeoutMs,
+      });
+    }
+    return this._rpc;
   }
 
   /** Whether the classic account already exists on-chain. */
@@ -269,6 +305,77 @@ export class StellarAdapter {
     return builder.setTimeout(TX_TIMEOUT).build();
   }
 
+  /**
+   * Build a `changeTrust` inner tx (account-sourced, control-signed) that opens a
+   * trustline to a classic asset like USDC — required before the account can hold
+   * or receive that token (e.g. to fund a Trustless Work escrow in USDC).
+   */
+  async buildChangeTrustTx(params: {
+    account: string;
+    asset: { code: string; issuer: string };
+    /** Trustline limit as a 7-dp string; omit for the SDK max. */
+    limit?: string;
+  }): Promise<Transaction> {
+    const source = await this.server().loadAccount(params.account);
+    return new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.passphrase })
+      .addOperation(
+        Operation.changeTrust({
+          asset: new Asset(params.asset.code, params.asset.issuer),
+          limit: params.limit,
+        }),
+      )
+      .setTimeout(TX_TIMEOUT)
+      .build();
+  }
+
+  /**
+   * Build a **sponsored** `changeTrust`: a trustline adds a subentry (~0.5 XLM
+   * reserve), so a 0-balance sponsored account can't open one via a plain
+   * fee-bump. Wrap it in begin/endSponsoringFutureReserves with the relayer as
+   * sponsor + source, exactly like `buildSponsoredDataTx`. Signed by the control
+   * key (account op) + the relayer (source + fee + sponsor).
+   */
+  async buildSponsoredChangeTrustTx(params: {
+    relayer: string;
+    account: string;
+    asset: { code: string; issuer: string };
+    limit?: string;
+  }): Promise<Transaction> {
+    const relayerAccount = await this.server().loadAccount(params.relayer);
+    return new TransactionBuilder(relayerAccount, { fee: BASE_FEE, networkPassphrase: this.passphrase })
+      .addOperation(
+        Operation.beginSponsoringFutureReserves({ sponsoredId: params.account, source: params.relayer }),
+      )
+      .addOperation(
+        Operation.changeTrust({
+          asset: new Asset(params.asset.code, params.asset.issuer),
+          limit: params.limit,
+          source: params.account,
+        }),
+      )
+      .addOperation(Operation.endSponsoringFutureReserves({ source: params.account }))
+      .setTimeout(TX_TIMEOUT)
+      .build();
+  }
+
+  /** A classic token balance (e.g. USDC) in its native decimals as a string, or
+   *  "0" if the account holds no trustline to that asset. */
+  async tokenBalance(address: string, asset: { code: string; issuer: string }): Promise<string> {
+    try {
+      const account = await this.server().loadAccount(address);
+      const bal = account.balances.find(
+        (b) =>
+          (b.asset_type === "credit_alphanum4" || b.asset_type === "credit_alphanum12") &&
+          b.asset_code === asset.code &&
+          b.asset_issuer === asset.issuer,
+      );
+      return bal ? bal.balance : "0";
+    } catch (e) {
+      if (isNotFound(e)) return "0";
+      throw e;
+    }
+  }
+
   /** Wrap a control-signed inner tx in a fee-bump whose fee source is `feeSource`
    *  (the relayer). The inner tx pays nothing; the relayer pays all fees. */
   wrapFeeBump(inner: Transaction, feeSource: string): FeeBumpTransaction {
@@ -284,6 +391,94 @@ export class StellarAdapter {
     } catch (e) {
       throw new Error(`kit/stellar: submit failed: ${horizonError(e)}`);
     }
+  }
+
+  /**
+   * Build a Soroban contract-invocation transaction, sourced by the user's `G…`,
+   * and run it through `prepareTransaction` (simulate → assemble footprint +
+   * resource fees + soroban auth entries). The returned tx is UNSIGNED and ready
+   * for the caller to (a) sign the auth entries whose credential address is the
+   * user, then (b) sign the tx envelope. See `CavosStellar.invokeContract`.
+   *
+   * `args` must already be `xdr.ScVal`s (use `nativeToScVal`/`Address.toScVal`).
+   */
+  async buildInvokeTx(params: {
+    from: string;
+    contractId: string;
+    method: string;
+    args: xdr.ScVal[];
+  }): Promise<Transaction> {
+    const source = await this.rpc().getAccount(params.from);
+    const contract = new Contract(params.contractId);
+    const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.passphrase })
+      .addOperation(contract.call(params.method, ...params.args))
+      .setTimeout(TX_TIMEOUT)
+      .build();
+    return this.rpc().prepareTransaction(tx) as Promise<Transaction>;
+  }
+
+  /** Submit a fully-signed Soroban tx via the RPC and poll until it leaves
+   *  `PENDING`. Returns the tx hash on success; throws on failure. */
+  async submitSoroban(tx: Transaction | FeeBumpTransaction): Promise<string> {
+    const sent = await this.rpc().sendTransaction(tx);
+    if (sent.status === "ERROR") {
+      throw new Error(`kit/stellar: soroban send failed: ${JSON.stringify(sent.errorResult)}`);
+    }
+    for (let i = 0; i < 30; i++) {
+      const got = await this.rpc().getTransaction(sent.hash);
+      if (got.status === "SUCCESS") return sent.hash;
+      if (got.status === "FAILED") {
+        throw new Error(`kit/stellar: soroban tx failed: ${JSON.stringify(got.resultXdr)}`);
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error(`kit/stellar: soroban tx ${sent.hash} not confirmed in time`);
+  }
+
+  /** The current ledger sequence — used to bound Soroban auth-entry validity. */
+  async latestLedger(): Promise<number> {
+    return (await this.rpc().getLatestLedger()).sequence;
+  }
+
+  /**
+   * Read-only contract call: simulate `method(args)` and return the decoded
+   * native result. No account, signing, or submission — for view functions like
+   * the escrow's `get_escrow`. `from` only sources the simulation (any funded or
+   * even the deployer address works).
+   */
+  async readContract(params: {
+    from: string;
+    contractId: string;
+    method: string;
+    args?: xdr.ScVal[];
+  }): Promise<unknown> {
+    const source = await this.rpc().getAccount(params.from);
+    const contract = new Contract(params.contractId);
+    const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.passphrase })
+      .addOperation(contract.call(params.method, ...(params.args ?? [])))
+      .setTimeout(TX_TIMEOUT)
+      .build();
+    const sim = await this.rpc().simulateTransaction(tx);
+    if (rpc.Api.isSimulationError(sim)) {
+      throw new Error(`kit/stellar: read ${params.method} failed: ${sim.error}`);
+    }
+    const retval = sim.result?.retval;
+    return retval ? scValToNative(retval) : undefined;
+  }
+
+  /** Decode the return value of a submitted Soroban tx (e.g. the factory's
+   *  deployed escrow address). Polls until the tx is visible. */
+  async transactionResult(hash: string): Promise<unknown> {
+    for (let i = 0; i < 30; i++) {
+      const got = await this.rpc().getTransaction(hash);
+      if (got.status === "SUCCESS") {
+        const ret = (got as { returnValue?: xdr.ScVal }).returnValue;
+        return ret ? scValToNative(ret) : undefined;
+      }
+      if (got.status === "FAILED") throw new Error(`kit/stellar: tx ${hash} failed`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error(`kit/stellar: tx ${hash} not visible in time`);
   }
 
   /** Build an `Account` handle for a known address + sequence (avoids a Horizon

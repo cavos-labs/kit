@@ -252,7 +252,15 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d?.name) setBranding((b) => ({ ...b, appName: d.name }));
-        if (d?.logo_url) setBranding((b) => ({ ...b, appLogo: d.logo_url }));
+        if (d?.logo_url) {
+          setBranding((b) => ({ ...b, appLogo: d.logo_url }));
+          // Warm the browser cache now, while the modal is still closed. The
+          // <img> only mounts when the modal opens, so without this the logo
+          // downloads cold at open time and visibly pops in after the fallback
+          // mark. Preloading here makes it appear instantly on first open.
+          const img = new Image();
+          img.src = d.logo_url;
+        }
       })
       .catch(() => {});
   }, [config.appId, config.authBackendUrl]);

@@ -483,6 +483,10 @@ export function CavosAuthModal({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [deployState, setDeployState] = useState<'loading' | 'done'>('loading');
+  // Escape hatch: if the deploy/connect stalls (e.g. a slow Horizon read), flip
+  // this after a grace period so the user gets a "taking longer" message + a way
+  // back instead of an indefinite spinner.
+  const [deploySlow, setDeploySlow] = useState(false);
   const [resendCountdown, setResendCountdown] = useState(0);
   const [deviceResendBusy, setDeviceResendBusy] = useState(false);
   const [recoverCode, setRecoverCode] = useState('');
@@ -557,6 +561,17 @@ export function CavosAuthModal({
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
     clearAuthError();
   }, [authError, clearAuthError, screen]);
+
+  // Arm the "taking longer than usual" hint while the deploy spinner is up.
+  useEffect(() => {
+    if (screen !== 'deploying' || deployState !== 'loading') {
+      setDeploySlow(false);
+      return;
+    }
+    setDeploySlow(false);
+    const t = setTimeout(() => setDeploySlow(true), 15000);
+    return () => clearTimeout(t);
+  }, [screen, deployState]);
 
   const triggerDone = useCallback((addr: string) => {
     if (doneHandledRef.current) return;
@@ -1050,9 +1065,31 @@ export function CavosAuthModal({
                 {isDone ? "You're all set" : 'Setting up your account'}
               </h2>
               <p style={{ margin: '6px 0 0', fontSize: '13px', color: subTextColor }}>
-                {isDone ? 'Your account is ready' : 'This only takes a moment…'}
+                {isDone
+                  ? 'Your account is ready'
+                  : deploySlow
+                    ? 'This is taking longer than usual — the network may be slow.'
+                    : 'This only takes a moment…'}
               </p>
             </div>
+            {!isDone && deploySlow && (
+              <button
+                className="cavos-sub-btn"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 500, color: primaryColor, padding: '4px 0 0', fontFamily: 'inherit', transition: 'opacity 0.15s' }}
+                onClick={() => {
+                  if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+                  doneHandledRef.current = false;
+                  secureHandledRef.current = false;
+                  setDeploySlow(false);
+                  setDeployState('loading');
+                  setBusy(false);
+                  setError('');
+                  setScreen('select');
+                }}
+              >
+                Start over
+              </button>
+            )}
           </div>
           {renderFooter()}
         </div>
@@ -1220,7 +1257,9 @@ export function CavosAuthModal({
               <img
                 src={appLogo}
                 alt={appName || 'Logo'}
-                style={{ display: 'block', height: `${appLogoSize ?? 40}px`, width: 'auto', maxWidth: `${(appLogoSize ?? 40) * 4}px`, objectFit: 'contain' }}
+                decoding="async"
+                fetchPriority="high"
+                style={{ display: 'block', height: `${appLogoSize ?? 40}px`, minHeight: `${appLogoSize ?? 40}px`, width: 'auto', maxWidth: `${(appLogoSize ?? 40) * 4}px`, objectFit: 'contain' }}
               />
             ) : (
               // Default brand mark: the Cavos star, inheriting the theme text

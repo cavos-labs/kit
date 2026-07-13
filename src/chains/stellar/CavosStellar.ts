@@ -1,4 +1,4 @@
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, TransactionBuilder, authorizeEntry, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
 import { StellarAdapter } from "./StellarAdapter";
 import {
@@ -40,6 +40,10 @@ import {
  *  for fees and future factor entries. ~5 XLM, recoverable when merged.
  *  Sponsorship (Phase 3) will move this cost to the relayer. */
 const DEFAULT_STARTING_BALANCE = 50_000_000n;
+
+/** How many ledgers a signed Soroban auth entry stays valid (~1h at 5s/ledger).
+ *  Bounds replay of the authorization; the tx timeout is separate and shorter. */
+const AUTH_VALIDITY_LEDGERS = 720;
 
 export interface ConnectStellarOptions {
   network: StellarNetwork;
@@ -241,6 +245,94 @@ export class CavosStellar {
   }
 
   /**
+   * Invoke a Soroban contract method, authorized by this account's control key.
+   *
+   * The full flow: build + simulate the invocation (footprint, resource fees, and
+   * the required `SorobanAuthorizationEntry`s come back from the RPC), then for
+   * every auth entry whose credential address is THIS account's `G…`, re-sign it
+   * with the control key (`authorizeEntry`). Finally sign the tx envelope and
+   * submit via the Soroban RPC (or, when sponsored, fee-bump through the relayer).
+   *
+   * This is what lets a Cavos account act as a `require_auth(role)` signer in
+   * contracts like Trustless Work's escrow (approve/release/dispute/…). `args`
+   * accepts native JS values (converted via `nativeToScVal`) or ready `xdr.ScVal`s.
+   */
+  async invokeContract(params: {
+    contractId: string;
+    method: string;
+    args?: (xdr.ScVal | unknown)[];
+    opts?: ExecuteOptions;
+  }): Promise<string> {
+    const control = this.requireControl();
+    const scArgs = (params.args ?? []).map((a) =>
+      a instanceof xdr.ScVal ? a : nativeToScVal(a),
+    );
+    const prepared = await this.adapter.buildInvokeTx({
+      from: this.address,
+      contractId: params.contractId,
+      method: params.method,
+      args: scArgs,
+    });
+    const signed = await this.signSorobanAuth(prepared, control);
+    return this.submitSoroban(signed, control, params.opts);
+  }
+
+  /**
+   * Open a trustline to a classic asset (e.g. USDC) so the account can hold /
+   * receive it — required before funding a Trustless Work escrow in USDC. A
+   * trustline creates a new subentry (reserve), so when sponsored the relayer
+   * pays it (begin/endSponsoringFutureReserves); `{ sponsored: false }` makes the
+   * account pay its own reserve. Returns the confirmed tx hash.
+   */
+  async addTrustline(
+    asset: { code: string; issuer: string },
+    opts?: ExecuteOptions & { limit?: string },
+  ): Promise<string> {
+    const control = this.requireControl();
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) {
+      const relayerSource = await this.relayer.getSource();
+      const tx = await this.adapter.buildSponsoredChangeTrustTx({
+        relayer: relayerSource,
+        account: this.address,
+        asset,
+        limit: opts?.limit,
+      });
+      tx.sign(control);
+      return this.relayer.submit("sponsored-data", tx.toXDR());
+    }
+    const tx = await this.adapter.buildChangeTrustTx({ account: this.address, asset, limit: opts?.limit });
+    tx.sign(control);
+    return this.adapter.submit(tx);
+  }
+
+  /** This account's balance of a classic token (e.g. USDC) as a 7-dp string, or
+   *  "0" if no trustline exists. Read-only; needs no unlock. */
+  async tokenBalance(asset: { code: string; issuer: string }): Promise<string> {
+    return this.adapter.tokenBalance(this.address, asset);
+  }
+
+  /**
+   * Sign an externally-built transaction XDR with the control key and return the
+   * signed XDR (does NOT submit). This is the wallet-adapter seam: it mirrors a
+   * classic wallet's `signTransaction(unsignedXdr) → signedXdr`, so apps that
+   * build the tx server-side (e.g. Trustless Work's REST API returns an unsigned
+   * XDR) can use a Cavos account as a drop-in signer.
+   *
+   * Handles both auth models: for Soroban invocations whose auth entries name
+   * THIS account it re-signs those entries (`authorizeEntry`); for source-account
+   * auth (and classic txs) the control-key envelope signature is what satisfies
+   * the account. Entries authorizing other addresses are left untouched.
+   */
+  async signXdr(unsignedXdr: string): Promise<string> {
+    const control = this.requireControl();
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, this.adapter.passphrase) as Transaction;
+    const withAuth = await this.signSorobanAuth(tx, control);
+    withAuth.sign(control);
+    return withAuth.toXDR();
+  }
+
+  /**
    * Sign an arbitrary message off-chain with the control key. Nothing is
    * submitted. Stellar's model differs from Starknet/Solana: the signing key is
    * the ed25519 **control key** (not a P-256 device key), so `curve` is
@@ -367,6 +459,57 @@ export class CavosStellar {
    *   - `{ sponsored: false }` → submit directly (the account pays its own fee).
    * Payments add no subentries, so no reserve sponsorship is needed here.
    */
+  /**
+   * Re-sign every Soroban auth entry whose credential address is this account
+   * with the control key, then re-assemble the tx. Entries authorizing OTHER
+   * addresses (e.g. a different escrow role) are left untouched — each party
+   * signs their own. Requires rebuilding the invoke op with the signed entries.
+   */
+  private async signSorobanAuth(prepared: Transaction, control: Keypair): Promise<Transaction> {
+    // A Soroban invocation carries its auth entries on the (invokeHostFunction)
+    // operation. Scan every op so an externally-built XDR isn't assumed op-0.
+    const authOps = (prepared.operations as unknown as { auth?: xdr.SorobanAuthorizationEntry[] }[])
+      .filter((o) => Array.isArray(o.auth) && o.auth.length > 0) as {
+      auth: xdr.SorobanAuthorizationEntry[];
+    }[];
+    if (authOps.length === 0) return prepared;
+
+    const g = Keypair.fromPublicKey(this.address).xdrPublicKey();
+    const validUntil = (await this.adapter.latestLedger()) + AUTH_VALIDITY_LEDGERS;
+    for (const op of authOps) {
+      op.auth = await Promise.all(
+        op.auth.map(async (entry) => {
+          const creds = entry.credentials();
+          // Only address credentials that name THIS account need our signature;
+          // source-account creds and other addresses are left as-is.
+          if (creds.switch().name !== "sorobanCredentialsAddress") return entry;
+          const addr = creds.address().address();
+          if (addr.switch().name !== "scAddressTypeAccount") return entry;
+          if (addr.accountId().toXDR("base64") !== g.toXDR("base64")) return entry;
+          return authorizeEntry(entry, control, validUntil, this.adapter.passphrase);
+        }),
+      );
+    }
+    return prepared;
+  }
+
+  /** Sign the tx envelope with the control key and submit the Soroban tx: sponsored
+   *  (default) → fee-bump through the relayer; else submit directly via the RPC. */
+  private async submitSoroban(
+    tx: Transaction,
+    control: Keypair,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    tx.sign(control);
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) {
+      const feeSource = await this.relayer.getSource();
+      const bump = this.adapter.wrapFeeBump(tx, feeSource);
+      return this.relayer.submit("soroban", bump.toXDR());
+    }
+    return this.adapter.submitSoroban(tx);
+  }
+
   private async submitInner(
     inner: Transaction,
     control: Keypair,

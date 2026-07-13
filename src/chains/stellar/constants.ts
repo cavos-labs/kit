@@ -21,5 +21,12 @@ export const HORIZON_URL = {
   "stellar-mainnet": "https://horizon.stellar.org",
 } as const;
 
+/** Soroban RPC endpoints — used only for contract invocation (simulate, footprint,
+ *  resource fees, submit). Classic account state/pay still goes through Horizon. */
+export const SOROBAN_RPC_URL = {
+  "stellar-testnet": "https://soroban-testnet.stellar.org",
+  "stellar-mainnet": "https://mainnet.sorobanrpc.com",
+} as const;
+
 /** Native XLM has 7 decimals (stroops). */
 export const XLM_DECIMALS = 7;
