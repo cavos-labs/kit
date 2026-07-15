@@ -93,6 +93,8 @@ export interface WalletStatus {
 export interface UserInfo {
   userId: string;
   email?: string;
+  /** Display name from the OAuth id_token (Google only today). May be unset. */
+  name?: string;
   provider?: string;
 }
 
@@ -220,7 +222,9 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const [wallet, setWallet] = useState<CavosWallet | null>(null);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [walletStatus, setWalletStatus] = useState<WalletStatus>(INITIAL_STATUS);
-  const [isLoading, setIsLoading] = useState(false);
+  // Keep children behind the loading state until we have checked for a
+  // persisted identity and silently reconnected this browser's device signer.
+  const [isLoading, setIsLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
@@ -273,7 +277,9 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   // (Starknet-only email flow). The backend dedups within its TTL.
   const resendDeviceApproval = useCallback(async () => {
     const cfg = configRef.current;
-    if (!identity || !wallet || wallet.chain !== 'starknet' || !wallet.pendingRequestId) return;
+    // Email device-approval works on both Starknet and Solana (same secp256r1
+    // device key; backend is chain-agnostic). Other chains have no email flow.
+    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana') || !wallet.pendingRequestId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
     const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId });
@@ -304,7 +310,10 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     setWallet(w);
     setIdentity(id);
 
-    const pendingRequestId = w.chain === 'starknet' ? w.pendingRequestId : null;
+    // Starknet and Solana both support the email device-approval flow (both carry
+    // a pendingRequestId when a returning-new-device request was filed). Stellar
+    // has its own passkey-PRF device model with no email flow today.
+    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
     let hasPasskey = false;
     if (w.status === 'needs-device-approval') {
       try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
@@ -357,6 +366,37 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const handleCallback = useCallback(async (authData: string) => {
     const id = await auth.handleCallback(authData);
     await connect(id);
+  }, [auth, connect]);
+
+  // A device signer is already persisted securely in IndexedDB. Restore only
+  // the non-secret identity metadata from localStorage, then reconnect the
+  // existing signer without another OAuth prompt.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("auth_data") || params.get("zk_auth_data")) return;
+
+    const savedIdentity = auth.restoreIdentity();
+    if (!savedIdentity) {
+      setIsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        await connect(savedIdentity);
+      } catch (e) {
+        // Keep the identity so a transient RPC failure does not force OAuth on
+        // the next launch. The app can surface the normal sign-in UI if needed.
+        console.warn("[CavosProvider] silent reconnect failed:", e);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [auth, connect]);
 
   const login = useCallback(async (provider: 'google' | 'apple') => {
@@ -589,18 +629,19 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   }, [walletStatus.awaitingApproval, walletStatus.pendingRequestId, identity, connect]);
 
   const logout = useCallback(() => {
+    auth.clearStoredIdentity();
     setWallet(null);
     setIdentity(null);
     setWalletStatus(INITIAL_STATUS);
     setAuthError(null);
-  }, []);
+  }, [auth]);
 
   const value: CavosContextValue = {
     openModal,
     closeModal,
     isAuthenticated: !!wallet,
     user: identity
-      ? { userId: identity.userId, email: identity.email, provider: identity.provider }
+      ? { userId: identity.userId, email: identity.email, name: identity.name, provider: identity.provider }
       : null,
     chain: config.chain ?? 'starknet',
     wallet,

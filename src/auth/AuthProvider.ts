@@ -11,6 +11,13 @@ export interface Identity {
   userId: string;
   /** Optional metadata (email, provider) for display only. */
   email?: string;
+  /**
+   * Display name from the OAuth id_token (standard OIDC `name` claim).
+   * Populated by Google sign-in; absent for email/OTP/magic-link and Apple
+   * (the Cavos-signed Firebase JWT doesn't mint it). Optional on purpose —
+   * consumers should fall back to `email` / `userId` when unset.
+   */
+  name?: string;
   provider?: "google" | "apple" | "email" | "otp" | string;
 }
 

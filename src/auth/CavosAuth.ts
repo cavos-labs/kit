@@ -30,12 +30,41 @@ export interface CavosAuthOptions {
  */
 export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
+  private readonly identityStorageKey: string;
   /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
   private pendingNonce: string | null = null;
   private last: Identity | null = null;
 
   constructor(private readonly opts: CavosAuthOptions = {}) {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
+    this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
+  }
+
+  /**
+   * Restore the last confirmed identity for this app on this browser. This is
+   * deliberately only public profile data — never an OAuth token or private
+   * key. The device signer remains protected in IndexedDB/WebCrypto.
+   */
+  restoreIdentity(): Identity | null {
+    if (typeof window === "undefined") return null;
+    try {
+      const value = window.localStorage.getItem(this.identityStorageKey);
+      if (!value) return null;
+      const identity = JSON.parse(value) as Identity;
+      if (!identity.userId || typeof identity.userId !== "string") return null;
+      this.last = identity;
+      return identity;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Clear the persisted identity on an explicit user logout. */
+  clearStoredIdentity(): void {
+    this.last = null;
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(this.identityStorageKey);
+    }
   }
 
   /** Redirect URL for Google login (open it; user returns to your redirectUri). */
@@ -127,6 +156,9 @@ export class CavosAuth implements AuthProvider {
     return this.remember({
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? emailOverride,
+      // Standard OIDC `name` — present on Google's id_token, absent on the
+      // Cavos-signed Firebase JWT (email/OTP/magic-link) and Apple's token.
+      name: claims.name,
       provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
     });
   }
@@ -151,6 +183,9 @@ export class CavosAuth implements AuthProvider {
 
   private remember(id: Identity): Identity {
     this.last = id;
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+    }
     return id;
   }
 

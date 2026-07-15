@@ -18,6 +18,7 @@ import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
+import { HttpRecoveryClient } from "../../recovery/HttpRecoveryClient";
 import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySigner";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
@@ -102,6 +103,8 @@ export interface RecoverSolanaOptions {
 export class CavosSolana {
   /** Discriminant for the `CavosWallet` union — narrows `execute()` per chain. */
   readonly chain = "solana" as const;
+  /** Request id of the pending device-addition, when status is needs-device-approval. */
+  pendingRequestId: string | null = null;
   /** True when this connect just created a brand-new account (first sign-up). */
   isNewAccount = false;
 
@@ -159,24 +162,20 @@ export class CavosSolana {
         ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection })
         : undefined);
 
-    // Returning user on another device? The address is device-bound, so the
-    // registry (not the identity alone) recognizes it. A new device is flagged
-    // needs-device-approval (add it from an existing device) — same model as Starknet.
-    const existing = await registry.lookup(identity.userId);
-    if (existing) {
-      const isSigner = await adapter.isAuthorizedSigner(existing.address, devicePubkey);
-      return new CavosSolana(
-        identity,
-        existing.address,
-        isSigner ? "ready" : "needs-device-approval",
-        connection,
-        adapter,
-        devicePubkey,
-        relayer,
-        opts.feePayer,
-      );
-    }
+    // Recovery client drives the email device-approval flow (same as Starknet):
+    // when a returning user signs in on a new device, we ask the backend to email
+    // the owner an approval link. Chain-agnostic — Solana's secp256r1 device key
+    // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
+    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId }) : null;
 
+    // Deterministic account resolution. The account PDA is [ACCOUNT_SEED,
+    // addressSeed] where addressSeed = f(userId, appSalt) — it does NOT depend on
+    // any device key, so the address is fully derivable from the identity + app
+    // config. We therefore DERIVE it here and never "recover" it from a backend
+    // registry: a registry keyed by userId alone ignores appSalt, so a lookup
+    // would return a stale address whenever appSalt changes and wrongly force the
+    // device-approval flow against the wrong (old) account. Accounts are
+    // deterministic — derive, don't recover.
     const address = adapter.computeAddress(addressSeed);
     const deployed = (await connection.getAccountInfo(new PublicKey(address))) !== null;
 
@@ -198,9 +197,17 @@ export class CavosSolana {
       } else {
         throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize a new account");
       }
+
+      // Record the deterministic address for backend bookkeeping (device-approval
+      // emails, analytics). Best-effort — it never drives address resolution, so a
+      // failure must not break connect.
+      try {
+        await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
+      } catch (e) {
+        console.warn("[Cavos/solana] registry.register failed (non-fatal):", e);
+      }
     }
 
-    await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
     const isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
     const wallet = new CavosSolana(
       identity,
@@ -214,6 +221,31 @@ export class CavosSolana {
     );
     // First sign-up: a fresh initialize that made this device an authorized signer.
     wallet.isNewAccount = !deployed && isSigner;
+
+    // Deployed account, but THIS device isn't an authorized signer yet — a genuine
+    // returning-user-on-a-new-device case (same userId+appSalt, different device
+    // key). Ask the backend to email the owner an approval link; the approving
+    // device signs add_signer on-chain. Best-effort: never blocks connect.
+    if (deployed && !isSigner && recovery) {
+      const dedup = lastDeviceRequest.get(identity.userId);
+      const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
+      try {
+        if (fresh) {
+          wallet.pendingRequestId = dedup!.requestId;
+        } else {
+          const { requestId } = await recovery.requestDeviceAddition({
+            userId: identity.userId,
+            accountAddress: address,
+            newSigner: devicePubkey,
+            ...(identity.email ? { email: identity.email } : {}),
+          });
+          wallet.pendingRequestId = requestId;
+          lastDeviceRequest.set(identity.userId, { requestId, requestedAt: Date.now() });
+        }
+      } catch (e) {
+        console.warn("[Cavos/solana] requestDeviceAddition failed:", e);
+      }
+    }
     return wallet;
   }
 
@@ -506,3 +538,10 @@ export class CavosSolana {
 }
 
 const defaultRegistry = new InMemoryWalletRegistry();
+
+// De-dup window for the email device-approval request — collapses a page refresh
+// / reconnect burst so the owner doesn't get one email per attempt. The backend
+// already dedups by request id within its 24h TTL; this client-side guard avoids
+// minting fresh request ids on every reconnect. Mirrors Starknet (Cavos.ts).
+const DEVICE_REQUEST_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
+const lastDeviceRequest = new Map<string, { requestId: string; requestedAt: number }>();

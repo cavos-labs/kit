@@ -261,15 +261,15 @@ const BrandShield = ({ size = 46, tone = BRAND }: { size?: number; tone?: string
   </svg>
 );
 
-const BrandFingerprint = ({ size = 46 }: { size?: number }) => (
+const BrandFingerprint = ({ size = 46, tone = BRAND }: { size?: number; tone?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <circle cx="12" cy="12" r="10" fill={BRAND} />
-    <g stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6.4 10.6A6.4 6.4 0 0 1 12 6.2a6.3 6.3 0 0 1 4.8 2.15" />
-      <path d="M8.2 16.8c.45-1.15.7-2.6.7-4a3.8 3.8 0 0 1 .25-1.35" />
-      <path d="M12 10.3a2 2 0 0 0-2 2c0 1.4-.17 3-.55 4.35" />
-      <path d="M15 12.2c0 2.2-.27 4.3-.85 6" />
-      <path d="M16.9 16.6c.27-1.3.4-2.65.4-3.95a5.3 5.3 0 0 0-8-4.55" />
+    <circle cx="12" cy="12" r="10" fill={tone} />
+    <g stroke="#fff" strokeWidth="1.4" strokeLinecap="round" fill="none">
+      <path d="M7.6 11.8a4.4 4.4 0 0 1 8.8 0" />
+      <path d="M9.9 17.2c.45-1.2.7-2.7.7-4.1" />
+      <path d="M12 10.4a2 2 0 0 0-2 2c0 1.7-.2 3.4-.7 5" />
+      <path d="M14 12.4c0 2.2-.25 4.4-.85 6.2" />
+      <path d="M16.2 16.4c.3-1.3.4-2.7.4-4a4.6 4.6 0 0 0-.15-1.2" />
     </g>
   </svg>
 );
@@ -282,9 +282,9 @@ const BrandPhone = ({ size = 46, tone = BRAND }: { size?: number; tone?: string 
   </svg>
 );
 
-const BrandKey = ({ size = 46 }: { size?: number }) => (
+const BrandKey = ({ size = 46, tone = BRAND }: { size?: number; tone?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <path d="M14.5 3a6.5 6.5 0 0 0-6.27 8.2L3 16.43V21h4.5v-2.2h2.2v-2.2h1.86A6.5 6.5 0 1 0 14.5 3z" fill={BRAND} />
+    <path d="M14.5 3a6.5 6.5 0 0 0-6.27 8.2L3 16.43V21h4.5v-2.2h2.2v-2.2h1.86A6.5 6.5 0 1 0 14.5 3z" fill={tone} />
     <circle cx="16.2" cy="7.8" r="1.7" fill="#fff" />
   </svg>
 );
@@ -825,7 +825,7 @@ export function CavosAuthModal({
         <div style={{ ...card, position: 'relative' }}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: isMobile ? '28px 24px 28px' : '44px 24px 28px', textAlign: 'center' }}>
-            <BrandBadge><BrandShield /></BrandBadge>
+            <BrandBadge><BrandShield tone={primaryColor} /></BrandBadge>
             <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
               Keep your account safe
             </h2>
@@ -910,7 +910,7 @@ export function CavosAuthModal({
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
-            <BrandBadge><BrandFingerprint /></BrandBadge>
+            <BrandBadge><BrandFingerprint tone={primaryColor} /></BrandBadge>
             <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
               Verify it's you
             </h2>
@@ -947,7 +947,7 @@ export function CavosAuthModal({
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
-            <BrandBadge><BrandPhone tone={expired ? '#dc2626' : BRAND} /></BrandBadge>
+            <BrandBadge><BrandPhone tone={expired ? '#dc2626' : primaryColor} /></BrandBadge>
             <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
               {expired ? 'Approval link expired' : 'Approve this device'}
             </h2>
@@ -1011,7 +1011,7 @@ export function CavosAuthModal({
           </button>
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 22px 32px' : '52px 22px 22px' }}>
-            <BrandBadge><BrandKey /></BrandBadge>
+            <BrandBadge><BrandKey tone={primaryColor} /></BrandBadge>
             <h2 style={{ margin: '0 0 6px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em', textAlign: 'center' }}>Sign in with recovery phrase</h2>
             <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, textAlign: 'center', lineHeight: 1.5 }}>
               Enter the recovery phrase you saved when you set up this account.
