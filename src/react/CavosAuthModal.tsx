@@ -7,6 +7,7 @@ import React, {
   useRef,
   type CSSProperties,
 } from 'react';
+import { Fingerprint } from '@phosphor-icons/react';
 import { useCavos } from './CavosProvider';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -262,16 +263,7 @@ const BrandShield = ({ size = 46, tone = BRAND }: { size?: number; tone?: string
 );
 
 const BrandFingerprint = ({ size = 46, tone = BRAND }: { size?: number; tone?: string }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <circle cx="12" cy="12" r="10" fill={tone} />
-    <g stroke="#fff" strokeWidth="1.4" strokeLinecap="round" fill="none">
-      <path d="M7.6 11.8a4.4 4.4 0 0 1 8.8 0" />
-      <path d="M9.9 17.2c.45-1.2.7-2.7.7-4.1" />
-      <path d="M12 10.4a2 2 0 0 0-2 2c0 1.7-.2 3.4-.7 5" />
-      <path d="M14 12.4c0 2.2-.25 4.4-.85 6.2" />
-      <path d="M16.2 16.4c.3-1.3.4-2.7.4-4a4.6 4.6 0 0 0-.15-1.2" />
-    </g>
-  </svg>
+  <Fingerprint aria-hidden="true" size={size} weight="regular" color={tone} />
 );
 
 const BrandPhone = ({ size = 46, tone = BRAND }: { size?: number; tone?: string }) => (
