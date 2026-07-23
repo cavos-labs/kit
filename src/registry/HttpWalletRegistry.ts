@@ -6,6 +6,8 @@ export interface HttpWalletRegistryOptions {
   baseUrl: string;
   /** The Cavos App ID — authenticates the SDK calls (verifyAppId). */
   appId: string;
+  /** Optional Cavos console environment. Omitted means production. */
+  environment?: "development" | "production";
   /** Network the wallet lives on (e.g. "sepolia"). */
   network: string;
 }
@@ -34,6 +36,7 @@ export class HttpWalletRegistry implements WalletRegistry {
     url.searchParams.set("app_id", this.opts.appId);
     url.searchParams.set("user_social_id", userId);
     url.searchParams.set("network", this.opts.network);
+    if (this.opts.environment) url.searchParams.set("environment", this.opts.environment);
 
     const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
     if (!res.ok) throw new Error(`registry lookup failed: ${res.status}`);
@@ -60,6 +63,7 @@ export class HttpWalletRegistry implements WalletRegistry {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         app_id: this.opts.appId,
+        ...(this.opts.environment ? { environment: this.opts.environment } : {}),
         user_social_id: params.userId,
         network: this.opts.network,
         address: params.address,

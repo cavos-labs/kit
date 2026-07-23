@@ -22,6 +22,71 @@ entry point.
 npm install @cavos/kit
 ```
 
+## React Native / Expo
+
+React Native is supported through the native entrypoint on **iOS 16+** and
+**Android 9+**. It uses Secure Enclave / Android Keystore keys and therefore
+requires a bare React Native app or an Expo development build (Expo Go cannot
+load custom native modules).
+
+```bash
+npm install @cavos/kit expo-modules-core expo-web-browser expo-linking
+```
+
+For Expo, configure the plugin and rebuild the native app:
+
+```json
+{
+  "expo": {
+    "plugins": [["@cavos/kit", { "rpId": "app.example.com", "scheme": "myapp" }]]
+  }
+}
+```
+
+```tsx
+import { CavosProvider, useCavos } from "@cavos/kit/react-native";
+
+export function Root() {
+  return (
+    <CavosProvider
+      config={{
+        appId: "your-app-id",
+        chain: "solana", // "starknet" | "solana" | "stellar"
+        network: "testnet",
+        appSalt: "your-stable-app-salt",
+        redirectUri: "myapp://cavos-auth",
+        rpId: "app.example.com",
+      }}
+      modal={{ appName: "My App", emailMode: "otp" }}
+    >
+      <App />
+    </CavosProvider>
+  );
+}
+
+function App() {
+  const { openModal, wallet, capabilities } = useCavos();
+  // `wallet` remains the same Starknet/Solana/Stellar discriminated union.
+  return null;
+}
+```
+
+Register `redirectUri` exactly in the app's **Callback URLs** in the Cavos
+dashboard. Native passkeys also require:
+
+- `https://<rpId>/.well-known/apple-app-site-association` with the iOS app ID.
+- `https://<rpId>/.well-known/assetlinks.json` with the Android package and
+  signing-certificate fingerprint.
+
+The default key policy prefers Secure Enclave, StrongBox, or TEE and falls back
+to an OS-protected non-exportable key. Set `minimumKeySecurity: "hardware"` to
+reject that fallback. Stellar passkey recovery uses PRF when the credential
+provider supports it; otherwise the SDK surfaces a recovery-code fallback.
+
+`logout()` only clears the saved identity. To intentionally remove the local
+device, call `deleteDeviceKeys(identity.userId + ":" + appSalt)`. Reinstalling
+the application also creates a new device that must be approved or recovered.
+
 ## Concepts
 
 | Piece | Role |

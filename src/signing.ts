@@ -9,6 +9,8 @@
  * returning the signed artifact a relayer/backend can broadcast later.
  */
 
+import { utf8ToBytes } from "./crypto/encoding";
+
 /** Curve a signature was produced with. Determines how a verifier checks it. */
 export type SignatureCurve = "secp256r1" | "ed25519";
 
@@ -97,9 +99,9 @@ export const CAVOS_MESSAGE_PREFIX = "Cavos Signed Message:\n";
 export function prefixedMessageBytes(message: Uint8Array): Uint8Array {
   const len = String(message.length);
   const parts = [
-    new TextEncoder().encode(CAVOS_MESSAGE_PREFIX),
-    new TextEncoder().encode(len),
-    new TextEncoder().encode("\n"),
+    utf8ToBytes(CAVOS_MESSAGE_PREFIX),
+    utf8ToBytes(len),
+    utf8ToBytes("\n"),
     message,
   ];
   const total = parts.reduce((n, p) => n + p.length, 0);

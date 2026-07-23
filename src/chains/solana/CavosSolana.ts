@@ -8,7 +8,6 @@ import {
 } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
-import { WebCryptoSigner } from "../../signer/WebCryptoSigner";
 import type { WalletRegistry } from "../../registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
@@ -19,11 +18,11 @@ import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
 import { HttpRecoveryClient } from "../../recovery/HttpRecoveryClient";
-import type { PasskeySigner, PasskeyEnrollParams } from "../../signer/PasskeySigner";
+import type { PasskeyApprover, PasskeyEnrollParams } from "../../signer/PasskeyProvider";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
-import { bytesToHex } from "../../crypto/encoding";
+import { bytesToHex, utf8ToBytes } from "../../crypto/encoding";
 import { prefixedMessageBytes, type MessageSignature, type SolanaSignedTransaction } from "../../signing";
 
 export interface ConnectSolanaOptions {
@@ -33,6 +32,8 @@ export interface ConnectSolanaOptions {
   identity?: Identity;
   appSalt: string;
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: "development" | "production";
   backendUrl?: string;
   registry?: WalletRegistry;
   /** RPC override (else the network default). */
@@ -73,6 +74,8 @@ export interface RecoverSolanaOptions {
   network: SolanaNetwork;
   appSalt: string;
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: "development" | "production";
   backendUrl?: string;
   registry?: WalletRegistry;
   /** RPC override (else the network default). */
@@ -141,7 +144,7 @@ export class CavosSolana {
 
     const signer = opts.createSigner
       ? await opts.createSigner(`${identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${identity.userId}:${opts.appSalt}` });
+      : await loadDefaultWebSigner(`${identity.userId}:${opts.appSalt}`);
     const devicePubkey = await signer.getPublicKey();
 
     const adapter = new SolanaAdapter({ programId: opts.programId, connection, signer });
@@ -151,7 +154,7 @@ export class CavosSolana {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
         : defaultRegistry);
 
     // Default to gasless sponsorship via the Cavos relayer when an appId is set,
@@ -159,14 +162,14 @@ export class CavosSolana {
     const relayer =
       opts.relayer ??
       (opts.appId
-        ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection })
+        ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection, environment: opts.environment })
         : undefined);
 
     // Recovery client drives the email device-approval flow (same as Starknet):
     // when a returning user signs in on a new device, we ask the backend to email
     // the owner an approval link. Chain-agnostic — Solana's secp256r1 device key
     // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
-    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId }) : null;
+    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null;
 
     // Deterministic account resolution. The account PDA is [ACCOUNT_SEED,
     // addressSeed] where addressSeed = f(userId, appSalt) — it does NOT depend on
@@ -260,7 +263,7 @@ export class CavosSolana {
    * requires a ready device. Idempotent. Returns the passkey pubkey + tx hash.
    */
   async enrollPasskey(
-    passkey: PasskeySigner,
+    passkey: PasskeyApprover,
     params: PasskeyEnrollParams,
   ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
     const enrolled = await passkey.enroll(params);
@@ -297,7 +300,7 @@ export class CavosSolana {
    * device with the user's synced passkey. Gasless via the relayer — the bundle
    * carries the passkey's WebAuthn assertion, so no device signature is needed.
    */
-  async approveThisDeviceWithPasskey(passkey: PasskeySigner): Promise<string> {
+  async approveThisDeviceWithPasskey(passkey: PasskeyApprover): Promise<string> {
     if (this.status === "ready") {
       throw new Error("kit/solana: this device is already an authorized signer");
     }
@@ -383,7 +386,7 @@ export class CavosSolana {
     if (this.status !== "ready") {
       throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
     }
-    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
     const { signature, pubkey } = await this.adapter.signRaw(prefixed);
     return { signature, publicKey: bytesToHex(pubkey), curve: "secp256r1" };
@@ -459,7 +462,7 @@ export class CavosSolana {
     // The new device's signer (created/loaded the same way connect() does).
     const signer = opts.createSigner
       ? await opts.createSigner(`${opts.identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${opts.identity.userId}:${opts.appSalt}` });
+      : await loadDefaultWebSigner(`${opts.identity.userId}:${opts.appSalt}`);
     const devicePubkey = await signer.getPublicKey();
 
     // The backup key drives THIS transaction: it's the only signer that can
@@ -477,7 +480,7 @@ export class CavosSolana {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
         : defaultRegistry);
     const existing = await registry.lookup(opts.identity.userId);
     if (!existing) {
@@ -487,7 +490,7 @@ export class CavosSolana {
     const relayer =
       opts.relayer ??
       (opts.appId
-        ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection })
+        ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection, environment: opts.environment })
         : undefined);
 
     // Authorise the new device, signed by the backup key (sponsored by the relayer,
@@ -545,3 +548,13 @@ const defaultRegistry = new InMemoryWalletRegistry();
 // minting fresh request ids on every reconnect. Mirrors Starknet (Cavos.ts).
 const DEVICE_REQUEST_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
 const lastDeviceRequest = new Map<string, { requestId: string; requestedAt: number }>();
+
+async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
+  if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {
+    throw new Error(
+      "kit/solana: this runtime requires a createSigner implementation; React Native apps must import @cavos/kit/react-native",
+    );
+  }
+  const { WebCryptoSigner } = await import("../../signer/WebCryptoSigner");
+  return WebCryptoSigner.loadOrCreate({ keyId });
+}

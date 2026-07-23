@@ -1,7 +1,9 @@
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import type { CavosStellar } from "../chains/stellar/CavosStellar";
 import type { StellarAdapter } from "../chains/stellar/StellarAdapter";
 import type { ExecuteOptions } from "../chains/ChainAdapter";
+import { secureRandomBytes } from "../crypto/encoding";
 
 /**
  * Turnkey wrapper over `CavosStellar.invokeContract` for Trustless Work's
@@ -248,7 +250,7 @@ export async function deployEscrow(
     opts?: ExecuteOptions;
   },
 ): Promise<{ escrowId: string; txHash: string }> {
-  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const salt = secureRandomBytes(32);
   const txHash = await wallet.invokeContract({
     contractId: params.factoryId,
     method: "tw_new_single_release_escrow",

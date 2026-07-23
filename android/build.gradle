@@ -1,0 +1,27 @@
+buildscript {
+  ext.safeExtGet = { prop, fallback -> rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'xyz.cavos.kit'
+version = '0.1.0'
+
+android {
+  namespace "xyz.cavos.kit"
+  compileSdkVersion safeExtGet('compileSdkVersion', 35)
+  defaultConfig {
+    minSdkVersion 28
+    targetSdkVersion safeExtGet('targetSdkVersion', 35)
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation 'androidx.credentials:credentials:1.5.0'
+  implementation 'androidx.credentials:credentials-play-services-auth:1.5.0'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+  androidTestImplementation 'androidx.test:runner:1.6.2'
+}

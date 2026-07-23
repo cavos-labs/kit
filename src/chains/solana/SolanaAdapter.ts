@@ -5,6 +5,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from "@solana/web3.js";
+import { Buffer } from "buffer";
 import { sha256 } from "@noble/hashes/sha256";
 import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
 import { bigIntTo32Bytes } from "../../crypto/encoding";

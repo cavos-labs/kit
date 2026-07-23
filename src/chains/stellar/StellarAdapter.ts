@@ -14,6 +14,7 @@ import {
   type FeeBumpTransaction,
   type xdr,
 } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import { HORIZON_URL, SOROBAN_RPC_URL, STELLAR_NETWORKS, type StellarNetwork } from "./constants";
 import { toDataEntries, type AccountEnvelope } from "./datamap";
 

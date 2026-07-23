@@ -47,6 +47,13 @@ export { BackupSigner, generateRecoveryCode, deriveBackupKey } from "./recovery/
 
 // Signers
 export type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/DeviceSigner";
+export type {
+  PasskeyApprover,
+  PasskeyPrfProvider,
+  PasskeyEnrollParams,
+  PasskeyPrfEnrollResult,
+  EnrolledPasskey,
+} from "./signer/PasskeyProvider";
 export { WebCryptoSigner } from "./signer/WebCryptoSigner";
 export type { WebCryptoSignerOptions } from "./signer/WebCryptoSigner";
 
@@ -147,8 +154,6 @@ export { signatureToFelts, recoverYParity } from "./crypto/signature";
 export { PasskeySigner } from "./signer/PasskeySigner";
 export type {
   PasskeySignerOptions,
-  PasskeyEnrollParams,
-  EnrolledPasskey,
 } from "./signer/PasskeySigner";
 export type { PasskeyAssertion } from "./crypto/webauthn";
 export {

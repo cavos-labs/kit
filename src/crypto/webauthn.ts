@@ -1,3 +1,5 @@
+import { Buffer } from "buffer";
+
 /**
  * WebAuthn (passkey) helpers for the passkey-approval flow.
  *
@@ -14,7 +16,7 @@
 import { p256 } from "@noble/curves/p256";
 import { sha256 } from "@noble/hashes/sha256";
 import type { DevicePublicKey } from "../signer/DeviceSigner";
-import { bytesToBigInt } from "./encoding";
+import { bytesToBigInt, bytesToUtf8 } from "./encoding";
 
 /** A parsed passkey assertion, chain-agnostic. */
 export interface PasskeyAssertion {
@@ -126,7 +128,7 @@ export function lowS(s: bigint): bigint {
 
 /** Byte offset of the base64url `challenge` string inside `clientDataJSON`. */
 export function challengeOffsetOf(clientDataJSON: Uint8Array, challengeB64: string): number {
-  const text = new TextDecoder().decode(clientDataJSON);
+  const text = bytesToUtf8(clientDataJSON);
   const idx = text.indexOf(challengeB64);
   if (idx < 0) throw new Error("kit/webauthn: challenge not found in clientDataJSON");
   // clientDataJSON is ASCII, so the char index equals the byte index.

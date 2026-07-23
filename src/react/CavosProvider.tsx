@@ -18,7 +18,7 @@ import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
-import type { PasskeyEnrollParams } from '../signer/PasskeySigner';
+import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import { CavosAuthModal } from './CavosAuthModal';
@@ -27,6 +27,8 @@ import type { MessageSignature } from '../signing';
 export interface CavosConfig {
   /** Cavos App ID from the dashboard. */
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: 'development' | 'production';
   /** Target chain. Defaults to 'starknet'. */
   chain?: Chain;
   /** Environment: 'testnet' (sepolia/devnet) or 'mainnet'. */
@@ -39,6 +41,12 @@ export interface CavosConfig {
   authBackendUrl?: string;
   /** Override the chain RPC. */
   rpcUrl?: string;
+  /** Explicit OAuth callback. Optional on web; required by the native provider. */
+  redirectUri?: string;
+  /** Passkey relying-party id. Optional on web; required by the native provider. */
+  rpId?: string;
+  /** Native-only key policy; retained here so config objects remain portable. */
+  minimumKeySecurity?: 'os-protected' | 'hardware';
 }
 
 export interface CavosModalConfig {
@@ -154,7 +162,7 @@ export interface CavosContextValue {
    * returns the passkey's public key.
    */
   enrollPasskey: (
-    passkey: PasskeySigner,
+    passkey: PasskeyApprover,
     params: PasskeyEnrollParams,
   ) => Promise<{ publicKey: { x: bigint; y: bigint }; transactionHash?: string }>;
   /** Whether this device can use a platform passkey (Face ID / Touch ID / PIN). */
@@ -282,7 +290,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana') || !wallet.pendingRequestId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId });
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
     await recovery.requestDeviceAddition({
       userId: identity.userId,
       accountAddress: wallet.address,
@@ -304,6 +312,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       appSalt: cfg.appSalt,
       ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
       ...(cfg.appId ? { appId: cfg.appId } : {}),
+      ...(cfg.environment ? { environment: cfg.environment } : {}),
       ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
       ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
     });
@@ -454,7 +463,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   );
 
   const enrollPasskey = useCallback(
-    async (passkey: PasskeySigner, params: PasskeyEnrollParams) => {
+    async (passkey: PasskeyApprover, params: PasskeyEnrollParams) => {
       if (!wallet) throw new Error('Not logged in');
       if (wallet.chain === 'stellar') {
         throw new Error(
@@ -603,7 +612,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     const cfg = configRef.current;
     if (!cfg.appId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId });
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
     const requestId = walletStatus.pendingRequestId;
     let cancelled = false;
     const tick = async () => {

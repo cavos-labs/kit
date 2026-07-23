@@ -1,4 +1,5 @@
 import { sha256 } from "@noble/hashes/sha256";
+import type { PasskeyEnrollParams, PasskeyPrfProvider } from "../../signer/PasskeyProvider";
 
 /**
  * WebAuthn **PRF** factor for the classic-G envelope.
@@ -24,19 +25,13 @@ export interface PasskeyPrfOptions {
   rpName?: string;
 }
 
-export interface PasskeyPrfEnrollParams {
-  /** Stable user handle for the credential (e.g. the account address or userId). */
-  userId: string;
-  /** Account name shown in the OS passkey UI (e.g. an email). */
-  userName: string;
-  displayName?: string;
-}
+export type PasskeyPrfEnrollParams = PasskeyEnrollParams;
 
 /** Fixed PRF input salt — scopes the derived secret to the classic-G DEK factor.
  *  Stable forever: changing it changes every existing user's passkey secret. */
 const PRF_SALT = sha256(new TextEncoder().encode("cavos-stellar-prf-v1"));
 
-export class PasskeyPrf {
+export class PasskeyPrf implements PasskeyPrfProvider {
   private readonly rpId: string;
   private readonly rpName: string;
 

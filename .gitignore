@@ -4,6 +4,18 @@ node_modules/
 # Build output
 dist/
 .next/
+coverage/
+*.tgz
+
+# React Native / Expo generated artifacts
+.expo/
+
+# Native dependency/build caches (keep package source and module config tracked)
+ios/Pods/
+ios/build/
+android/.gradle/
+android/build/
+android/.cxx/
 
 # Logs
 *.log

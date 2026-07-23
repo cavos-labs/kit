@@ -2,7 +2,6 @@ import { Account, RpcProvider, PaymasterRpc, hash, num, ETransactionVersion3, ty
 import type { Keypair } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
-import { WebCryptoSigner } from "./signer/WebCryptoSigner";
 import { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 import { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
 import { CavosSolana } from "./chains/solana/CavosSolana";
@@ -10,7 +9,6 @@ import type { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 import type { SolanaNetwork } from "./chains/solana/constants";
 import { CavosStellar } from "./chains/stellar/CavosStellar";
 import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
-import { WebCryptoDeviceUnwrapKey } from "./chains/stellar/WebCryptoDeviceUnwrapKey";
 import type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
 import type { StellarNetwork } from "./chains/stellar/constants";
 import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
@@ -22,10 +20,10 @@ import type { RecoveryClient } from "./recovery/RecoveryClient";
 import { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
 import { BackupSigner, deriveBackupKey } from "./recovery/BackupSigner";
 import { deriveAddressSeed } from "./identity";
-import type { PasskeySigner, PasskeyEnrollParams } from "./signer/PasskeySigner";
+import type { PasskeyApprover, PasskeyEnrollParams } from "./signer/PasskeyProvider";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "./crypto/webauthn";
 import type { PasskeyAssertion } from "./crypto/webauthn";
-import { bytesToHex, bigIntTo32Bytes } from "./crypto/encoding";
+import { bytesToHex, bigIntTo32Bytes, utf8ToBytes } from "./crypto/encoding";
 import {
   prefixedMessageBytes,
   type MessageSignature,
@@ -78,6 +76,8 @@ export interface ConnectOptions {
    * WalletRegistry + RecoveryClient by default for real multi-device support.
    */
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: "development" | "production";
   /** Cavos backend base URL. Defaults to https://cavos.xyz. */
   backendUrl?: string;
   /**
@@ -120,6 +120,8 @@ export interface ConnectOptions {
    * React Native / server.
    */
   stellarDeviceKey?: DeviceUnwrapKey;
+  /** Create/load the Stellar ECDH unwrap key (native / tests). */
+  createStellarDeviceKey?: (keyId: string) => Promise<DeviceUnwrapKey>;
 }
 
 /** The Starknet-specific connect options, resolved from the unified ones. */
@@ -129,6 +131,7 @@ interface StarknetConnectOptions {
   identity?: Identity;
   appSalt: string;
   appId?: string;
+  environment?: "development" | "production";
   backendUrl?: string;
   registry?: WalletRegistry;
   recovery?: RecoveryClient;
@@ -153,6 +156,8 @@ export interface RecoveryOptions {
   appSalt: string;
   paymasterApiKey: string;
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: "development" | "production";
   backendUrl?: string;
   rpcUrl?: string;
   paymasterUrl?: string;
@@ -220,6 +225,7 @@ export class Cavos {
         ...(opts.identity ? { identity: opts.identity } : {}),
         appSalt: opts.appSalt,
         ...(opts.appId ? { appId: opts.appId } : {}),
+        ...(opts.environment ? { environment: opts.environment } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
         ...(opts.registry ? { registry: opts.registry } : {}),
         ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
@@ -234,15 +240,18 @@ export class Cavos {
       // device's ECDH unwrap key (keyed by user + app) before connecting.
       const identity = opts.identity ?? (opts.auth ? await opts.auth.authenticate() : undefined);
       if (!identity) throw new Error("kit: Stellar connect requires `identity` or `auth`");
-      const deviceKey =
-        opts.stellarDeviceKey ??
-        (await WebCryptoDeviceUnwrapKey.loadOrCreate({ keyId: `${identity.userId}:${opts.appSalt}` }));
+      const keyId = `${identity.userId}:${opts.appSalt}`;
+      const deviceKey = opts.stellarDeviceKey
+        ?? (opts.createStellarDeviceKey
+          ? await opts.createStellarDeviceKey(keyId)
+          : await loadDefaultWebDeviceKey(keyId));
       return CavosStellar.connect({
         network: STELLAR_ENV[opts.network],
         identity,
         appSalt: opts.appSalt,
         deviceKey,
         ...(opts.appId ? { appId: opts.appId } : {}),
+        ...(opts.environment ? { environment: opts.environment } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
         ...(opts.stellarRelayer ? { relayer: opts.stellarRelayer } : {}),
         ...(opts.stellarSourceKeypair ? { sourceKeypair: opts.stellarSourceKeypair } : {}),
@@ -257,6 +266,7 @@ export class Cavos {
       identity: opts.identity,
       appSalt: opts.appSalt,
       appId: opts.appId,
+      environment: opts.environment,
       backendUrl: opts.backendUrl,
       registry: opts.registry,
       recovery: opts.recovery,
@@ -290,7 +300,7 @@ export class Cavos {
     // This device's silent signer.
     const signer = opts.createSigner
       ? await opts.createSigner(`${identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${identity.userId}:${opts.appSalt}` });
+      : await loadDefaultWebSigner(`${identity.userId}:${opts.appSalt}`);
     const devicePubkey = await signer.getPublicKey();
 
     const adapter = new StarknetAdapter({ classHash, signer, provider });
@@ -310,10 +320,10 @@ export class Cavos {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
         : defaultRegistry);
     const recovery =
-      opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId }) : null);
+      opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null);
     const existing = await registry.lookup(identity.userId);
 
     if (existing) {
@@ -470,7 +480,7 @@ export class Cavos {
     if (this.status !== "ready") {
       throw new Error("kit: this device is not yet an authorized signer of the wallet");
     }
-    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
     const sig = await this.adapter.signMessageRaw(prefixed);
     // 64-byte r‖s (Starknet's contract normalizes high-s, so no low-S needed here).
@@ -558,7 +568,7 @@ export class Cavos {
    * approvals". Returns the passkey's public key + the enrollment tx hash.
    */
   async enrollPasskey(
-    passkey: PasskeySigner,
+    passkey: PasskeyApprover,
     params: PasskeyEnrollParams,
     opts?: ExecuteOptions,
   ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
@@ -622,7 +632,7 @@ export class Cavos {
    * custom `submit` to route it through your own relayer instead. Returns the tx.
    */
   async approveThisDeviceWithPasskey(opts: {
-    passkey: PasskeySigner;
+    passkey: PasskeyApprover;
     submit?: (call: ChainCall) => Promise<{ transactionHash: string }>;
   }): Promise<{ transactionHash: string }> {
     if (this.status === "ready") {
@@ -720,7 +730,7 @@ export class Cavos {
     // The new device's signer (created/loaded the same way connect() does).
     const signer = opts.createSigner
       ? await opts.createSigner(`${opts.identity.userId}:${opts.appSalt}`)
-      : await WebCryptoSigner.loadOrCreate({ keyId: `${opts.identity.userId}:${opts.appSalt}` });
+      : await loadDefaultWebSigner(`${opts.identity.userId}:${opts.appSalt}`);
     const devicePubkey = await signer.getPublicKey();
 
     // The backup key drives THIS transaction: it's the only signer that can
@@ -815,7 +825,7 @@ async function lookupAddress(
   const registry =
     opts.registry ??
     (opts.appId
-      ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network })
+      ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network, environment: opts.environment })
       : defaultRegistry);
   const existing = await registry.lookup(opts.identity.userId);
   return existing?.address ?? null;
@@ -848,7 +858,7 @@ export interface PasskeyApprovable {
  */
 export async function approveDeviceEverywhere(
   wallets: PasskeyApprovable[],
-  passkey: PasskeySigner,
+  passkey: PasskeyApprover,
 ): Promise<{ chain: string; transactionHash?: string; error?: string }[]> {
   const targets = wallets.filter((w) => w.status === "needs-device-approval");
   if (targets.length === 0) return [];
@@ -918,4 +928,24 @@ async function paymasterExecuteDirect(
     throw new Error(`kit: paymaster passkey approval failed: ${JSON.stringify(json.error)}`);
   }
   return { transactionHash: json.result?.transaction_hash ?? json.result?.tracking_id };
+}
+
+async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
+  if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {
+    throw new Error(
+      "kit: this runtime requires a createSigner implementation; React Native apps must import @cavos/kit/react-native",
+    );
+  }
+  const { WebCryptoSigner } = await import("./signer/WebCryptoSigner");
+  return WebCryptoSigner.loadOrCreate({ keyId });
+}
+
+async function loadDefaultWebDeviceKey(keyId: string): Promise<DeviceUnwrapKey> {
+  if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {
+    throw new Error(
+      "kit/stellar: this runtime requires createStellarDeviceKey; React Native apps must import @cavos/kit/react-native",
+    );
+  }
+  const { WebCryptoDeviceUnwrapKey } = await import("./chains/stellar/WebCryptoDeviceUnwrapKey");
+  return WebCryptoDeviceUnwrapKey.loadOrCreate({ keyId });
 }

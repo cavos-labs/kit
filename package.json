@@ -1,7 +1,7 @@
 {
   "name": "@cavos/kit",
-  "version": "0.0.10",
-  "description": "Cavos Kit - device-native verifiable smart accounts (secp256r1 device signers). Starknet first, multi-chain by design.",
+  "version": "0.1.0",
+  "description": "Cavos Kit - device-native verifiable smart accounts for Starknet, Solana and Stellar.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -15,10 +15,37 @@
       "types": "./dist/react/index.d.ts",
       "require": "./dist/react/index.js",
       "import": "./dist/react/index.mjs"
-    }
+    },
+    "./react-native": {
+      "types": "./dist/react-native/index.d.ts",
+      "react-native": "./dist/react-native/index.mjs",
+      "require": "./dist/react-native/index.js",
+      "import": "./dist/react-native/index.mjs"
+    },
+    "./starknet": {
+      "types": "./dist/starknet.d.ts",
+      "require": "./dist/starknet.js",
+      "import": "./dist/starknet.mjs"
+    },
+    "./solana": {
+      "types": "./dist/solana.d.ts",
+      "require": "./dist/solana.js",
+      "import": "./dist/solana.mjs"
+    },
+    "./stellar": {
+      "types": "./dist/stellar.d.ts",
+      "require": "./dist/stellar.js",
+      "import": "./dist/stellar.mjs"
+    },
+    "./app.plugin": "./app.plugin.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "android",
+    "ios",
+    "expo-module.config.json",
+    "app.plugin.js",
+    "CavosKit.podspec"
   ],
   "scripts": {
     "build": "tsup",
@@ -43,21 +70,46 @@
   "dependencies": {
     "@noble/curves": "^1.6.0",
     "@noble/hashes": "^1.5.0",
+    "@expo/config-plugins": "^57.0.0",
     "@phosphor-icons/react": "^2.1.10",
     "@solana/web3.js": "^1.98.4",
     "@stellar/stellar-sdk": "^16.0.1",
     "@turnkey/sdk-browser": "^6.1.1",
+    "buffer": "^6.0.3",
     "starknet": "^9.4.2"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
-    "react-dom": "^18.0.0 || ^19.0.0"
+    "react-dom": "^18.0.0 || ^19.0.0",
+    "react-native": ">=0.76",
+    "expo-modules-core": ">=2",
+    "expo-web-browser": ">=14",
+    "expo-linking": ">=7",
+    "react-native-get-random-values": ">=1.11"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "react-dom": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    },
+    "@expo/config-plugins": {
+      "optional": true
+    },
+    "expo-modules-core": {
+      "optional": true
+    },
+    "expo-web-browser": {
+      "optional": true
+    },
+    "expo-linking": {
+      "optional": true
+    },
+    "react-native-get-random-values": {
       "optional": true
     }
   },

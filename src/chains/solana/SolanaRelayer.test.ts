@@ -47,6 +47,7 @@ describe("SolanaRelayer", () => {
     const relayer = new SolanaRelayer({
       baseUrl: "https://cavos.test",
       appId: "app-42",
+      environment: "development",
       network: "solana-devnet",
       connection: fakeConnection(),
     });
@@ -60,6 +61,7 @@ describe("SolanaRelayer", () => {
 
     expect(sig).toBe("sigABC");
     expect(postedBody.app_id).toBe("app-42");
+    expect(postedBody.environment).toBe("development");
     expect(postedBody.network).toBe("solana-devnet");
     // The serialized tx must carry the relayer as fee payer and the instruction.
     const tx = Transaction.from(Buffer.from(postedBody.transaction, "base64"));

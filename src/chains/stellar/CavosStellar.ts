@@ -1,4 +1,5 @@
 import { Keypair, TransactionBuilder, authorizeEntry, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
 import { StellarAdapter } from "./StellarAdapter";
 import {
@@ -28,6 +29,7 @@ import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
 import type { StellarNetwork } from "./constants";
 import type { Transaction } from "@stellar/stellar-sdk";
+import { utf8ToBytes } from "../../crypto/encoding";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import {
   prefixedMessageBytes,
@@ -61,6 +63,8 @@ export interface ConnectStellarOptions {
   relayer?: StellarRelayer;
   /** Cavos App ID — enables the default relayer when no `relayer` is passed. */
   appId?: string;
+  /** Cavos console environment. Defaults to production when omitted. */
+  environment?: "development" | "production";
   /** Cavos backend base URL (default https://cavos.xyz). */
   backendUrl?: string;
   /**
@@ -141,7 +145,7 @@ export class CavosStellar {
     const relayer =
       opts.relayer ??
       (opts.appId
-        ? new StellarRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network })
+        ? new StellarRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
         : undefined);
 
     const build = (status: StellarConnectStatus, unlocked?: Unlocked): CavosStellar =>
@@ -344,7 +348,7 @@ export class CavosStellar {
    */
   async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
     const control = this.requireControl();
-    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
     // stellar-sdk Keypair.sign expects a Buffer and returns a 64-byte Buffer.
     const sig = control.sign(Buffer.from(prefixed));

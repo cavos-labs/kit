@@ -6,6 +6,8 @@ export interface HttpRecoveryClientOptions {
   baseUrl: string;
   /** The Cavos App ID — authenticates SDK calls. */
   appId: string;
+  /** Optional Cavos console environment. Omitted means production. */
+  environment?: "development" | "production";
 }
 
 function toHex(n: bigint): string {
@@ -43,6 +45,7 @@ export class HttpRecoveryClient implements RecoveryClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         app_id: this.opts.appId,
+        ...(this.opts.environment ? { environment: this.opts.environment } : {}),
         wallet_address: params.accountAddress,
         new_pub_x: toHex(params.newSigner.x),
         new_pub_y: toHex(params.newSigner.y),

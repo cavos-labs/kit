@@ -1,5 +1,4 @@
 import { sha256 } from "@noble/hashes/sha256";
-import type { DevicePublicKey } from "./DeviceSigner";
 import {
   base64urlEncode,
   challengeOffsetOf,
@@ -7,25 +6,17 @@ import {
   spkiToPublicKey,
   type PasskeyAssertion,
 } from "../crypto/webauthn";
+import type {
+  EnrolledPasskey,
+  PasskeyApprover,
+  PasskeyEnrollParams,
+} from "./PasskeyProvider";
 
 export interface PasskeySignerOptions {
   /** Relying-Party id (usually the eTLD+1). Defaults to `window.location.hostname`. */
   rpId?: string;
   /** Human-readable RP name shown in the OS passkey UI. */
   rpName?: string;
-}
-
-export interface PasskeyEnrollParams {
-  /** Stable user handle for the credential (e.g. the account address or userId). */
-  userId: string;
-  /** Account name shown in the OS passkey UI (e.g. an email). */
-  userName: string;
-  displayName?: string;
-}
-
-export interface EnrolledPasskey {
-  publicKey: DevicePublicKey;
-  credentialId: Uint8Array;
 }
 
 /**
@@ -38,7 +29,7 @@ export interface EnrolledPasskey {
  * registers the passkey on-chain as an approver; later, from any browser, an
  * assertion approves adding that browser's new device key.
  */
-export class PasskeySigner {
+export class PasskeySigner implements PasskeyApprover {
   private readonly rpId: string;
   private readonly rpName: string;
 

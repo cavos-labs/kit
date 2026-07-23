@@ -5,6 +5,8 @@ export interface StellarRelayerOptions {
   baseUrl: string;
   /** Cavos App ID (authorizes the sponsored request). */
   appId: string;
+  /** Optional Cavos console environment. Omitted means production. */
+  environment?: "development" | "production";
   network: StellarNetwork;
 }
 
@@ -53,6 +55,7 @@ export class StellarRelayer {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         app_id: this.opts.appId,
+        ...(this.opts.environment ? { environment: this.opts.environment } : {}),
         network: this.opts.network,
         kind,
         transaction: transactionXdr,

@@ -4,7 +4,7 @@ import { pbkdf2 } from "@noble/hashes/pbkdf2";
 import { sha256 } from "@noble/hashes/sha256";
 import { randomBytes } from "@noble/hashes/utils";
 import type { DeviceSigner, DevicePublicKey, DeviceSignature } from "../signer/DeviceSigner";
-import { bytesToBigInt, bigIntTo32Bytes } from "../crypto/encoding";
+import { bytesToBigInt, bigIntTo32Bytes, utf8ToBytes } from "../crypto/encoding";
 import { recoverYParity } from "../crypto/signature";
 
 /**
@@ -70,8 +70,8 @@ export function deriveBackupKey(code: string): {
   // into a scoped seed with HKDF. PBKDF2 also serves as the brute-force brake.
   const stretched = pbkdf2(
     sha256,
-    new TextEncoder().encode(normalised),
-    new TextEncoder().encode(BACKUP_KDF_SALT),
+    utf8ToBytes(normalised),
+    utf8ToBytes(BACKUP_KDF_SALT),
     { c: BACKUP_PBKDF2_ITERATIONS, dkLen: 32 },
   );
   const seed = hkdf(sha256, stretched, undefined, BACKUP_HKDF_INFO, 32);

@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["CavosKitModule"],
+    "podspecPath": "CavosKit.podspec"
+  },
+  "android": {
+    "modules": ["xyz.cavos.kit.CavosKitModule"]
+  }
+}

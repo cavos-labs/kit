@@ -1,8 +1,25 @@
 /**
  * Low-level encoding helpers shared across the kit.
  */
+import { Buffer } from "buffer";
+
 
 const U128_MASK = (1n << 128n) - 1n;
+
+export function utf8ToBytes(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value, "utf8"));
+}
+
+export function bytesToUtf8(value: Uint8Array): string {
+  return Buffer.from(value).toString("utf8");
+}
+
+export function secureRandomBytes(length: number): Uint8Array {
+  if (!globalThis.crypto?.getRandomValues) throw new Error("kit: secure random source unavailable");
+  const out = new Uint8Array(length);
+  globalThis.crypto.getRandomValues(out);
+  return out;
+}
 
 /** Split a u256 into the `[low, high]` felt pair Cairo expects. */
 export function u256ToFelts(value: bigint): [bigint, bigint] {

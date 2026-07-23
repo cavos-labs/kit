@@ -1,5 +1,6 @@
 import { hash } from "starknet";
 import { sha256 } from "@noble/hashes/sha256";
+import { utf8ToBytes } from "./crypto/encoding";
 
 /**
  * The address seed binds a wallet to a stable, backend-managed user identity.
@@ -29,7 +30,7 @@ export function deriveAddressSeed({ userId, appSalt }: IdentityInput): bigint {
  * address on each chain (different address spaces, one identity).
  */
 export function deriveAddressSeedSolana({ userId, appSalt }: IdentityInput): Uint8Array {
-  return sha256(new TextEncoder().encode(`cavos:solana:v1:${userId}:${appSalt}`));
+  return sha256(utf8ToBytes(`cavos:solana:v1:${userId}:${appSalt}`));
 }
 
 /**
@@ -39,12 +40,12 @@ export function deriveAddressSeedSolana({ userId, appSalt }: IdentityInput): Uin
  * domain so the same user maps to a distinct address per chain.
  */
 export function deriveAddressSeedStellar({ userId, appSalt }: IdentityInput): Uint8Array {
-  return sha256(new TextEncoder().encode(`cavos:stellar:v1:${userId}:${appSalt}`));
+  return sha256(utf8ToBytes(`cavos:stellar:v1:${userId}:${appSalt}`));
 }
 
 /** Map an arbitrary UTF-8 string into a felt via Poseidon over its byte chunks. */
 function feltFromString(s: string): bigint {
-  const bytes = new TextEncoder().encode(s);
+  const bytes = utf8ToBytes(s);
   const chunks: bigint[] = [];
   for (let i = 0; i < bytes.length; i += 31) {
     let w = 0n;

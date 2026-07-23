@@ -4,6 +4,7 @@ import { hkdf } from "@noble/hashes/hkdf";
 import { pbkdf2 } from "@noble/hashes/pbkdf2";
 import { sha256 } from "@noble/hashes/sha256";
 import { randomBytes } from "@noble/hashes/utils";
+import { utf8ToBytes } from "../../crypto/encoding";
 
 /**
  * Envelope encryption for the classic-G control key.
@@ -83,7 +84,7 @@ export function unwrapDEK(wrapped: WrappedDEK, kek: Uint8Array): Uint8Array {
 export function deriveRecoveryKEK(code: string): Uint8Array {
   const normalised = code.trim().replace(/\s+/g, " ").toLowerCase();
   if (!normalised) throw new Error("kit/stellar: recovery code is empty");
-  const stretched = pbkdf2(sha256, new TextEncoder().encode(normalised), new TextEncoder().encode(RECOVERY_KDF_SALT), {
+  const stretched = pbkdf2(sha256, utf8ToBytes(normalised), utf8ToBytes(RECOVERY_KDF_SALT), {
     c: RECOVERY_PBKDF2_ITERATIONS,
     dkLen: 32,
   });
