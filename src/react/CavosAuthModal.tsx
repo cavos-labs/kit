@@ -102,6 +102,7 @@ type Screen =
   | 'deploying'
   | 'device-approval'
   | 'passkey-approval'
+  | 'social-recovery'
   | 'recover'
   | 'secure-account'
   | 'recovery-code';
@@ -303,6 +304,13 @@ function useIsMobile() {
     return () => mq.removeEventListener('change', handler);
   }, []);
   return isMobile;
+}
+
+function formatDelay(seconds: number): string {
+  if (seconds < 60) return `${seconds} seconds`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} minutes`;
+  if (seconds < 86400) return `${Math.ceil(seconds / 3600)} hours`;
+  return `${Math.ceil(seconds / 86400)} days`;
 }
 
 // ─── Style helpers ────────────────────────────────────────────────────────────
@@ -619,10 +627,14 @@ export function CavosAuthModal({
       // above (both flags true would oscillate deploying ↔ approval → loop).
       !walletStatus.isDeploying &&
       screen !== 'recover' &&
+      screen !== 'social-recovery' &&
       screen !== 'device-approval' &&
       screen !== 'passkey-approval'
     ) {
-      if (walletStatus.hasPasskey && passkeySupported) {
+      if (walletStatus.socialRecoveryReadyAt || walletStatus.isSocialRecovering) {
+        setScreen('social-recovery');
+        doneHandledRef.current = false;
+      } else if (walletStatus.hasPasskey && passkeySupported) {
         setScreen('passkey-approval');
         doneHandledRef.current = false;
       } else if (walletStatus.awaitingApproval) {
@@ -630,7 +642,7 @@ export function CavosAuthModal({
         doneHandledRef.current = false;
       }
     }
-  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, passkeySupported, screen, triggerDone, secureStep]);
+  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
@@ -808,6 +820,37 @@ export function CavosAuthModal({
       <CavosWordmark height={13} color="currentColor" />
     </div>
   );
+
+  if (screen === 'social-recovery') {
+    const readyAt = walletStatus.socialRecoveryReadyAt;
+    const remaining = readyAt ? Math.max(0, readyAt - Math.floor(Date.now() / 1000)) : 0;
+    return (
+      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div style={{ ...card, position: 'relative' }}>
+          {isMobile && <div style={handle} />}
+          <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
+          <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
+            <BrandBadge><BrandShield tone={primaryColor} /></BrandBadge>
+            <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
+              Restoring this device
+            </h2>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
+              {readyAt && remaining > 0
+                ? `The recovery timelock is active. This device will be added automatically in about ${formatDelay(remaining)}.`
+                : 'Your identity was verified inside a hardware-isolated enclave. Finalizing device access now.'}
+            </p>
+            <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}`, borderRadius: `${btnRadius}px`, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center' }}>
+              <Spinner size={14} color={subTextColor} />
+              <span style={{ fontSize: '12px', color: subTextColor }}>
+                {readyAt && remaining > 0 ? 'Waiting for the on-chain timelock…' : 'Finalizing recovery…'}
+              </span>
+            </div>
+          </div>
+          {renderFooter()}
+        </div>
+      </div>
+    );
+  }
 
   // ── Secure your account (one-time, first sign-up) ─────────────────────────
 

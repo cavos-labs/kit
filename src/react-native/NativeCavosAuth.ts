@@ -3,6 +3,11 @@ import * as WebBrowser from "expo-web-browser";
 import type { AuthProvider, Identity } from "../auth/AuthProvider";
 import { decodeUtf8, fromBase64 } from "./encoding";
 import { nativeModule } from "./NativeModule";
+import {
+  createSocialRecoveryCredential,
+  isSocialRecoveryIssuer,
+  type SocialRecoveryCredential,
+} from "../recovery/SocialRecoveryCredential";
 
 export interface NativeCavosAuthOptions {
   appId: string;
@@ -28,6 +33,8 @@ export class NativeCavosAuth implements AuthProvider {
   private readonly backendUrl: string;
   private readonly storageKey: string;
   private last: Identity | null = null;
+  /** Never persisted; every recovery requires a fresh social login. */
+  private recoveryCredential: SocialRecoveryCredential | null = null;
 
   constructor(private readonly opts: NativeCavosAuthOptions) {
     if (!opts.appId) throw new NativeCavosAuthError("invalid-config", "kit/native-auth: appId is required");
@@ -51,6 +58,7 @@ export class NativeCavosAuth implements AuthProvider {
 
   async clearStoredIdentity(): Promise<void> {
     this.last = null;
+    this.recoveryCredential = null;
     await nativeModule().setStoredValue(this.storageKey, null);
   }
 
@@ -113,6 +121,16 @@ export class NativeCavosAuth implements AuthProvider {
     return this.last;
   }
 
+  getSocialRecoveryCredential(): SocialRecoveryCredential {
+    if (!this.recoveryCredential) {
+      throw new NativeCavosAuthError(
+        "not-authenticated",
+        "kit/native-auth: complete a fresh social login before recovery",
+      );
+    }
+    return this.recoveryCredential;
+  }
+
   private async freshNonce(): Promise<string> {
     const bytes = fromBase64(await nativeModule().randomBytes(31));
     let word = 0n;
@@ -138,6 +156,9 @@ export class NativeCavosAuth implements AuthProvider {
     const payload = token.split(".")[1];
     if (!payload) throw new NativeCavosAuthError("callback-invalid", "kit/native-auth: malformed JWT");
     const claims = JSON.parse(decodeUtf8(fromBase64(normalizeBase64url(payload))));
+    this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
+      ? createSocialRecoveryCredential(token)
+      : null;
     const identity: Identity = {
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? email,

@@ -11,6 +11,7 @@ import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
 import { bigIntTo32Bytes } from "../../crypto/encoding";
 import {
   ACCOUNT_SEED,
+  SOCIAL_RECOVERY_SEED,
   DEVICE_ACCOUNT_PROGRAM_ID,
   DOMAIN_ADD,
   DOMAIN_REMOVE,
@@ -18,6 +19,7 @@ import {
   DOMAIN_EXECUTE,
   DOMAIN_ADD_APPROVER,
   DOMAIN_REMOVE_APPROVER,
+  DOMAIN_ENROLL_SOCIAL,
   SECP256R1_N,
   SECP256R1_PROGRAM_ID,
 } from "./constants";
@@ -85,6 +87,14 @@ export class SolanaAdapter {
       this.programId,
     );
     return pda;
+  }
+
+  socialRecoveryPda(account: string | PublicKey): PublicKey {
+    const accountPk = typeof account === "string" ? new PublicKey(account) : account;
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from(SOCIAL_RECOVERY_SEED), accountPk.toBuffer()],
+      this.programId,
+    )[0];
   }
 
   /**
@@ -206,6 +216,114 @@ export class SolanaAdapter {
       data: Buffer.concat([anchorDiscriminator("remove_approver"), Buffer.from(compressed)]),
     });
     return [precompileIx, ix];
+  }
+
+  /** Device-authorized enrolment of the dedicated TEE recovery key. */
+  async buildEnrollSocialRecovery(
+    account: string,
+    payer: string,
+    recoveryPubkeyCompressed: Uint8Array,
+    delaySeconds: number,
+    policyHash: Uint8Array,
+  ): Promise<TransactionInstruction[]> {
+    if (recoveryPubkeyCompressed.length !== 33 || policyHash.length !== 32) {
+      throw new Error("kit/solana: invalid social recovery key or policy hash");
+    }
+    const accountPk = new PublicKey(account);
+    const nonce = await this.fetchNonce(accountPk);
+    const message = concatBytes(
+      Buffer.from(DOMAIN_ENROLL_SOCIAL),
+      accountPk.toBuffer(),
+      recoveryPubkeyCompressed,
+      u32le(delaySeconds),
+      policyHash,
+      u64le(nonce),
+    );
+    const { precompileIx } = await this.signToPrecompile(message);
+    const recovery = this.socialRecoveryPda(accountPk);
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: accountPk, isSigner: false, isWritable: true },
+        { pubkey: recovery, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(payer), isSigner: true, isWritable: true },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([
+        anchorDiscriminator("enroll_social_recovery"),
+        Buffer.from(recoveryPubkeyCompressed),
+        u32le(delaySeconds),
+        Buffer.from(policyHash),
+      ]),
+    });
+    return [precompileIx, ix];
+  }
+
+  /** Read the nonce that the enclave must bind into a Solana authorization. */
+  async socialRecoveryNonce(account: string): Promise<bigint> {
+    const info = await this.requireConnection().getAccountInfo(
+      this.socialRecoveryPda(account),
+    );
+    if (!info) throw new Error("kit/solana: social recovery is not enrolled");
+    // discriminator + device_account + recovery_pubkey + delay + policy_hash
+    return readU64le(info.data, 8 + 32 + 33 + 4 + 32);
+  }
+
+  /** Build `[P-256 precompile, schedule_social_recovery]` from the enclave's
+   * exact signed message. No device signer is involved. */
+  buildScheduleSocialRecovery(params: {
+    account: string;
+    newSigner: DevicePublicKey;
+    expiresAt: number;
+    message: Uint8Array;
+    signature: Uint8Array;
+    recoveryPubkeyCompressed: Uint8Array;
+  }): TransactionInstruction[] {
+    if (params.signature.length !== 64 || params.recoveryPubkeyCompressed.length !== 33) {
+      throw new Error("kit/solana: malformed enclave authorization");
+    }
+    const accountPk = new PublicKey(params.account);
+    const precompileIx = buildSecp256r1Instruction(
+      params.recoveryPubkeyCompressed,
+      params.signature,
+      params.message,
+    );
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: accountPk, isSigner: false, isWritable: true },
+        {
+          pubkey: this.socialRecoveryPda(accountPk),
+          isSigner: false,
+          isWritable: true,
+        },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([
+        anchorDiscriminator("schedule_social_recovery"),
+        Buffer.from(compressedPubkey(params.newSigner)),
+        i64le(params.expiresAt),
+      ]),
+    });
+    return [precompileIx, ix];
+  }
+
+  buildFinalizeSocialRecovery(account: string): TransactionInstruction {
+    const accountPk = new PublicKey(account);
+    return new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: accountPk, isSigner: false, isWritable: true },
+        {
+          pubkey: this.socialRecoveryPda(accountPk),
+          isSigner: false,
+          isWritable: true,
+        },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      data: anchorDiscriminator("finalize_social_recovery"),
+    });
   }
 
   /** This chain's leaf for approving `add_signer(newSigner)` at `nonce`:
@@ -563,6 +681,12 @@ function u64le(n: bigint | number): Buffer {
   // Avoid Buffer.writeBigUInt64LE: the browser `buffer` polyfill doesn't
   // implement the BigInt methods. Use DataView instead.
   new DataView(b.buffer, b.byteOffset, 8).setBigUint64(0, BigInt(n), true);
+  return b;
+}
+
+function i64le(n: bigint | number): Buffer {
+  const b = Buffer.alloc(8);
+  new DataView(b.buffer, b.byteOffset, 8).setBigInt64(0, BigInt(n), true);
   return b;
 }
 

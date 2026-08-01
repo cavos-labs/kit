@@ -21,6 +21,16 @@ import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
+import {
+  SocialRecoveryClient,
+  type AttestationPolicy,
+  type SocialRecoveryProvider,
+} from '../recovery/SocialRecoveryClient';
+import {
+  enrollHardwareIsolatedRecovery,
+  recoverHardwareIsolatedDevice,
+} from '../recovery/SocialRecoveryCoordinator';
+import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { CavosAuthModal } from './CavosAuthModal';
 import type { MessageSignature } from '../signing';
 
@@ -47,6 +57,18 @@ export interface CavosConfig {
   rpId?: string;
   /** Native-only key policy; retained here so config objects remain portable. */
   minimumKeySecurity?: 'os-protected' | 'hardware';
+  /**
+   * Developer-pinned Confidential Space measurements. Required when social
+   * recovery is enabled for this dashboard environment; never learn these
+   * values from the same control plane whose enclave is being verified.
+   */
+  socialRecoveryAttestation?: AttestationPolicy;
+  /**
+   * Declared DeviceAccount class containing social-recovery entrypoints. When
+   * set, pre-feature Starknet accounts are upgraded by their current device
+   * before enrolment; their address and signer storage stay unchanged.
+   */
+  socialRecoveryStarknetClassHash?: string;
 }
 
 export interface CavosModalConfig {
@@ -96,6 +118,10 @@ export interface WalletStatus {
   /** True right after a brand-new account is created (first sign-up), so the UI
    * can offer a one-time "secure your account" step. Cleared once handled. */
   isNewAccount: boolean;
+  /** The attested enclave is enrolling or recovering this wallet. */
+  isSocialRecovering: boolean;
+  /** Unix seconds when an on-chain timelocked recovery can be finalized. */
+  socialRecoveryReadyAt: number | null;
 }
 
 export interface UserInfo {
@@ -208,7 +234,15 @@ const INITIAL_STATUS: WalletStatus = {
   pendingRequestId: null,
   hasPasskey: false,
   isNewAccount: false,
+  isSocialRecovering: false,
+  socialRecoveryReadyAt: null,
 };
+
+interface SocialRecoveryEnvironment {
+  enabled: boolean;
+  provider: SocialRecoveryProvider | null;
+  delaySeconds: number;
+}
 
 /**
  * Drop-in Cavos provider for ONE chain. Wrap your app once; descendants call
@@ -236,6 +270,9 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const [authError, setAuthError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
+  const [socialRecovery, setSocialRecovery] =
+    useState<SocialRecoveryEnvironment | null>(null);
+  const socialAttemptRef = useRef(new Set<string>());
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
 
@@ -277,6 +314,33 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       .catch(() => {});
   }, [config.appId, config.authBackendUrl]);
 
+  // The dashboard chooses exactly one provider per environment. This public
+  // policy controls login UX only; enclave measurements remain developer-pinned
+  // in `config.socialRecoveryAttestation`.
+  useEffect(() => {
+    if (!config.appId || typeof window === 'undefined') return;
+    const base = config.authBackendUrl ?? 'https://cavos.xyz';
+    const query = new URLSearchParams({
+      app_id: config.appId,
+      ...(config.environment ? { environment: config.environment } : {}),
+    });
+    fetch(`${base}/api/recovery/social/config?${query}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`social recovery config ${response.status}`);
+        return response.json();
+      })
+      .then((data) => {
+        setSocialRecovery({
+          enabled: data.enabled === true,
+          provider: ['google', 'apple', 'email'].includes(data.provider)
+            ? data.provider
+            : null,
+          delaySeconds: Number(data.delay_seconds) || 0,
+        });
+      })
+      .catch(() => setSocialRecovery({ enabled: false, provider: null, delaySeconds: 0 }));
+  }, [config.appId, config.environment, config.authBackendUrl]);
+
   const openModal = useCallback(() => setModalOpen(true), []);
   const closeModal = useCallback(() => setModalOpen(false), []);
   const clearAuthError = useCallback(() => setAuthError(null), []);
@@ -315,6 +379,9 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       ...(cfg.environment ? { environment: cfg.environment } : {}),
       ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
       ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+      ...(cfg.socialRecoveryAttestation
+        ? { legacyDeviceApproval: false }
+        : {}),
     });
     setWallet(w);
     setIdentity(id);
@@ -336,6 +403,8 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       pendingRequestId,
       hasPasskey,
       isNewAccount: w.isNewAccount,
+      isSocialRecovering: false,
+      socialRecoveryReadyAt: null,
     });
     modal?.onSuccess?.(w.address);
     return w;
@@ -376,6 +445,197 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     const id = await auth.handleCallback(authData);
     await connect(id);
   }, [auth, connect]);
+
+  /**
+   * A fresh provider credential is available only immediately after login. Use
+   * that window to enrol a ready wallet or recover this exact new device. The
+   * credential is encrypted to the independently-attested enclave by the SDK.
+   */
+  useEffect(() => {
+    if (
+      !socialRecovery?.enabled ||
+      !socialRecovery.provider ||
+      !wallet ||
+      !identity ||
+      !config.appId
+    ) return;
+
+    let credential: SocialRecoveryCredential;
+    try {
+      credential = auth.getSocialRecoveryCredential();
+    } catch {
+      return;
+    }
+    const action = wallet.status === 'ready' ? 'enroll' : 'recover';
+    const attemptKey =
+      `${wallet.chain}:${wallet.address}:${action}:${credential.tokenFingerprint}`;
+    if (socialAttemptRef.current.has(attemptKey)) return;
+    socialAttemptRef.current.add(attemptKey);
+
+    if (!config.socialRecoveryAttestation) {
+      if (action === 'recover') {
+        setAuthError(
+          'Social recovery is enabled, but this app did not pin the Confidential Space attestation policy.',
+        );
+      }
+      return;
+    }
+
+    const client = new SocialRecoveryClient({
+      baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
+      appId: config.appId,
+      environment: config.environment,
+      attestation: config.socialRecoveryAttestation,
+    });
+    let cancelled = false;
+
+    (async () => {
+      if (action === 'enroll') {
+        setWalletStatus((status) => ({
+          ...status,
+          isDeploying: true,
+          isReady: false,
+          isSocialRecovering: true,
+        }));
+        try {
+          await enrollHardwareIsolatedRecovery({
+            client,
+            wallet,
+            credential,
+            delaySeconds: socialRecovery.delaySeconds,
+            ...(config.socialRecoveryStarknetClassHash
+              ? { starknetClassHash: config.socialRecoveryStarknetClassHash }
+              : {}),
+          });
+        } catch (error) {
+          // Enrollment is opt-in and must never make an already-working wallet
+          // unusable. A 409 means this wallet was enrolled on a prior login.
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes('already_enrolled')) {
+            console.error('[CavosProvider] social recovery enrollment failed:', error);
+          }
+        } finally {
+          if (!cancelled) {
+            setWalletStatus((status) => ({
+              ...status,
+              isDeploying: false,
+              isReady: true,
+              isSocialRecovering: false,
+            }));
+          }
+        }
+        return;
+      }
+
+      setWalletStatus((status) => ({
+        ...status,
+        isDeploying: true,
+        needsDeviceApproval: false,
+        awaitingApproval: false,
+        isSocialRecovering: true,
+      }));
+      try {
+        const outcome = await recoverHardwareIsolatedDevice({
+          client,
+          wallet,
+          credential,
+          network: config.network,
+          delaySeconds: socialRecovery.delaySeconds,
+        });
+        if (cancelled) return;
+        if (!outcome.finalized) {
+          persistPendingSocialRecovery(wallet.chain, wallet.address, outcome.readyAt);
+          setWalletStatus((status) => ({
+            ...status,
+            isDeploying: false,
+            needsDeviceApproval: true,
+            isSocialRecovering: false,
+            socialRecoveryReadyAt: outcome.readyAt,
+          }));
+          return;
+        }
+        await waitUntilWalletReady(wallet);
+        if (!cancelled) await connect(identity, { silent: true });
+      } catch (error) {
+        if (!cancelled) {
+          setAuthError(error instanceof Error ? error.message : 'Social recovery failed.');
+          setWalletStatus((status) => ({
+            ...status,
+            isDeploying: false,
+            needsDeviceApproval: true,
+            isSocialRecovering: false,
+          }));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    auth,
+    config.appId,
+    config.authBackendUrl,
+    config.environment,
+    config.network,
+    config.socialRecoveryAttestation,
+    config.socialRecoveryStarknetClassHash,
+    connect,
+    identity,
+    socialRecovery,
+    wallet,
+  ]);
+
+  // A non-zero timelock survives refreshes: scheduling is already committed
+  // on-chain and finalization needs no social credential. Resume it when due.
+  useEffect(() => {
+    if (!wallet || !identity || wallet.status !== 'needs-device-approval') return;
+    const persisted = loadPendingSocialRecovery(wallet.chain, wallet.address);
+    const readyAt = walletStatus.socialRecoveryReadyAt ?? persisted;
+    if (!readyAt) return;
+    if (walletStatus.socialRecoveryReadyAt !== readyAt) {
+      setWalletStatus((status) => ({ ...status, socialRecoveryReadyAt: readyAt }));
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finalize = async () => {
+      const remaining = readyAt * 1000 - Date.now();
+      if (remaining > 0) {
+        timer = setTimeout(finalize, Math.min(remaining, 60_000));
+        return;
+      }
+      setWalletStatus((status) => ({
+        ...status,
+        isDeploying: true,
+        needsDeviceApproval: false,
+        isSocialRecovering: true,
+      }));
+      try {
+        if (wallet.chain === 'starknet') await wallet.finalizeSocialRecovery();
+        else if (wallet.chain === 'solana') await wallet.finalizeSocialRecovery();
+        else return;
+        await waitUntilWalletReady(wallet);
+        clearPendingSocialRecovery(wallet.chain, wallet.address);
+        if (!cancelled) await connect(identity, { silent: true });
+      } catch (error) {
+        if (!cancelled) {
+          setAuthError(error instanceof Error ? error.message : 'Could not finalize recovery.');
+          setWalletStatus((status) => ({
+            ...status,
+            isDeploying: false,
+            needsDeviceApproval: true,
+            isSocialRecovering: false,
+          }));
+          timer = setTimeout(finalize, 10_000);
+        }
+      }
+    };
+    void finalize();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [connect, identity, wallet, walletStatus.socialRecoveryReadyAt]);
 
   // A device signer is already persisted securely in IndexedDB. Restore only
   // the non-secret identity metadata from localStorage, then reconnect the
@@ -687,8 +947,16 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
           appName={branding.appName ?? modal.appName}
           appLogo={branding.appLogo ?? modal.appLogo}
           appLogoSize={modal.appLogoSize}
-          providers={modal.providers}
-          emailMode={modal.emailMode}
+          providers={
+            socialRecovery?.enabled && socialRecovery.provider
+              ? [socialRecovery.provider]
+              : modal.providers
+          }
+          emailMode={
+            socialRecovery?.enabled && socialRecovery.provider === 'email'
+              ? 'magic-link'
+              : modal.emailMode
+          }
           primaryColor={modal.primaryColor}
           theme={modal.theme}
           backgroundColor={modal.backgroundColor}
@@ -704,4 +972,50 @@ export function useCavos(): CavosContextValue {
   const ctx = useContext(CavosContext);
   if (!ctx) throw new Error('useCavos must be used within a CavosProvider');
   return ctx;
+}
+
+async function waitUntilWalletReady(wallet: CavosWallet): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    try {
+      if (await wallet.isReady()) return;
+    } catch {
+      // RPC/indexer propagation is eventually consistent; retry below.
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "The recovery transaction was submitted, but the new signer is not visible yet.",
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+}
+
+function pendingSocialRecoveryKey(chain: Chain, address: string): string {
+  return `cavos-kit:social-recovery:${chain}:${address}`;
+}
+
+function persistPendingSocialRecovery(chain: Chain, address: string, readyAt: number): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(
+    pendingSocialRecoveryKey(chain, address),
+    JSON.stringify({ readyAt }),
+  );
+}
+
+function loadPendingSocialRecovery(chain: Chain, address: string): number | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = JSON.parse(
+      window.localStorage.getItem(pendingSocialRecoveryKey(chain, address)) ?? 'null',
+    );
+    return Number.isFinite(value?.readyAt) ? Number(value.readyAt) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingSocialRecovery(chain: Chain, address: string): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(pendingSocialRecoveryKey(chain, address));
 }

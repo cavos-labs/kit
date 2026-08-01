@@ -91,6 +91,86 @@ export class StarknetAdapter implements ChainAdapter {
     return { contractAddress: accountAddress, entrypoint: "remove_signer", calldata: pubkeyCalldata(signer) };
   }
 
+  buildUpgrade(accountAddress: string, newClassHash: string): ChainCall {
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "upgrade",
+      calldata: [newClassHash],
+    };
+  }
+
+  buildEnrollSocialRecovery(
+    accountAddress: string,
+    recoveryPubkey: DevicePublicKey,
+    delaySeconds: bigint,
+    policyHash: bigint,
+  ): ChainCall {
+    const [policyLow, policyHigh] = u256ToFelts(policyHash);
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "enroll_social_recovery",
+      calldata: [
+        ...pubkeyCalldata(recoveryPubkey),
+        num.toHex(delaySeconds),
+        num.toHex(policyLow),
+        num.toHex(policyHigh),
+      ],
+    };
+  }
+
+  async getSocialRecoveryNonce(accountAddress: string): Promise<bigint> {
+    if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
+    const res = await this.opts.provider.callContract({
+      contractAddress: accountAddress,
+      entrypoint: "get_social_recovery_nonce",
+      calldata: [],
+    });
+    return BigInt(res[0] ?? 0);
+  }
+
+  buildScheduleSocialRecovery(params: {
+    accountAddress: string;
+    newSigner: DevicePublicKey;
+    nonce: bigint;
+    expiresAt: bigint;
+    r: bigint;
+    s: bigint;
+    yParity: boolean;
+  }): ChainCall {
+    const [rl, rh] = u256ToFelts(params.r);
+    const [sl, sh] = u256ToFelts(params.s);
+    return {
+      contractAddress: params.accountAddress,
+      entrypoint: "schedule_social_recovery",
+      calldata: [
+        ...pubkeyCalldata(params.newSigner),
+        num.toHex(params.nonce),
+        num.toHex(params.expiresAt),
+        num.toHex(rl),
+        num.toHex(rh),
+        num.toHex(sl),
+        num.toHex(sh),
+        params.yParity ? "0x1" : "0x0",
+      ],
+    };
+  }
+
+  buildFinalizeSocialRecovery(accountAddress: string): ChainCall {
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "finalize_social_recovery",
+      calldata: [],
+    };
+  }
+
+  buildCancelSocialRecovery(accountAddress: string): ChainCall {
+    return {
+      contractAddress: accountAddress,
+      entrypoint: "cancel_social_recovery",
+      calldata: [],
+    };
+  }
+
   async isAuthorizedSigner(accountAddress: string, signer: DevicePublicKey): Promise<boolean> {
     if (!this.opts.provider) throw new Error("kit/starknet: provider required for reads");
     const res = await this.opts.provider.callContract({

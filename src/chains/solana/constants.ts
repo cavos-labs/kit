@@ -10,6 +10,7 @@ export const SECP256R1_PROGRAM_ID =
 
 /** PDA seed prefix, must match the program's `ACCOUNT_SEED`. */
 export const ACCOUNT_SEED = "cavos-account";
+export const SOCIAL_RECOVERY_SEED = "social-recovery";
 
 /** Domain separators, must match the program's signed-message domains. */
 export const DOMAIN_ADD = "cavos:add_signer:v1";
@@ -20,6 +21,9 @@ export const DOMAIN_TRANSFER = "cavos:transfer:v1";
 export const DOMAIN_EXECUTE = "cavos:execute:v1";
 export const DOMAIN_ADD_APPROVER = "cavos:add_approver:v1";
 export const DOMAIN_REMOVE_APPROVER = "cavos:remove_approver:v1";
+export const DOMAIN_ENROLL_SOCIAL = "cavos:enroll_social:v1";
+export const DOMAIN_CANCEL_SOCIAL = "cavos:cancel_social:v1";
+export const DOMAIN_SCHEDULE_SOCIAL = "cavos:schedule_social:v1";
 
 /** secp256r1 (P-256) curve order, for low-S normalization. */
 export const SECP256R1_N =

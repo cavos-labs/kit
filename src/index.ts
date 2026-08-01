@@ -44,6 +44,27 @@ export type { HttpRecoveryClientOptions } from "./recovery/HttpRecoveryClient";
 // Self-custodial recovery: derive a backup signer from a code (cross-chain,
 // off-chain derivation; registered on-chain as an ordinary signer).
 export { BackupSigner, generateRecoveryCode, deriveBackupKey } from "./recovery/BackupSigner";
+export {
+  SocialRecoveryClient,
+} from "./recovery/SocialRecoveryClient";
+export type { SocialRecoveryCredential } from "./recovery/SocialRecoveryCredential";
+export { createSocialRecoveryCredential } from "./recovery/SocialRecoveryCredential";
+export type {
+  AttestationPolicy,
+  ChainAuthorization as SocialChainAuthorization,
+  ProviderPolicy as SocialProviderPolicy,
+  SocialRecoveryAction,
+  SocialRecoveryClientOptions,
+  SocialRecoveryProvider,
+  SocialRecoveryResult,
+} from "./recovery/SocialRecoveryClient";
+export {
+  enrollHardwareIsolatedRecovery,
+  recoverHardwareIsolatedDevice,
+} from "./recovery/SocialRecoveryCoordinator";
+export type {
+  CoordinatedRecoveryResult,
+} from "./recovery/SocialRecoveryCoordinator";
 
 // Signers
 export type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/DeviceSigner";

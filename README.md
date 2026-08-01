@@ -13,8 +13,14 @@ entries and unlocked by an enrolled device, passkey, or recovery factor. All
 three are available through the unified `Cavos.connect({ chain, network })`
 entry point.
 
-> New package. Does **not** replace `@cavos/react` / `react-native` (legacy
-> OAuth/session-key SDKs), which continue on the old flow.
+**Direction:** Cavos is an every-chain wallet layer. These three adapters are
+the current implementation set, not the boundary of the product. New chains
+join through a chain-native adapter and must pass the same SDK conformance,
+security, and end-to-end validation before being advertised as available.
+
+> `@cavos/kit` is the active SDK for new integrations. `@cavos/react` and its
+> OAuth/JWT session-key flow are legacy and should only be maintained for
+> existing integrations.
 
 ## Install
 
@@ -99,6 +105,7 @@ the application also creates a new device that must be approved or recovered.
 | `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` | Cavos gasless sponsor for Solana: co-signs as fee payer so the integrator holds no keypair. |
 | `RecoveryClient` | Interface to the (non-custodial) backend for the email-approval multi-device flow (Starknet). |
+| `SocialRecoveryClient` | Verifies Google Confidential Space attestation, one-time-binds a fresh Google/Apple/Firebase token to one session, and encrypts the token directly to the enclave. |
 
 The Stellar implementation deliberately uses classic accounts rather than the
 earlier Soroban `C…` contract-account prototype. The deterministic master key
@@ -106,6 +113,57 @@ is made powerless after creation; a random ed25519 control key is the only
 active signer. Its seed is sealed by a device-bound P-256 key and stored as an
 encrypted on-chain envelope. The relayer can pay fees and sponsor reserves, but
 never holds the control key or authorizes payments.
+
+## Hardware-isolated social recovery
+
+Social recovery is opt-in per Cavos environment. The developer selects exactly
+one provider in the dashboard (`google`, `apple`, or email magic link), so the
+user is never shown a three-provider recovery selector.
+
+With React, provide independently pinned Confidential Space measurements:
+
+```tsx
+<CavosProvider
+  config={{
+    appId,
+    chain: "solana", // also starknet / stellar
+    network: "testnet",
+    appSalt: "my-app",
+    socialRecoveryAttestation: {
+      audience: "https://cavos.xyz/api/recovery/social/attestation",
+      imageDigest: "sha256:…",
+      projectNumber: "1234567890",
+      serviceAccount: "cavos-confidential-recovery@project.iam.gserviceaccount.com",
+    },
+    // Optional migration target for Starknet accounts deployed before the
+    // social-recovery entrypoints existed:
+    socialRecoveryStarknetClassHash: "0x…",
+  }}
+  modal={{ appName: "My App" }}
+>
+  <App />
+</CavosProvider>
+```
+
+The provider automatically enrolls ready wallets after a fresh login and
+recovers an unregistered device with the same configured provider. Starknet and
+Solana restrict the enclave authority on-chain to scheduling one exact signer,
+with nonce, expiry, cancellation, and optional timelock. Stellar seals only the
+DEK (never the Ed25519 control seed) and rewraps it to the new device.
+
+Every attempt requires a provider token issued or authenticated within five
+minutes. The SDK sends only its SHA-256 fingerprint when reserving the session;
+the API stores a second hash to reject replay. The raw token remains in memory,
+is AES-GCM encrypted with the recovery `session_id` as authenticated data, and
+is checked again inside the enclave. Google and Apple tokens must also contain
+the login nonce; email recovery accepts only a verified, recent Firebase email
+token (the built-in UI obtains it through the configured magic-link flow). OTP
+and Cavos-signed compatibility tokens are not recovery credentials.
+
+This is **hardware-isolated, non-custodial recovery**, not trustless recovery.
+The approved workload digest, Google Confidential Space/KMS, and image-upgrade
+policy remain in the trust model; Stellar classic has the broader TEE scope
+described above.
 
 ## Quickstart — Starknet
 
@@ -123,7 +181,7 @@ const wallet = await Cavos.connect({
   // wrap your own userId with StaticIdentity)
   auth: new StaticIdentity({ userId: user.id, email: user.email }),
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,        // hosted registry + recovery
-  paymasterApiKey: process.env.CAVOS_PAYMASTER_API_KEY!, // gas sponsor
+  paymasterApiKey: process.env.NEXT_PUBLIC_CAVOS_PAYMASTER_API_KEY!, // app-scoped, client-visible
 });
 
 console.log(wallet.address);          // deterministic; auto-deployed on first connect
@@ -133,7 +191,7 @@ if (wallet.chain === "starknet" && wallet.status === "ready") {
 }
 ```
 
-`wallet` is a discriminated union (`Cavos | CavosSolana`); narrow on
+`wallet` is a discriminated union (`Cavos | CavosSolana | CavosStellar`); narrow on
 `wallet.chain` before calling `execute`, since its signature differs per chain.
 
 ## Quickstart — Solana
@@ -327,19 +385,22 @@ non-custodial recovery relay cover device loss.
   device-account prototype. Production launch still requires the appropriate
   operational, security, and relayer hardening for the target deployment.
 
-### Cross-chain / next
+### Every-chain foundation
 
 - ✅ Unified `Cavos.connect({ chain, network })` dispatcher with a `CavosWallet`
   discriminated union.
 - ✅ Unified chain exports include Starknet, Solana, and Stellar adapters.
-- 🚧 Recovery backend service + session keys (Phase 2).
+- 🚧 Formal adapter conformance tests covering identity, address stability,
+  signer authority, recovery, sponsorship, and chain-native execution.
+- 🚧 Additional adapters prioritized with design partners; availability is
+  documented only after security and physical-device E2E validation.
 
 ## Demo
 
-A runnable end-to-end demo lives in `my-app/app/kit-demo` (Next.js): log in
-(identity only), see the deterministic address, create the silent device key,
-build onboarding calls, sign a tx with zero prompts, and walk the non-custodial
-add-device flow. Run `npm run dev` in `my-app` and open `/kit-demo`.
+A runnable Next.js demo lives in `../my-app`. Run `npm run dev` there, then open
+`/starknet`, `/solana`, or `/stellar` to exercise each current adapter. The
+shared `/approve-device` route demonstrates the non-custodial device-approval
+flow.
 
 ## Develop
 
