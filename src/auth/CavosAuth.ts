@@ -1,5 +1,10 @@
 import { hash, num } from "starknet";
 import type { AuthProvider, Identity } from "./AuthProvider";
+import {
+  createSocialRecoveryCredential,
+  isSocialRecoveryIssuer,
+  type SocialRecoveryCredential,
+} from "../recovery/SocialRecoveryCredential";
 
 export interface CavosAuthOptions {
   /** Cavos backend base URL. Defaults to the hosted service (same as @cavos/react). */
@@ -25,8 +30,9 @@ export interface CavosAuthOptions {
  * uses for on-chain RSA verification). Here we only need the stable `sub` claim
  * from it — the RSA/JWKS/nonce machinery react relies on is dead weight for the
  * device model, because the device key (not the JWT) authorizes on-chain calls.
- * We still send a `nonce` (Poseidon over random bytes) since the backend expects
- * it on the request; the value itself is irrelevant to us.
+ * The fresh provider token is retained only in memory. Its SHA-256 fingerprint
+ * reserves exactly one Confidential Space recovery session while the token
+ * itself is sent only through the attested encrypted channel.
  */
 export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
@@ -34,6 +40,10 @@ export class CavosAuth implements AuthProvider {
   /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
   private pendingNonce: string | null = null;
   private last: Identity | null = null;
+  /** Fresh OIDC proof retained only in memory for an immediate TEE recovery.
+   * Never persisted to localStorage and never sent to the Cavos control plane
+   * outside the attested encrypted channel. */
+  private recoveryCredential: SocialRecoveryCredential | null = null;
 
   constructor(private readonly opts: CavosAuthOptions = {}) {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
@@ -62,6 +72,7 @@ export class CavosAuth implements AuthProvider {
   /** Clear the persisted identity on an explicit user logout. */
   clearStoredIdentity(): void {
     this.last = null;
+    this.recoveryCredential = null;
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(this.identityStorageKey);
     }
@@ -133,6 +144,18 @@ export class CavosAuth implements AuthProvider {
     return this.last;
   }
 
+  /**
+   * Return the fresh social credential required by Confidential Space.
+   * Callers should use it immediately; it is intentionally not restorable
+   * after a refresh. A new social login is required for each recovery attempt.
+   */
+  getSocialRecoveryCredential(): SocialRecoveryCredential {
+    if (!this.recoveryCredential) {
+      throw new Error("kit/auth: complete a fresh social login before recovery");
+    }
+    return this.recoveryCredential;
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   /**
@@ -153,6 +176,9 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
+    this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
+      ? createSocialRecoveryCredential(token)
+      : null;
     return this.remember({
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? emailOverride,

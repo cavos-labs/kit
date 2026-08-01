@@ -1,4 +1,5 @@
 import { CavosAuth } from "./CavosAuth";
+import { createSocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 
 /**
  * `handleCallback(authData)` is the pure, network-free seam into
@@ -21,6 +22,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     const auth = new CavosAuth();
     const id = await auth.handleCallback(
       jwt({
+        iss: "https://accounts.google.com",
         sub: "google-user-123",
         email: "ada@example.com",
         name: "Ada Lovelace",
@@ -39,6 +41,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     const auth = new CavosAuth();
     const id = await auth.handleCallback(
       jwt({
+        iss: "https://cavos.xyz",
         sub: "firebase-uid-456",
         email: "anon@example.com",
         nonce: "n-0",
@@ -55,9 +58,29 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
   it("accepts ?auth_data=<jwt> callback strings", async () => {
     const auth = new CavosAuth();
-    const token = jwt({ sub: "u", name: "From URL" });
+    const token = jwt({ iss: "https://accounts.google.com", sub: "u", name: "From URL" });
     const id = await auth.handleCallback(`?auth_data=${token}`);
     expect(id.userId).toBe("u");
     expect(id.name).toBe("From URL");
+  });
+
+  it("keeps only an in-memory token fingerprint for one-session recovery binding", async () => {
+    const auth = new CavosAuth();
+    const token = jwt({
+      iss: "https://accounts.google.com",
+      sub: "recent-user",
+      nonce: "fresh-login-nonce-123",
+      iat: 1_700_000_000,
+      exp: 1_700_003_600,
+    });
+    await auth.handleCallback(token);
+
+    expect(auth.getSocialRecoveryCredential()).toEqual(
+      createSocialRecoveryCredential(token),
+    );
+    auth.clearStoredIdentity();
+    expect(() => auth.getSocialRecoveryCredential()).toThrow(
+      "complete a fresh social login",
+    );
   });
 });

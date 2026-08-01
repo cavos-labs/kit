@@ -63,15 +63,26 @@ describe("NativeCavosAuth", () => {
 
   test("persists callback identity, restores it, and logout keeps device keys", async () => {
     const auth = new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" });
-    const payload = toBase64(new TextEncoder().encode(JSON.stringify({ sub: "user-1", email: "a@b.test" })))
+    const payload = toBase64(new TextEncoder().encode(JSON.stringify({
+      iss: "https://accounts.google.com",
+      sub: "user-1",
+      email: "a@b.test",
+      nonce: "fresh-login-nonce-123",
+      iat: 1_700_000_000,
+    })))
       .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
     const identity = await auth.handleCallback(`cavos://auth?auth_data=x.${payload}.x`);
     expect(identity).toMatchObject({ userId: "user-1", email: "a@b.test" });
+    expect(auth.getSocialRecoveryCredential()).toMatchObject({
+      idToken: `x.${payload}.x`,
+      tokenFingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
 
     const restored = await new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" }).restoreIdentity();
     expect(restored).toEqual(identity);
     await auth.clearStoredIdentity();
     expect(await auth.restoreIdentity()).toBeNull();
+    expect(() => auth.getSocialRecoveryCredential()).toThrow("fresh social login");
     expect(bridge.deleteKeys).not.toHaveBeenCalled();
   });
 });

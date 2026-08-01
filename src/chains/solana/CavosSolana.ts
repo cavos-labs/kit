@@ -55,6 +55,11 @@ export interface ConnectSolanaOptions {
    * the default path when `appId` is provided.
    */
   feePayer?: Keypair;
+  /**
+   * Keep the legacy owner-device/email approval request enabled. Set false when
+   * hardware-isolated social recovery owns the new-device flow.
+   */
+  legacyDeviceApproval?: boolean;
 }
 
 export type ConnectStatus = "ready" | "needs-device-approval";
@@ -229,7 +234,7 @@ export class CavosSolana {
     // returning-user-on-a-new-device case (same userId+appSalt, different device
     // key). Ask the backend to email the owner an approval link; the approving
     // device signs add_signer on-chain. Best-effort: never blocks connect.
-    if (deployed && !isSigner && recovery) {
+    if (deployed && !isSigner && recovery && opts.legacyDeviceApproval !== false) {
       const dedup = lastDeviceRequest.get(identity.userId);
       const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
       try {
@@ -256,6 +261,50 @@ export class CavosSolana {
   async addSigner(pubkey: DevicePublicKey): Promise<string> {
     const ixs = await this.adapter.buildAddSigner(this.address, pubkey);
     return this.send(ixs);
+  }
+
+  async enrollSocialRecovery(params: {
+    recoveryPubkeyCompressed: Uint8Array;
+    delaySeconds: number;
+    policyHash: Uint8Array;
+  }): Promise<string> {
+    if (this.status !== "ready") {
+      throw new Error("kit/solana: social recovery enrolment requires a ready device");
+    }
+    const payer = this.relayer
+      ? await this.relayer.getFeePayer()
+      : this.feePayer?.publicKey;
+    if (!payer) throw new Error("kit/solana: recovery enrolment requires a fee payer");
+    const ixs = await this.adapter.buildEnrollSocialRecovery(
+      this.address,
+      payer.toBase58(),
+      params.recoveryPubkeyCompressed,
+      params.delaySeconds,
+      params.policyHash,
+    );
+    return this.send(ixs);
+  }
+
+  async socialRecoveryNonce(): Promise<bigint> {
+    return this.adapter.socialRecoveryNonce(this.address);
+  }
+
+  async scheduleSocialRecovery(params: {
+    expiresAt: number;
+    message: Uint8Array;
+    signature: Uint8Array;
+    recoveryPubkeyCompressed: Uint8Array;
+  }): Promise<string> {
+    const ixs = this.adapter.buildScheduleSocialRecovery({
+      account: this.address,
+      newSigner: this.devicePubkey,
+      ...params,
+    });
+    return this.send(ixs);
+  }
+
+  async finalizeSocialRecovery(): Promise<string> {
+    return this.send([this.adapter.buildFinalizeSocialRecovery(this.address)]);
   }
 
   /**

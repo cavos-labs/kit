@@ -99,13 +99,14 @@ interface Unlocked {
  *   - **passkey** (WebAuthn PRF): synced anchor to approve a new device / recover;
  *   - **recovery code**: offline backup (optional).
  *
- * Self-custodial, no backend, no registry: the address is a pure function of
- * identity and the control key lives only in the account's own data entries.
- * Unlike the Soroban `CavosStellar`, this path uses NO wallet registry —
- * creation needs neither an org API key nor a relayer. The optional relayer is
- * only a fee payer + reserve sponsor (never a custodian or identity authority),
- * so a bad/absent relayer can cost fees but can never move funds or squat an
- * address.
+ * Self-custodial: the address is a pure function of identity and the control key
+ * lives only in the account's own data entries. Creation needs neither an org API
+ * key nor a relayer, and the optional relayer is only a fee payer + reserve sponsor
+ * (never a custodian or identity authority), so a bad/absent relayer can cost fees
+ * but can never move funds or squat an address. When an `appId` is provided we also
+ * record the created address in the Cavos backend `wallets` table (best-effort) so
+ * it counts toward billing — this is pure bookkeeping and never drives address
+ * resolution, custody, or signing.
  */
 export class CavosStellar {
   // Discriminant for the `CavosWallet` union. Classic `G…` IS the Stellar chain
@@ -204,6 +205,33 @@ export class CavosStellar {
       // source + fee payer. After this tx the master is permanently weight 0.
       tx.sign(master, funder);
       await adapter.submit(tx);
+    }
+
+    // Record the freshly-created G account in the Cavos backend so it lands in the
+    // `wallets` table and counts toward billing — parity with Solana/Starknet, which
+    // register via the same endpoint. The backend recognizes a Stellar classic-G
+    // wallet (network `stellar-*` + valid G address) and stores it with no blob and
+    // no device signer. Best-effort: bookkeeping must never break a successful
+    // on-chain creation, so a failed/blocked registration only warns.
+    if (opts.appId) {
+      try {
+        const res = await fetch(new URL("/api/wallets", backendUrl), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            app_id: opts.appId,
+            ...(opts.environment ? { environment: opts.environment } : {}),
+            user_social_id: identity.userId,
+            network: opts.network,
+            address,
+          }),
+        });
+        if (!res.ok) {
+          console.warn(`[Cavos/stellar] wallet registration failed: ${res.status}`);
+        }
+      } catch (e) {
+        console.warn("[Cavos/stellar] wallet registration failed (non-fatal):", e);
+      }
     }
 
     const wallet = build("ready", { control, dek });
@@ -400,6 +428,26 @@ export class CavosStellar {
   }
 
   /**
+   * Export a short-lived copy of the Stellar DEK for social-recovery enrolment.
+   * The caller must send it only through `SocialRecoveryClient`, which encrypts
+   * it to the attested enclave before it leaves this device. The Ed25519 control
+   * seed is never exported.
+   */
+  socialRecoveryDek(): Uint8Array {
+    const { dek } = this.requireUnlocked();
+    return Uint8Array.from(dek);
+  }
+
+  /**
+   * Public ECIES recipient for a social-recovery wrap addressed to this exact
+   * browser/device. Safe to disclose; the corresponding private key remains
+   * non-extractable in IndexedDB/Keychain.
+   */
+  socialRecoveryRecipientPublicKey(): Uint8Array {
+    return Uint8Array.from(this.deviceKey.publicKeySec1());
+  }
+
+  /**
    * From a new browser/device (`needs-device-approval`), approve THIS device using
    * the user's synced passkey: unlock the DEK via the passkey factor, then wrap it
    * to this device's slot so future sessions unlock silently. Flips status to
@@ -419,6 +467,28 @@ export class CavosStellar {
       await unlockViaRecovery(this.adapter, this.address, code),
       "recovery code",
     );
+  }
+
+  /**
+   * Complete a TEE social recovery on a new device. `deviceWrap` is ECIES
+   * ciphertext addressed to this device's non-extractable P-256 unwrap key.
+   * Cavos/Google may relay it, but only this device can recover the DEK.
+   */
+  async approveThisDeviceWithSocialWrap(deviceWrap: Uint8Array): Promise<string> {
+    if (this.statusValue === "ready") {
+      throw new Error("kit/stellar: this device is already authorized");
+    }
+    try {
+      const dek = await this.deviceKey.unwrap(deviceWrap);
+      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
+      const controlSeed = openControlSeed(env.ct, dek);
+      const control = controlKeypairFromSeed(controlSeed);
+      return this.approveThisDevice({ control, dek }, "social recovery");
+    } catch {
+      throw new Error(
+        "kit/stellar: social recovery wrap is invalid for this device",
+      );
+    }
   }
 
   /** The control key's public G address (the weight-1 real signer), for display. */
