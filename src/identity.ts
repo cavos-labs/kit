@@ -6,7 +6,8 @@ import { utf8ToBytes } from "./crypto/encoding";
  * The address seed binds a wallet to a stable, backend-managed user identity.
  * The deterministic account address is derived from this seed + salt ONLY — never
  * from a device pubkey — so the same user resolves to the same wallet on any
- * device. The backend owns the user_id <-> address mapping off-chain.
+ * device. Hosted registry records are bookkeeping and recovery metadata only;
+ * they never override this derivation.
  */
 export interface IdentityInput {
   /** Stable, backend-managed user identifier (e.g. from email / magic link). */

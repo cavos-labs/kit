@@ -1,17 +1,10 @@
 import type { DevicePublicKey } from "../signer/DeviceSigner";
 
 /**
- * Off-chain map of `user_id -> wallet`. Because the account address is
- * `f(identity, first_device_pubkey)` (unforgeable, secure), it is NOT derivable
- * from the identity alone on a new device. The backend is the source of truth
- * for "does this user already have a wallet?" — enabling multi-device:
- *
- *   - First device, unknown user  -> deploy a new wallet, then `register`.
- *   - Same user, new device        -> `lookup` returns the existing wallet; the
- *                                      new device is added as a signer (recovery
- *                                      approval), NOT a new wallet.
- *
- * The backend implements this (it already manages the user<->address binding).
+ * Off-chain wallet registry used for recovery metadata, analytics, and legacy
+ * lookup-based recovery APIs. Normal chain connections derive their address
+ * from `identity + appSalt` and verify deployment/authorization on-chain; a
+ * registry row must never override that deterministic address.
  */
 export interface WalletRegistry {
   /** The user's existing wallet, or null if they don't have one yet. */
