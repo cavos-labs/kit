@@ -55,6 +55,7 @@ export type {
   ProviderPolicy as SocialProviderPolicy,
   SocialRecoveryAction,
   SocialRecoveryClientOptions,
+  SocialRecoveryPrewarm,
   SocialRecoveryProvider,
   SocialRecoveryResult,
 } from "./recovery/SocialRecoveryClient";

@@ -24,6 +24,7 @@ import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
   SocialRecoveryClient,
   type AttestationPolicy,
+  type SocialRecoveryPrewarm,
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
 import {
@@ -273,6 +274,8 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
+  const socialPrewarmRef = useRef<SocialRecoveryPrewarm | null>(null);
+  const socialPrewarmPromiseRef = useRef<Promise<SocialRecoveryPrewarm | null> | null>(null);
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
 
@@ -410,20 +413,75 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     return w;
   }, [modal]);
 
-  // On mount: if we're returning from OAuth (?auth_data=…), finish the login.
+  const ensureSocialRecoveryPrewarm = useCallback(async (): Promise<SocialRecoveryPrewarm | null> => {
+    const cfg = configRef.current;
+    if (!cfg.appId || !cfg.socialRecoveryAttestation || typeof window === 'undefined') {
+      return null;
+    }
+    const existing =
+      socialPrewarmRef.current ?? loadSocialRecoveryPrewarm(cfg.appId, cfg.environment);
+    if (existing) {
+      socialPrewarmRef.current = existing;
+      return existing;
+    }
+    if (socialPrewarmPromiseRef.current) return socialPrewarmPromiseRef.current;
+
+    const client = new SocialRecoveryClient({
+      baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+      appId: cfg.appId,
+      environment: cfg.environment,
+      attestation: cfg.socialRecoveryAttestation,
+    });
+    const promise = client
+      .prewarm()
+      .then((prewarm) => {
+        socialPrewarmRef.current = prewarm;
+        persistSocialRecoveryPrewarm(cfg.appId!, cfg.environment, prewarm);
+        return prewarm;
+      })
+      .catch((error) => {
+        // Prewarming is an optimization only. Login and the normal cold-start
+        // recovery path must remain available if capacity or rate limits reject it.
+        console.warn('[CavosProvider] social recovery prewarm skipped:', error);
+        return null;
+      })
+      .finally(() => {
+        socialPrewarmPromiseRef.current = null;
+      });
+    socialPrewarmPromiseRef.current = promise;
+    return promise;
+  }, []);
+
+  const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
+    // On redirect callbacks, continue/recreate the prewarm concurrently with
+    // provider-token verification and deterministic wallet discovery.
+    const [id] = await Promise.all([
+      auth.handleCallback(authData, redirectUri),
+      ensureSocialRecoveryPrewarm(),
+    ]);
+    await connect(id);
+  }, [auth, connect, ensureSocialRecoveryPrewarm]);
+
+  // On mount: exchange the one-time OAuth code after removing it from the
+  // address bar immediately. Legacy auth_data is accepted only for callbacks
+  // already in flight during rollout.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    const authData = params.get('auth_data') || params.get('zk_auth_data');
+    const authData = params.get('cavos_auth_code') || params.get('auth_data') || params.get('zk_auth_data');
     if (!authData) return;
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete('cavos_auth_code');
+    cleanUrl.searchParams.delete('auth_data');
+    cleanUrl.searchParams.delete('zk_auth_data');
+    window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
     setModalOpen(true);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     let cancelled = false;
     (async () => {
       setIsLoading(true);
       try {
-        await handleCallback(authData);
-        if (!cancelled) window.history.replaceState({}, document.title, window.location.pathname);
+        await handleCallback(authData, cleanUrl.toString());
       } catch (e) {
         console.error('[CavosProvider] OAuth callback error:', e);
         if (!cancelled) {
@@ -440,11 +498,6 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const handleCallback = useCallback(async (authData: string) => {
-    const id = await auth.handleCallback(authData);
-    await connect(id);
-  }, [auth, connect]);
 
   /**
    * A fresh provider credential is available only immediately after login. Use
@@ -481,20 +534,31 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       return;
     }
 
+    const prewarm =
+      socialPrewarmRef.current ??
+      takeSocialRecoveryPrewarm(config.appId, config.environment);
+    socialPrewarmRef.current = null;
+    clearSocialRecoveryPrewarm(config.appId, config.environment);
     const client = new SocialRecoveryClient({
       baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
       appId: config.appId,
       environment: config.environment,
       attestation: config.socialRecoveryAttestation,
+      ...(prewarm ? { prewarm } : {}),
     });
     let cancelled = false;
 
     (async () => {
       if (action === 'enroll') {
+        // A newly-created wallet is already controlled by this device. TEE
+        // enrollment is a hardening step and must not downgrade the usable
+        // wallet back to a blocking "deploying" state while an on-demand
+        // Confidential Space VM boots. Browsers may suspend timers in the
+        // background; the in-flight task resumes when the app is foregrounded.
         setWalletStatus((status) => ({
           ...status,
-          isDeploying: true,
-          isReady: false,
+          isDeploying: false,
+          isReady: true,
           isSocialRecovering: true,
         }));
         try {
@@ -535,13 +599,39 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
         isSocialRecovering: true,
       }));
       try {
-        const outcome = await recoverHardwareIsolatedDevice({
-          client,
-          wallet,
-          credential,
-          network: config.network,
-          delaySeconds: socialRecovery.delaySeconds,
-        });
+        // A second device can arrive while the first device's automatic TEE
+        // enrollment is still finishing. Treat that short race as a pending
+        // state instead of immediately surfacing the backend's `not_enrolled`
+        // response. The same fresh credential is safe to retry because the
+        // control plane does not reserve its fingerprint until an enrollment
+        // actually exists and a recovery session is created.
+        const enrollmentDeadline = Date.now() + 5 * 60_000;
+        let outcome: Awaited<ReturnType<typeof recoverHardwareIsolatedDevice>>;
+        for (;;) {
+          try {
+            outcome = await recoverHardwareIsolatedDevice({
+              client,
+              wallet,
+              credential,
+              network: config.network,
+              delaySeconds: socialRecovery.delaySeconds,
+            });
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const enrollmentIsPending =
+              message.includes('not_enrolled') ||
+              message.includes('social recovery is not enrolled');
+            if (
+              !enrollmentIsPending ||
+              Date.now() >= enrollmentDeadline ||
+              cancelled
+            ) {
+              throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+          }
+        }
         if (cancelled) return;
         if (!outcome.finalized) {
           persistPendingSocialRecovery(wallet.chain, wallet.address, outcome.readyAt);
@@ -643,7 +733,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("auth_data") || params.get("zk_auth_data")) return;
+    if (params.get("cavos_auth_code") || params.get("auth_data") || params.get("zk_auth_data")) return;
 
     const savedIdentity = auth.restoreIdentity();
     if (!savedIdentity) {
@@ -671,25 +761,29 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   const login = useCallback(async (provider: 'google' | 'apple') => {
     if (typeof window === 'undefined') throw new Error('OAuth requires a browser');
     setAuthError(null);
+    await ensureSocialRecoveryPrewarm();
     const url = await (provider === 'google'
       ? auth.getGoogleOAuthUrl(window.location.origin + window.location.pathname)
       : auth.getAppleOAuthUrl(window.location.origin + window.location.pathname));
     window.location.href = url;
-  }, [auth]);
+  }, [auth, ensureSocialRecoveryPrewarm]);
 
   const sendMagicLink = useCallback(async (email: string) => {
-    await auth.sendMagicLink(email);
-  }, [auth]);
+    await Promise.all([auth.sendMagicLink(email), ensureSocialRecoveryPrewarm()]);
+  }, [auth, ensureSocialRecoveryPrewarm]);
 
   const sendOtp = useCallback(async (email: string) => {
-    await auth.sendOtp(email);
-  }, [auth]);
+    await Promise.all([auth.sendOtp(email), ensureSocialRecoveryPrewarm()]);
+  }, [auth, ensureSocialRecoveryPrewarm]);
 
   const verifyOtp = useCallback(async (email: string, code: string) => {
     setAuthError(null);
-    const id = await auth.verifyOtp(email, code);
+    const [id] = await Promise.all([
+      auth.verifyOtp(email, code),
+      ensureSocialRecoveryPrewarm(),
+    ]);
     await connect(id);
-  }, [auth, connect]);
+  }, [auth, connect, ensureSocialRecoveryPrewarm]);
 
   const execute = useCallback(async (calls: ChainCall[], opts?: ExecuteOptions) => {
     if (!wallet) throw new Error('Not logged in');
@@ -1018,4 +1112,63 @@ function loadPendingSocialRecovery(chain: Chain, address: string): number | null
 function clearPendingSocialRecovery(chain: Chain, address: string): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(pendingSocialRecoveryKey(chain, address));
+}
+
+function socialRecoveryPrewarmKey(
+  appId: string,
+  environment?: 'development' | 'production',
+): string {
+  return `cavos-kit:social-recovery-prewarm:${appId}:${environment ?? 'production'}`;
+}
+
+function persistSocialRecoveryPrewarm(
+  appId: string,
+  environment: 'development' | 'production' | undefined,
+  prewarm: SocialRecoveryPrewarm,
+): void {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.setItem(
+    socialRecoveryPrewarmKey(appId, environment),
+    JSON.stringify(prewarm),
+  );
+}
+
+function loadSocialRecoveryPrewarm(
+  appId: string,
+  environment?: 'development' | 'production',
+): SocialRecoveryPrewarm | null {
+  if (typeof window === 'undefined') return null;
+  const key = socialRecoveryPrewarmKey(appId, environment);
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(key) ?? 'null');
+    if (
+      typeof value?.prewarmId === 'string' &&
+      typeof value?.claimToken === 'string' &&
+      typeof value?.expiresAt === 'string' &&
+      new Date(value.expiresAt).getTime() > Date.now()
+    ) {
+      return value as SocialRecoveryPrewarm;
+    }
+  } catch {
+    // Malformed browser state is discarded below.
+  }
+  window.sessionStorage.removeItem(key);
+  return null;
+}
+
+function takeSocialRecoveryPrewarm(
+  appId: string,
+  environment?: 'development' | 'production',
+): SocialRecoveryPrewarm | null {
+  const prewarm = loadSocialRecoveryPrewarm(appId, environment);
+  clearSocialRecoveryPrewarm(appId, environment);
+  return prewarm;
+}
+
+function clearSocialRecoveryPrewarm(
+  appId: string,
+  environment?: 'development' | 'production',
+): void {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.removeItem(socialRecoveryPrewarmKey(appId, environment));
 }

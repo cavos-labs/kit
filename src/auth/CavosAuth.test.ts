@@ -18,6 +18,33 @@ function jwt(claims: Record<string, unknown>): string {
 }
 
 describe("CavosAuth.handleCallback -> Identity", () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it("exchanges a one-time callback code without putting the JWT in the URL", async () => {
+    const token = jwt({ iss: "https://accounts.google.com", sub: "code-user" });
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ jwt: token }),
+    } as Response);
+    const auth = new CavosAuth({ backendUrl: "https://cavos.test", appId: "app-id" });
+    const id = await auth.handleCallback(
+      `?cavos_auth_code=${"a".repeat(43)}`,
+      "https://wallet.test/callback",
+    );
+    expect(id.userId).toBe("code-user");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://cavos.test/api/oauth/callback/exchange",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          code: "a".repeat(43),
+          app_id: "app-id",
+          redirect_uri: "https://wallet.test/callback",
+        }),
+      }),
+    );
+  });
+
   it("reads the standard OIDC `name` claim when present (Google id_token)", async () => {
     const auth = new CavosAuth();
     const id = await auth.handleCallback(
