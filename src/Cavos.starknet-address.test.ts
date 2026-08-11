@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, jest } from "@jest/globals";
-import { RpcProvider } from "starknet";
+import { Account, RpcProvider } from "starknet";
 import { Cavos } from "./Cavos";
 import { deriveAddressSeed } from "./identity";
 import { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
@@ -61,5 +61,52 @@ describe("Cavos Starknet deterministic address resolution", () => {
       address: expected,
       initialSigner: { x: 1n, y: 2n },
     });
+  });
+
+  it("waits for the recovery schedule receipt before allowing finalize", async () => {
+    jest
+      .spyOn(RpcProvider.prototype, "getClassHashAt")
+      .mockResolvedValue(classHash);
+    jest
+      .spyOn(StarknetAdapter.prototype, "isAuthorizedSigner")
+      .mockResolvedValue(true);
+    const waitForTransaction = jest
+      .spyOn(Account.prototype, "waitForTransaction")
+      .mockResolvedValue({} as never);
+    jest.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ result: { transaction_hash: "0xabc" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const registry: WalletRegistry = {
+      lookup: jest.fn(async () => null),
+      register: jest.fn(async () => undefined),
+    };
+    const wallet = await Cavos.connect({
+      chain: "starknet",
+      network: "testnet",
+      identity: { userId: "google:recovery-user" },
+      appSalt: "recovery-salt",
+      paymasterApiKey: "test-key",
+      classHash,
+      rpcUrl: "http://127.0.0.1:5050",
+      paymasterUrl: "http://127.0.0.1:5051",
+      registry,
+      createSigner: async () => signer,
+    });
+    if (wallet.chain !== "starknet") throw new Error("expected Starknet wallet");
+
+    const result = await wallet.scheduleSocialRecovery({
+      nonce: 0n,
+      expiresAt: 1_900_000_000n,
+      rHex: "0x3",
+      sHex: "0x4",
+      yParity: false,
+    });
+
+    expect(result.transactionHash).toBe("0xabc");
+    expect(waitForTransaction).toHaveBeenCalledWith("0xabc");
   });
 });
