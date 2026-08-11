@@ -462,7 +462,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
 
     let credential: SocialRecoveryCredential;
     try {
-      credential = auth.getSocialRecoveryCredential();
+      credential = auth.consumeSocialRecoveryCredential();
     } catch {
       return;
     }

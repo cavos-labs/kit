@@ -156,6 +156,17 @@ export class CavosAuth implements AuthProvider {
     return this.recoveryCredential;
   }
 
+  /**
+   * Take the fresh social credential exactly once. A provider token is bound to
+   * one enclave session, so retaining it after recovery only permits accidental
+   * replay attempts during the wallet's post-recovery reconnect.
+   */
+  consumeSocialRecoveryCredential(): SocialRecoveryCredential {
+    const credential = this.getSocialRecoveryCredential();
+    this.recoveryCredential = null;
+    return credential;
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   /**

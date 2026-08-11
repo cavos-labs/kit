@@ -75,10 +75,9 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     });
     await auth.handleCallback(token);
 
-    expect(auth.getSocialRecoveryCredential()).toEqual(
+    expect(auth.consumeSocialRecoveryCredential()).toEqual(
       createSocialRecoveryCredential(token),
     );
-    auth.clearStoredIdentity();
     expect(() => auth.getSocialRecoveryCredential()).toThrow(
       "complete a fresh social login",
     );
