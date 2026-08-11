@@ -616,7 +616,12 @@ export class Cavos {
     });
     if (params.submit) return params.submit(call);
     if (!this.paymaster) throw new Error("kit: no paymaster configured for social recovery");
-    return paymasterExecuteDirect(this.paymaster, this.address, call);
+    const submitted = await paymasterExecuteDirect(this.paymaster, this.address, call);
+    // A zero-delay recovery finalizes immediately after scheduling. The direct
+    // paymaster returns as soon as the transaction is submitted, so wait until
+    // Starknet has applied the pending recovery state before finalize reads it.
+    await this.account.waitForTransaction(submitted.transactionHash);
+    return submitted;
   }
 
   async finalizeSocialRecovery(
@@ -983,7 +988,7 @@ async function paymasterExecuteDirect(
   });
   const json = await res.json();
   if (json.error) {
-    throw new Error(`kit: paymaster passkey approval failed: ${JSON.stringify(json.error)}`);
+    throw new Error(`kit: paymaster direct transaction failed: ${JSON.stringify(json.error)}`);
   }
   return { transactionHash: json.result?.transaction_hash ?? json.result?.tracking_id };
 }
