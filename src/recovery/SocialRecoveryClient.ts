@@ -20,6 +20,14 @@ export interface SocialRecoveryClientOptions {
    * They must not be learned from the same control plane being attested.
    */
   attestation: AttestationPolicy;
+  /** Optional ready one-shot worker reserved before OAuth and claimed once. */
+  prewarm?: SocialRecoveryPrewarm;
+}
+
+export interface SocialRecoveryPrewarm {
+  prewarmId: string;
+  claimToken: string;
+  expiresAt: string;
 }
 
 export interface ProviderPolicy {
@@ -84,7 +92,47 @@ interface ReadySession {
  * token. The Cavos API only relays ciphertext.
  */
 export class SocialRecoveryClient {
-  constructor(private readonly opts: SocialRecoveryClientOptions) {}
+  private activePrewarm?: SocialRecoveryPrewarm;
+
+  constructor(private readonly opts: SocialRecoveryClientOptions) {
+    this.activePrewarm = opts.prewarm;
+  }
+
+  /**
+   * Reserve an empty, already-attested Confidential Space worker before OAuth.
+   * The returned capability contains no identity or wallet data and is useful
+   * only once, when `enroll` or `recover` atomically claims the worker.
+   */
+  async prewarm(): Promise<SocialRecoveryPrewarm> {
+    if (
+      this.activePrewarm &&
+      new Date(this.activePrewarm.expiresAt).getTime() > Date.now()
+    ) {
+      return this.activePrewarm;
+    }
+    const response = await this.fetchJson("/api/recovery/social/prewarm", {
+      method: "POST",
+      body: JSON.stringify({
+        app_id: this.opts.appId,
+        ...(this.opts.environment ? { environment: this.opts.environment } : {}),
+      }),
+    });
+    const prewarm: SocialRecoveryPrewarm = {
+      prewarmId: response.prewarm_id,
+      claimToken: response.claim_token,
+      expiresAt: response.expires_at,
+    };
+    if (
+      !prewarm.prewarmId ||
+      !prewarm.claimToken ||
+      !prewarm.expiresAt ||
+      !Number.isFinite(new Date(prewarm.expiresAt).getTime())
+    ) {
+      throw new Error("kit/social-recovery: malformed prewarm response");
+    }
+    this.activePrewarm = prewarm;
+    return prewarm;
+  }
 
   async enroll(params: {
     walletAddress: string;
@@ -162,7 +210,12 @@ export class SocialRecoveryClient {
     action: SocialRecoveryAction,
     authChallenge: string,
   ): Promise<StartedSession> {
-    return this.fetchJson("/api/recovery/social/sessions", {
+    const prewarm =
+      this.activePrewarm &&
+      new Date(this.activePrewarm.expiresAt).getTime() > Date.now()
+        ? this.activePrewarm
+        : undefined;
+    const started = await this.fetchJson("/api/recovery/social/sessions", {
       method: "POST",
       body: JSON.stringify({
         app_id: this.opts.appId,
@@ -170,12 +223,22 @@ export class SocialRecoveryClient {
         wallet_address: walletAddress,
         action,
         auth_challenge: authChallenge,
+        ...(prewarm
+          ? {
+              prewarm_id: prewarm.prewarmId,
+              prewarm_token: prewarm.claimToken,
+            }
+          : {}),
       }),
     });
+    // A successful start either claimed the worker or deliberately fell back
+    // to a fresh session. Never present the one-shot capability twice.
+    this.activePrewarm = undefined;
+    return started;
   }
 
   private async waitReady(sessionId: string): Promise<ReadySession> {
-    for (let attempt = 0; attempt < 180; attempt++) {
+    for (let attempt = 0; attempt < 390; attempt++) {
       const session = await this.session(sessionId);
       if (session.status === "ready") {
         await verifyAttestedChannel(session, this.opts.attestation);
@@ -186,13 +249,13 @@ export class SocialRecoveryClient {
           `kit/social-recovery: enclave startup failed (${session.error_code ?? session.status})`,
         );
       }
-      await delay(2_000);
+      await delay(sessionPollDelay(attempt));
     }
     throw new Error("kit/social-recovery: enclave startup timed out");
   }
 
   private async waitCompleted(sessionId: string): Promise<SocialRecoveryResult> {
-    for (let attempt = 0; attempt < 180; attempt++) {
+    for (let attempt = 0; attempt < 390; attempt++) {
       const session = await this.session(sessionId);
       if (session.status === "completed" && session.result) return session.result;
       if (["failed", "expired"].includes(session.status)) {
@@ -200,7 +263,7 @@ export class SocialRecoveryClient {
           `kit/social-recovery: recovery failed (${session.error_code ?? session.status})`,
         );
       }
-      await delay(2_000);
+      await delay(sessionPollDelay(attempt));
     }
     throw new Error("kit/social-recovery: workload timed out");
   }
@@ -388,4 +451,10 @@ function fromB64(value: string): Uint8Array {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A reserved warm enclave normally finishes in a few seconds. Poll tightly in
+// that window, then back off for cold fallback/capacity incidents.
+function sessionPollDelay(attempt: number): number {
+  return attempt < 40 ? 250 : 1_000;
 }
