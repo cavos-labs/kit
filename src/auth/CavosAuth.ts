@@ -95,15 +95,27 @@ export class CavosAuth implements AuthProvider {
       redirect_uri: redirectUri ?? window.location.href,
       ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
     });
-    const { url } = await this.get(`/api/oauth/${provider}?${params}`);
+    const { url } = await this.get(`/api/oauth/v2/${provider}?${params}`);
     return url;
   }
 
   /**
-   * Resolve the identity from an OAuth callback. The auth data is carried in the
-   * `auth_data` (or `zk_auth_data`) query param on return. We only extract `sub`.
+   * Resolve identity from an OAuth callback. Current callbacks carry only a
+   * short-lived one-time code; legacy raw auth data remains readable so apps can
+   * roll forward without losing an already-open callback.
    */
-  async handleCallback(authDataOrSearch: string): Promise<Identity> {
+  async handleCallback(authDataOrSearch: string, redirectUri?: string): Promise<Identity> {
+    const callbackCode = extractCallbackCode(authDataOrSearch);
+    if (callbackCode) {
+      const callbackRedirectUri = redirectUri ?? currentCleanCallbackUrl();
+      if (!callbackRedirectUri) throw new Error("kit/auth: callback redirect URI is required");
+      const result = await this.post("/api/oauth/callback/exchange", {
+        code: callbackCode,
+        app_id: this.opts.appId,
+        redirect_uri: callbackRedirectUri,
+      });
+      return this.identityFromAuthData(JSON.stringify(result), "oauth");
+    }
     const authData = extractAuthData(authDataOrSearch);
     return this.identityFromAuthData(authData, "oauth");
   }
@@ -119,7 +131,7 @@ export class CavosAuth implements AuthProvider {
 
   /** Send a passwordless magic-link sign-in email (Firebase). */
   async sendMagicLink(email: string): Promise<void> {
-    await this.post("/api/oauth/firebase/magic-link", {
+    await this.post("/api/oauth/v2/firebase/magic-link", {
       email,
       nonce: this.freshNonce(),
       ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
@@ -250,6 +262,27 @@ function extractAuthData(input: string): string {
     return params.get("auth_data") ?? params.get("zk_auth_data") ?? input;
   }
   return input;
+}
+
+function extractCallbackCode(input: string): string | null {
+  if (/^[A-Za-z0-9_-]{43}$/.test(input)) return input;
+  try {
+    const params = input.includes('://')
+      ? new URL(input).searchParams
+      : new URLSearchParams(input.startsWith('?') ? input : `?${input}`);
+    return params.get('cavos_auth_code');
+  } catch {
+    return null;
+  }
+}
+
+function currentCleanCallbackUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const url = new URL(window.location.href);
+  url.searchParams.delete('cavos_auth_code');
+  url.searchParams.delete('auth_data');
+  url.searchParams.delete('zk_auth_data');
+  return url.toString();
 }
 
 /** Decode a JWT payload (no verification — the backend already validated it). */

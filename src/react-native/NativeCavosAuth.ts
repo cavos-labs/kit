@@ -69,7 +69,7 @@ export class NativeCavosAuth implements AuthProvider {
       redirect_uri: this.opts.redirectUri,
       app_id: this.opts.appId,
     });
-    const { url } = await this.get(`/api/oauth/${provider}?${params}`);
+    const { url } = await this.get(`/api/oauth/v2/${provider}?${params}`);
     const result = await WebBrowser.openAuthSessionAsync(url, this.opts.redirectUri);
     if (result.type !== "success" || !result.url) {
       throw new NativeCavosAuthError(
@@ -89,7 +89,7 @@ export class NativeCavosAuth implements AuthProvider {
   }
 
   async sendMagicLink(email: string): Promise<void> {
-    await this.post("/api/oauth/firebase/magic-link", {
+    await this.post("/api/oauth/v2/firebase/magic-link", {
       email,
       nonce: await this.freshNonce(),
       app_id: this.opts.appId,
@@ -108,6 +108,15 @@ export class NativeCavosAuth implements AuthProvider {
   }
 
   async handleCallback(input: string, provider = "oauth"): Promise<Identity> {
+    const callbackCode = extractCallbackCode(input);
+    if (callbackCode) {
+      const result = await this.post("/api/oauth/callback/exchange", {
+        code: callbackCode,
+        app_id: this.opts.appId,
+        redirect_uri: this.opts.redirectUri,
+      });
+      return this.identityFromAuthData(JSON.stringify(result), provider);
+    }
     let authData = input;
     if (input.includes("auth_data=") || input.includes("zk_auth_data=")) {
       const params = new URL(input).searchParams;
@@ -190,4 +199,10 @@ export class NativeCavosAuth implements AuthProvider {
 function normalizeBase64url(value: string): string {
   const base = value.replace(/-/g, "+").replace(/_/g, "/");
   return base + "=".repeat((4 - base.length % 4) % 4);
+}
+
+function extractCallbackCode(input: string): string | null {
+  if (/^[A-Za-z0-9_-]{43}$/.test(input)) return input;
+  try { return new URL(input).searchParams.get("cavos_auth_code"); }
+  catch { return null; }
 }
