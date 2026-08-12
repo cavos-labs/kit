@@ -66,10 +66,7 @@ export {
 export type {
   CoordinatedRecoveryResult,
 } from "./recovery/SocialRecoveryCoordinator";
-export {
-  DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
-  DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
-} from "./recovery/attestationDefaults";
+export { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "./recovery/attestationDefaults";
 
 // Signers
 export type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/DeviceSigner";

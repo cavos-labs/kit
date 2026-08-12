@@ -28,20 +28,3 @@ export const DEFAULT_SOCIAL_RECOVERY_ATTESTATION: AttestationPolicy = {
   serviceAccount:
     "cavos-confidential-recovery@cavos-459123.iam.gserviceaccount.com",
 };
-
-/**
- * DeviceAccount class declaring the social-recovery entrypoints, per network.
- * Accounts deployed before the feature are upgraded to this class by their own
- * device before enrolment; address and signer storage are unchanged.
- *
- * Deliberately network-keyed and deliberately absent for mainnet: a class hash
- * is only meaningful on the network it was declared on, and mainnet still runs
- * the prior class. Defaulting a value there would make the SDK upgrade a real
- * account to a class that does not exist on its chain. Mainnet apps must pass
- * `socialRecoveryStarknetClassHash` explicitly once the class is declared.
- */
-export const DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH: Partial<
-  Record<"testnet" | "mainnet", string>
-> = {
-  testnet: "0x03f430a93dc4436ce2ba4a78f2ae00e10a40cd8df653516a14612df0275420a6",
-};
