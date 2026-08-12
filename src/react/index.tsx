@@ -17,3 +17,11 @@ export type {
 } from './CavosProvider';
 export { CavosAuthModal, useCavosAuth } from './CavosAuthModal';
 export type { CavosAuthModalProps } from './CavosAuthModal';
+// The provider runs these itself in development. Exported so a host can run
+// the same checks in its own setup screen, tests, or CI.
+export {
+  validateCavosConfig,
+  checkAppSaltDrift,
+  formatConfigProblems,
+} from './validateConfig';
+export type { CavosConfigProblem } from './validateConfig';

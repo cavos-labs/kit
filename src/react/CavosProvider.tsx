@@ -38,6 +38,11 @@ import {
   DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
 } from '../recovery/attestationDefaults';
 import { CavosAuthModal } from './CavosAuthModal';
+import {
+  validateCavosConfig,
+  checkAppSaltDrift,
+  formatConfigProblems,
+} from './validateConfig';
 import type { MessageSignature } from '../signing';
 
 export interface CavosConfig {
@@ -290,6 +295,20 @@ export function resolveSocialRecoveryPolicy(
 }
 
 export function CavosProvider({ config, modal, children }: CavosProviderProps) {
+  // Surface configuration mistakes at mount, where they are cheap to fix,
+  // instead of as an indirect failure several steps into a user's first login.
+  // Development only: these are for whoever is integrating, not end users.
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    const problems = validateCavosConfig(config);
+    const drift = checkAppSaltDrift(config);
+    if (drift) problems.unshift(drift);
+    if (problems.length === 0) return;
+    const log = problems.some((p) => p.level === 'error') ? console.error : console.warn;
+    log(`[CavosProvider] configuration:\n${formatConfigProblems(problems)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const socialRecoveryPolicy = useMemo(
     () => resolveSocialRecoveryPolicy(config),
     [config.socialRecovery, config.socialRecoveryAttestation],
