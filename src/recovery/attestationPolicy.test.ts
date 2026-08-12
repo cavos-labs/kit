@@ -1,8 +1,5 @@
 import { resolveSocialRecoveryPolicy } from "../react/CavosProvider";
-import {
-  DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
-  DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
-} from "./attestationDefaults";
+import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "./attestationDefaults";
 import { isAcceptedImageDigest, type AttestationPolicy } from "./SocialRecoveryClient";
 
 const custom: AttestationPolicy = {
@@ -46,7 +43,6 @@ describe("shipped attestation defaults", () => {
     expect(p.audience).toMatch(/^https:\/\//);
     expect(p.projectNumber).toMatch(/^\d+$/);
     expect(p.serviceAccount).toMatch(/^[^@]+@[^@]+\.iam\.gserviceaccount\.com$/);
-    expect(DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH).toMatch(/^0x[0-9a-f]{60,64}$/);
   });
 
   it("pins full-length sha256 digests", () => {

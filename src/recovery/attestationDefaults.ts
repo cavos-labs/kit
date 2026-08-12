@@ -28,11 +28,3 @@ export const DEFAULT_SOCIAL_RECOVERY_ATTESTATION: AttestationPolicy = {
   serviceAccount:
     "cavos-confidential-recovery@cavos-459123.iam.gserviceaccount.com",
 };
-
-/**
- * DeviceAccount class declaring the social-recovery entrypoints. Accounts
- * deployed before the feature are upgraded to this class by their current
- * device before enrolment; address and signer storage are unchanged.
- */
-export const DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH =
-  "0x03f430a93dc4436ce2ba4a78f2ae00e10a40cd8df653516a14612df0275420a6";

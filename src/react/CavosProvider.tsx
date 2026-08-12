@@ -33,10 +33,7 @@ import {
   recoverHardwareIsolatedDevice,
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
-import {
-  DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
-  DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
-} from '../recovery/attestationDefaults';
+import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
 import { CavosAuthModal } from './CavosAuthModal';
 import {
   validateCavosConfig,
@@ -83,12 +80,6 @@ export interface CavosConfig {
    * takes precedence, so existing apps keep their explicit pin.
    */
   socialRecoveryAttestation?: AttestationPolicy;
-  /**
-   * Declared DeviceAccount class containing social-recovery entrypoints, used
-   * to upgrade Starknet accounts deployed before the feature; their address and
-   * signer storage stay unchanged. Defaults to the class Cavos declared.
-   */
-  socialRecoveryStarknetClassHash?: string;
 }
 
 export interface CavosModalConfig {
@@ -356,9 +347,6 @@ export function CavosProvider({
     () => resolveSocialRecoveryPolicy(config),
     [config.socialRecovery, config.socialRecoveryAttestation],
   );
-  const socialRecoveryStarknetClassHash =
-    config.socialRecoveryStarknetClassHash ??
-    DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH;
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );
@@ -680,9 +668,6 @@ export function CavosProvider({
             wallet,
             credential,
             delaySeconds: socialRecovery.delaySeconds,
-            ...(socialRecoveryStarknetClassHash
-              ? { starknetClassHash: socialRecoveryStarknetClassHash }
-              : {}),
           });
         } catch (error) {
           // Enrollment is opt-in and must never make an already-working wallet
@@ -782,7 +767,6 @@ export function CavosProvider({
     config.environment,
     config.network,
     socialRecoveryPolicy,
-    socialRecoveryStarknetClassHash,
     connect,
     identity,
     socialRecovery,

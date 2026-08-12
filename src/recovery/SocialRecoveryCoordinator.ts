@@ -60,17 +60,8 @@ export async function enrollHardwareIsolatedRecovery(params: {
   wallet: CavosWallet;
   credential: SocialRecoveryCredential;
   delaySeconds: number;
-  /** New DeviceAccount class for opt-in migration of pre-feature Starknet wallets. */
-  starknetClassHash?: string;
 }): Promise<{ sessionId: string; transactionHash?: string }> {
   const { client, wallet, credential, delaySeconds } = params;
-  if (wallet.chain === "starknet" && params.starknetClassHash) {
-    try {
-      await wallet.socialRecoveryNonce();
-    } catch {
-      await wallet.upgrade(params.starknetClassHash);
-    }
-  }
   const enrollment = await client.enroll({
     walletAddress: wallet.address,
     credential,
