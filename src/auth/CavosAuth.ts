@@ -179,6 +179,32 @@ export class CavosAuth implements AuthProvider {
     return credential;
   }
 
+  /**
+   * Accept a provider id_token obtained by the host's own authentication.
+   *
+   * Apps that sign users in themselves already hold a Google or Apple token;
+   * this lets social recovery use it instead of sending the user through a
+   * second sign-in. Nothing here grants trust: the token is checked inside the
+   * enclave against the issuer and audience sealed for the app, and only Google
+   * or Apple can produce a token that passes.
+   *
+   * Rejected up front if it was not issued by a provider the enclave accepts,
+   * so a mistake surfaces here rather than as an opaque enclave failure.
+   *
+   * The token must be recent — the enclave requires the authentication to be
+   * within five minutes — so pass one straight from a sign-in, not a stored one.
+   */
+  useExternalSocialRecoveryToken(idToken: string): void {
+    const claims = parseJwt(idToken);
+    if (!isSocialRecoveryIssuer(claims?.iss)) {
+      throw new Error(
+        `kit/auth: id_token issuer ${JSON.stringify(claims?.iss ?? null)} cannot be used for social recovery. ` +
+          "Pass the raw Google or Apple id_token from your login, not your own session JWT.",
+      );
+    }
+    this.recoveryCredential = createSocialRecoveryCredential(idToken);
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   /**

@@ -38,6 +38,11 @@ import {
   DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
 } from '../recovery/attestationDefaults';
 import { CavosAuthModal } from './CavosAuthModal';
+import {
+  validateCavosConfig,
+  checkAppSaltDrift,
+  formatConfigProblems,
+} from './validateConfig';
 import type { MessageSignature } from '../signing';
 
 export interface CavosConfig {
@@ -229,6 +234,20 @@ export interface CavosContextValue {
    * the provider to a ready state.
    */
   recover: (code: string) => Promise<void>;
+  /**
+   * Drive social recovery with a provider id_token your own login already
+   * obtained, so the user never signs in twice.
+   *
+   * Enrols when this device is ready and recovers when it is not — the wallet's
+   * state decides. Pass the raw Google or Apple `id_token`, not your own session
+   * JWT, and pass it straight from a sign-in: the enclave requires the
+   * authentication to be under five minutes old.
+   *
+   * Requires the app's own OAuth client ID to be registered for the environment
+   * in the dashboard, so the enclave accepts tokens minted for your client.
+   * Progress shows up on `walletStatus.isSocialRecovering`.
+   */
+  submitSocialRecoveryToken: (idToken: string) => void;
   logout: () => void;
 }
 
@@ -238,6 +257,23 @@ export interface CavosProviderProps {
   /** A single chain config. The provider manages exactly one chain. */
   config: CavosConfig;
   modal?: CavosModalConfig;
+  /**
+   * Bring your own auth: the signed-in user from Clerk, Auth0, your own
+   * backend, anything. When set, the provider skips its own login entirely —
+   * the modal never opens and `login()` throws — and connects this user's
+   * wallet directly.
+   *
+   * Pass `null` while your auth is still loading or once the user signs out;
+   * the provider clears its state in step with you.
+   *
+   * This identity is deliberately **not persisted**. Your auth stays the single
+   * source of truth on every mount, so a Cavos session can never outlive the
+   * session that authorized it.
+   *
+   * `userId` must be stable and unique per user — the wallet address derives
+   * from it. Use an immutable primary key, never an email or username.
+   */
+  identity?: Identity | null;
   children: ReactNode;
 }
 
@@ -289,7 +325,33 @@ export function resolveSocialRecoveryPolicy(
   return undefined;
 }
 
-export function CavosProvider({ config, modal, children }: CavosProviderProps) {
+export function CavosProvider({
+  config,
+  modal,
+  identity: externalIdentity,
+  children,
+}: CavosProviderProps) {
+  // `undefined` = the host is not supplying identity (Cavos runs its own auth).
+  // `null` = the host supplies identity and nobody is signed in yet.
+  const isExternalAuth = externalIdentity !== undefined;
+  // Surface configuration mistakes at mount, where they are cheap to fix,
+  // instead of as an indirect failure several steps into a user's first login.
+  // Development only: these are for whoever is integrating, not end users.
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    const problems = validateCavosConfig(config);
+    const drift = checkAppSaltDrift(config);
+    if (drift) problems.unshift(drift);
+    if (problems.length === 0) return;
+    const log = problems.some((p) => p.level === 'error') ? console.error : console.warn;
+    log(`[CavosProvider] configuration:\n${formatConfigProblems(problems)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Bumped when the host hands us a provider token, so the enrol/recover
+  // effect below re-runs — the credential lives on `auth`, not in React state.
+  const [externalSocialToken, setExternalSocialToken] = useState(0);
+
   const socialRecoveryPolicy = useMemo(
     () => resolveSocialRecoveryPolicy(config),
     [config.socialRecovery, config.socialRecoveryAttestation],
@@ -382,7 +444,19 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       .catch(() => setSocialRecovery({ enabled: false, provider: null, delaySeconds: 0 }));
   }, [config.appId, config.environment, config.authBackendUrl]);
 
-  const openModal = useCallback(() => setModalOpen(true), []);
+  const openModal = useCallback(() => {
+    // Under external auth there is nothing for the modal to do: showing a
+    // second sign-in surface next to the host's own is a bug, not a feature.
+    if (isExternalAuth) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(
+          '[CavosProvider] openModal() ignored: this provider uses your `identity` prop, not Cavos login.',
+        );
+      }
+      return;
+    }
+    setModalOpen(true);
+  }, [isExternalAuth]);
   const closeModal = useCallback(() => setModalOpen(false), []);
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
@@ -713,6 +787,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     identity,
     socialRecovery,
     wallet,
+    externalSocialToken,
   ]);
 
   // A non-zero timelock survives refreshes: scheduling is already committed
@@ -771,6 +846,10 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
   // existing signer without another OAuth prompt.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    // Under external auth the host's identity is the only source of truth, and
+    // it is never written to storage. Restoring here would resurrect a session
+    // the host may have already ended.
+    if (isExternalAuth) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get("cavos_auth_code") || params.get("auth_data") || params.get("zk_auth_data")) return;
 
@@ -795,9 +874,58 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     return () => {
       cancelled = true;
     };
-  }, [auth, connect]);
+  }, [auth, connect, isExternalAuth]);
+
+  // Track the host's identity. Connect when it appears, tear down when it
+  // clears, and swap cleanly when it changes to a different user.
+  const externalUserId = externalIdentity?.userId ?? null;
+  useEffect(() => {
+    if (!isExternalAuth) return;
+    let cancelled = false;
+
+    if (!externalIdentity) {
+      // Signed out (or still loading). Drop wallet state so a previous user's
+      // address can never be read by whoever comes next.
+      setWallet(null);
+      setIdentity(null);
+      setWalletStatus(INITIAL_STATUS);
+      setAuthError(null);
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    // Clear the outgoing user's wallet before connecting the incoming one, so
+    // a slow connect cannot briefly expose the wrong account.
+    setWallet(null);
+    setWalletStatus(INITIAL_STATUS);
+    (async () => {
+      try {
+        await connect(externalIdentity, { silent: true });
+      } catch (e) {
+        if (!cancelled) {
+          setAuthError(e instanceof Error ? e.message : 'Could not connect the wallet.');
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the user, not the object: hosts commonly pass a fresh object
+    // each render, which would otherwise reconnect on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExternalAuth, externalUserId, connect]);
 
   const login = useCallback(async (provider: 'google' | 'apple') => {
+    if (isExternalAuth) {
+      throw new Error(
+        'kit/react: this provider is driven by your own auth (the `identity` prop), so Cavos login is disabled. ' +
+          'Sign the user in with your auth and pass the resulting identity.',
+      );
+    }
     if (typeof window === 'undefined') throw new Error('OAuth requires a browser');
     setAuthError(null);
     await ensureSocialRecoveryPrewarm();
@@ -1030,13 +1158,27 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     };
   }, [walletStatus.awaitingApproval, walletStatus.pendingRequestId, identity, connect]);
 
+  const submitSocialRecoveryToken = useCallback((idToken: string) => {
+    // Throws for a token no provider the enclave trusts could have issued, so
+    // the mistake surfaces here instead of as an opaque enclave rejection.
+    auth.useExternalSocialRecoveryToken(idToken);
+    setExternalSocialToken((n) => n + 1);
+  }, [auth]);
+
   const logout = useCallback(() => {
     auth.clearStoredIdentity();
     setWallet(null);
     setIdentity(null);
     setWalletStatus(INITIAL_STATUS);
     setAuthError(null);
-  }, [auth]);
+    // Under external auth this only clears Cavos state; the user is still
+    // signed in to the host until the host signs them out and clears the prop.
+    if (isExternalAuth && process.env.NODE_ENV !== 'production') {
+      console.warn(
+        '[CavosProvider] logout() cleared Cavos state only. Sign the user out with your own auth and pass `identity={null}`.',
+      );
+    }
+  }, [auth, isExternalAuth]);
 
   const value: CavosContextValue = {
     openModal,
@@ -1067,13 +1209,14 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     resendDeviceApproval,
     setupRecovery,
     recover,
+    submitSocialRecoveryToken,
     logout,
   };
 
   return (
     <CavosContext.Provider value={value}>
       {children}
-      {modal !== undefined && (
+      {modal !== undefined && !isExternalAuth && (
         <CavosAuthModal
           open={modalOpen}
           onClose={closeModal}
