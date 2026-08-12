@@ -247,7 +247,7 @@ export interface CavosContextValue {
    * in the dashboard, so the enclave accepts tokens minted for your client.
    * Progress shows up on `walletStatus.isSocialRecovering`.
    */
-  useSocialRecoveryToken: (idToken: string) => void;
+  submitSocialRecoveryToken: (idToken: string) => void;
   logout: () => void;
 }
 
@@ -1158,7 +1158,7 @@ export function CavosProvider({
     };
   }, [walletStatus.awaitingApproval, walletStatus.pendingRequestId, identity, connect]);
 
-  const useSocialRecoveryToken = useCallback((idToken: string) => {
+  const submitSocialRecoveryToken = useCallback((idToken: string) => {
     // Throws for a token no provider the enclave trusts could have issued, so
     // the mistake surfaces here instead of as an opaque enclave rejection.
     auth.useExternalSocialRecoveryToken(idToken);
@@ -1209,7 +1209,7 @@ export function CavosProvider({
     resendDeviceApproval,
     setupRecovery,
     recover,
-    useSocialRecoveryToken,
+    submitSocialRecoveryToken,
     logout,
   };
 
