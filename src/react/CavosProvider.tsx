@@ -234,6 +234,20 @@ export interface CavosContextValue {
    * the provider to a ready state.
    */
   recover: (code: string) => Promise<void>;
+  /**
+   * Drive social recovery with a provider id_token your own login already
+   * obtained, so the user never signs in twice.
+   *
+   * Enrols when this device is ready and recovers when it is not — the wallet's
+   * state decides. Pass the raw Google or Apple `id_token`, not your own session
+   * JWT, and pass it straight from a sign-in: the enclave requires the
+   * authentication to be under five minutes old.
+   *
+   * Requires the app's own OAuth client ID to be registered for the environment
+   * in the dashboard, so the enclave accepts tokens minted for your client.
+   * Progress shows up on `walletStatus.isSocialRecovering`.
+   */
+  useSocialRecoveryToken: (idToken: string) => void;
   logout: () => void;
 }
 
@@ -333,6 +347,10 @@ export function CavosProvider({
     log(`[CavosProvider] configuration:\n${formatConfigProblems(problems)}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Bumped when the host hands us a provider token, so the enrol/recover
+  // effect below re-runs — the credential lives on `auth`, not in React state.
+  const [externalSocialToken, setExternalSocialToken] = useState(0);
 
   const socialRecoveryPolicy = useMemo(
     () => resolveSocialRecoveryPolicy(config),
@@ -769,6 +787,7 @@ export function CavosProvider({
     identity,
     socialRecovery,
     wallet,
+    externalSocialToken,
   ]);
 
   // A non-zero timelock survives refreshes: scheduling is already committed
@@ -1139,6 +1158,13 @@ export function CavosProvider({
     };
   }, [walletStatus.awaitingApproval, walletStatus.pendingRequestId, identity, connect]);
 
+  const useSocialRecoveryToken = useCallback((idToken: string) => {
+    // Throws for a token no provider the enclave trusts could have issued, so
+    // the mistake surfaces here instead of as an opaque enclave rejection.
+    auth.useExternalSocialRecoveryToken(idToken);
+    setExternalSocialToken((n) => n + 1);
+  }, [auth]);
+
   const logout = useCallback(() => {
     auth.clearStoredIdentity();
     setWallet(null);
@@ -1183,6 +1209,7 @@ export function CavosProvider({
     resendDeviceApproval,
     setupRecovery,
     recover,
+    useSocialRecoveryToken,
     logout,
   };
 
