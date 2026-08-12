@@ -6,6 +6,7 @@ import {
   useEffect,
   useState,
   useCallback,
+  useMemo,
   useRef,
   type ReactNode,
 } from 'react';
@@ -32,6 +33,10 @@ import {
   recoverHardwareIsolatedDevice,
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
+import {
+  DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
+  DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH,
+} from '../recovery/attestationDefaults';
 import { CavosAuthModal } from './CavosAuthModal';
 import type { MessageSignature } from '../signing';
 
@@ -59,15 +64,24 @@ export interface CavosConfig {
   /** Native-only key policy; retained here so config objects remain portable. */
   minimumKeySecurity?: 'os-protected' | 'hardware';
   /**
-   * Developer-pinned Confidential Space measurements. Required when social
-   * recovery is enabled for this dashboard environment; never learn these
-   * values from the same control plane whose enclave is being verified.
+   * Turn on hardware-isolated social recovery using the enclave Cavos operates,
+   * pinned by the constants shipped in this package. The feature must also be
+   * enabled for the app's environment in the dashboard.
+   *
+   * Pass an `AttestationPolicy` instead to pin your own measurements — required
+   * if you run your own enclave. Values pinned here are never learned from the
+   * control plane whose enclave is being verified.
+   */
+  socialRecovery?: boolean | AttestationPolicy;
+  /**
+   * @deprecated Use `socialRecovery`. Passing a policy here still works and
+   * takes precedence, so existing apps keep their explicit pin.
    */
   socialRecoveryAttestation?: AttestationPolicy;
   /**
-   * Declared DeviceAccount class containing social-recovery entrypoints. When
-   * set, pre-feature Starknet accounts are upgraded by their current device
-   * before enrolment; their address and signer storage stay unchanged.
+   * Declared DeviceAccount class containing social-recovery entrypoints, used
+   * to upgrade Starknet accounts deployed before the feature; their address and
+   * signer storage stay unchanged. Defaults to the class Cavos declared.
    */
   socialRecoveryStarknetClassHash?: string;
 }
@@ -258,7 +272,31 @@ interface SocialRecoveryEnvironment {
  * deploys a device-signer smart account gaslessly, and the wallet handle submits
  * gasless transactions signed silently by the browser's device key.
  */
+/**
+ * Resolve the attestation policy this app verifies the enclave against.
+ *
+ * An explicit policy always wins, so an app that pinned its own measurements
+ * keeps them. `socialRecovery: true` opts into the enclave Cavos operates,
+ * pinned by the constants shipped in this package — never fetched from the
+ * control plane whose enclave is being verified.
+ */
+export function resolveSocialRecoveryPolicy(
+  config: Pick<CavosConfig, 'socialRecovery' | 'socialRecoveryAttestation'>,
+): AttestationPolicy | undefined {
+  if (config.socialRecoveryAttestation) return config.socialRecoveryAttestation;
+  if (typeof config.socialRecovery === 'object') return config.socialRecovery;
+  if (config.socialRecovery === true) return DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
+  return undefined;
+}
+
 export function CavosProvider({ config, modal, children }: CavosProviderProps) {
+  const socialRecoveryPolicy = useMemo(
+    () => resolveSocialRecoveryPolicy(config),
+    [config.socialRecovery, config.socialRecoveryAttestation],
+  );
+  const socialRecoveryStarknetClassHash =
+    config.socialRecoveryStarknetClassHash ??
+    DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH;
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );
@@ -382,7 +420,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       ...(cfg.environment ? { environment: cfg.environment } : {}),
       ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
       ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
-      ...(cfg.socialRecoveryAttestation
+      ...(resolveSocialRecoveryPolicy(cfg)
         ? { legacyDeviceApproval: false }
         : {}),
     });
@@ -415,7 +453,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
 
   const ensureSocialRecoveryPrewarm = useCallback(async (): Promise<SocialRecoveryPrewarm | null> => {
     const cfg = configRef.current;
-    if (!cfg.appId || !cfg.socialRecoveryAttestation || typeof window === 'undefined') {
+    if (!cfg.appId || !resolveSocialRecoveryPolicy(cfg) || typeof window === "undefined") {
       return null;
     }
     const existing =
@@ -430,7 +468,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
       appId: cfg.appId,
       environment: cfg.environment,
-      attestation: cfg.socialRecoveryAttestation,
+      attestation: resolveSocialRecoveryPolicy(cfg)!,
     });
     const promise = client
       .prewarm()
@@ -525,10 +563,11 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     if (socialAttemptRef.current.has(attemptKey)) return;
     socialAttemptRef.current.add(attemptKey);
 
-    if (!config.socialRecoveryAttestation) {
+    if (!socialRecoveryPolicy) {
       if (action === 'recover') {
         setAuthError(
-          'Social recovery is enabled, but this app did not pin the Confidential Space attestation policy.',
+          'Social recovery is enabled for this environment, but the app has not turned it on. ' +
+            'Set `socialRecovery: true` in the Cavos config, or pass your own AttestationPolicy.',
         );
       }
       return;
@@ -543,7 +582,7 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
       baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
       appId: config.appId,
       environment: config.environment,
-      attestation: config.socialRecoveryAttestation,
+      attestation: socialRecoveryPolicy,
       ...(prewarm ? { prewarm } : {}),
     });
     let cancelled = false;
@@ -567,8 +606,8 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
             wallet,
             credential,
             delaySeconds: socialRecovery.delaySeconds,
-            ...(config.socialRecoveryStarknetClassHash
-              ? { starknetClassHash: config.socialRecoveryStarknetClassHash }
+            ...(socialRecoveryStarknetClassHash
+              ? { starknetClassHash: socialRecoveryStarknetClassHash }
               : {}),
           });
         } catch (error) {
@@ -668,8 +707,8 @@ export function CavosProvider({ config, modal, children }: CavosProviderProps) {
     config.authBackendUrl,
     config.environment,
     config.network,
-    config.socialRecoveryAttestation,
-    config.socialRecoveryStarknetClassHash,
+    socialRecoveryPolicy,
+    socialRecoveryStarknetClassHash,
     connect,
     identity,
     socialRecovery,
