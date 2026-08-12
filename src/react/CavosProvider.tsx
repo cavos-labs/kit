@@ -356,9 +356,11 @@ export function CavosProvider({
     () => resolveSocialRecoveryPolicy(config),
     [config.socialRecovery, config.socialRecoveryAttestation],
   );
+  // Only defaulted where the class is actually declared. See the constant: a
+  // class hash means nothing on a network it was not declared on.
   const socialRecoveryStarknetClassHash =
     config.socialRecoveryStarknetClassHash ??
-    DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH;
+    DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH[config.network];
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );

@@ -46,7 +46,7 @@ describe("shipped attestation defaults", () => {
     expect(p.audience).toMatch(/^https:\/\//);
     expect(p.projectNumber).toMatch(/^\d+$/);
     expect(p.serviceAccount).toMatch(/^[^@]+@[^@]+\.iam\.gserviceaccount\.com$/);
-    expect(DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH).toMatch(/^0x[0-9a-f]{60,64}$/);
+    expect(DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH.testnet).toMatch(/^0x[0-9a-f]{60,64}$/);
   });
 
   it("pins full-length sha256 digests", () => {
@@ -62,6 +62,15 @@ describe("shipped attestation defaults", () => {
   function p() {
     return DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
   }
+});
+
+describe("DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH", () => {
+  it("has no mainnet default", () => {
+    // A class hash only exists on the network it was declared on. Defaulting
+    // one for mainnet would make the SDK upgrade a real account to a class that
+    // is not there — worse than asking the developer for it.
+    expect(DEFAULT_SOCIAL_RECOVERY_STARKNET_CLASS_HASH.mainnet).toBeUndefined();
+  });
 });
 
 describe("isAcceptedImageDigest", () => {
