@@ -6,9 +6,31 @@ export type SocialRecoveryAction = "enroll" | "recover";
 
 export interface AttestationPolicy {
   audience: string;
-  imageDigest: string;
+  /**
+   * Accepted Confidential Space image digest(s). A list lets a rollout overlap:
+   * the new digest ships alongside the one still deployed, so apps on either
+   * release keep working across the transition.
+   */
+  imageDigest: string | string[];
   projectNumber: string;
   serviceAccount: string;
+}
+
+/**
+ * Whether the enclave that produced this attestation is one we accept.
+ *
+ * A policy may list several digests so an image rollout can overlap, but the
+ * attested digest must still match one of them exactly. A missing or empty
+ * attested digest never matches, and an empty accepted list accepts nothing —
+ * a policy that cannot be satisfied must fail closed, not wave everything past.
+ */
+export function isAcceptedImageDigest(
+  attested: string | undefined | null,
+  expected: string | string[],
+): boolean {
+  if (!attested) return false;
+  const accepted = Array.isArray(expected) ? expected : [expected];
+  return accepted.length > 0 && accepted.includes(attested);
 }
 
 export interface SocialRecoveryClientOptions {
@@ -413,6 +435,7 @@ async function verifyAttestedChannel(
   );
   const nonces = Array.isArray(claims.eat_nonce) ? claims.eat_nonce : [claims.eat_nonce];
   const support = claims.submods?.confidential_space?.support_attributes ?? [];
+  const attestedDigest = claims.submods?.container?.image_digest;
   if (
     claims.iss !== "https://confidentialcomputing.googleapis.com" ||
     claims.aud !== expected.audience ||
@@ -420,7 +443,7 @@ async function verifyAttestedChannel(
     claims.swname !== "CONFIDENTIAL_SPACE" ||
     claims.dbgstat !== "disabled-since-boot" ||
     !support.includes("STABLE") ||
-    claims.submods?.container?.image_digest !== expected.imageDigest ||
+    !isAcceptedImageDigest(attestedDigest, expected.imageDigest) ||
     claims.submods?.gce?.project_number !== expected.projectNumber ||
     !claims.google_service_accounts?.includes(expected.serviceAccount) ||
     !nonces.includes(nonce) ||
