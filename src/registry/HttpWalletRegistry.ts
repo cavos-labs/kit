@@ -86,4 +86,14 @@ export class HttpWalletRegistry implements WalletRegistry {
     // on-chain add_signer, so this is a no-op here (kept for interface parity).
     void params;
   }
+
+  async removeDevice?(params: {
+    userId: string;
+    address: string;
+    signer: DevicePublicKey;
+  }): Promise<void> {
+    // Same as `addDevice`: the removal confirm endpoint deletes the mirrored
+    // `wallet_devices` row once the on-chain remove_signer has been submitted.
+    void params;
+  }
 }

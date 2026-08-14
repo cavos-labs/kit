@@ -1,7 +1,11 @@
 import { Keypair, TransactionBuilder, authorizeEntry, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
-import { StellarAdapter } from "./StellarAdapter";
+import {
+  StellarAdapter,
+  type ControlRotation,
+  type DataEntryWrites,
+} from "./StellarAdapter";
 import {
   deriveStellarMasterKeypair,
   generateControlKey,
@@ -19,6 +23,7 @@ import {
 } from "./envelope";
 import {
   fromDataEntries,
+  toDataEntries,
   deviceWrapEntries,
   PASSKEY_BASE,
   RECOVERY_BASE,
@@ -491,6 +496,97 @@ export class CavosStellar {
     }
   }
 
+  /**
+   * Slot ids of every device currently able to unlock this account, newest-first
+   * order not guaranteed. This device's slot is `deviceKey.slotId()`. Feed these
+   * to `removeDevice` to build a device-management UI.
+   */
+  async listDevices(): Promise<string[]> {
+    const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
+    return Object.keys(env.deviceWraps);
+  }
+
+  /**
+   * Revoke a device — the escape hatch behind the "this wasn't me" link in the
+   * device-added email, and the way out if a device was authorized through a
+   * path that bypassed you (a leaked recovery code, or a social-recovery wrap
+   * relayed by the enclave).
+   *
+   * Classic Stellar has no `remove_signer`: a "device" here is an ECIES wrap of
+   * the DEK in the account's data entries, and the evicted device may already
+   * have cached the control seed. Erasing its wrap alone would therefore revoke
+   * nothing. So this rotates, in a single tx signed by the current control key:
+   *
+   *   1. deletes EVERY existing `cv:` envelope entry;
+   *   2. writes a fresh DEK-sealed control seed and a wrap for THIS device;
+   *   3. adds the new control key as the weight-1 signer and zeroes the old one.
+   *
+   * Consequence, and the reason this is deliberate rather than surgical: device
+   * wraps are ECIES to each device's public key, which is never stored on-chain,
+   * so no other device's wrap can be re-created here. **Every other device is
+   * evicted**, not just the revoked one, and must be approved again. The passkey
+   * and recovery factors are KEK-derived, so they survive only if the user
+   * presents them now — pass `passkeyPrfOutput` / `recoveryCode` to carry them
+   * over. Prompt for the passkey before calling; otherwise the user loses their
+   * synced anchor and this device becomes the only way in.
+   */
+  async removeDevice(params: {
+    /** Slot to revoke. Must not be this device's own slot. */
+    slotId: string;
+    /** Fresh WebAuthn PRF output, to keep the passkey factor working. */
+    passkeyPrfOutput?: Uint8Array;
+    /** The user's recovery code, to keep the recovery factor working. */
+    recoveryCode?: string;
+    opts?: ExecuteOptions;
+  }): Promise<{ transactionHash: string; controlAddress: string; evictedSlots: string[] }> {
+    const { control: oldControl } = this.requireUnlocked();
+    const mySlot = this.deviceKey.slotId();
+    if (params.slotId === mySlot) {
+      throw new Error(
+        "kit/stellar: cannot revoke the device you are using — revoke it from another authorized device",
+      );
+    }
+
+    const existing = await this.adapter.loadDataEntries(this.address);
+    const env = fromDataEntries(existing);
+    if (!env.deviceWraps[params.slotId]) {
+      throw new Error(`kit/stellar: no device is enrolled in slot ${params.slotId}`);
+    }
+
+    const dek = generateDEK();
+    const { keypair: control, seed: controlSeed } = generateControlKey();
+    const next = toDataEntries({
+      ct: sealControlSeed(controlSeed, dek),
+      deviceWraps: { [mySlot]: eciesWrapDEK(dek, this.deviceKey.publicKeySec1()) },
+      passkeyWrap: params.passkeyPrfOutput
+        ? wrapDEK(dek, derivePasskeyKEK(params.passkeyPrfOutput))
+        : undefined,
+      recoveryWrap: params.recoveryCode
+        ? wrapDEK(dek, deriveRecoveryKEK(params.recoveryCode))
+        : undefined,
+    });
+
+    // Clear every old `cv:` entry, then lay the new envelope over it. Entries
+    // present in both maps end up as a plain overwrite (one op), and entries only
+    // in the old map are deleted — which also refunds their reserve.
+    const writes: DataEntryWrites = {};
+    for (const name of Object.keys(existing)) {
+      if (name.startsWith("cv:")) writes[name] = null;
+    }
+    Object.assign(writes, next);
+
+    const transactionHash = await this.submitDataWrite(writes, oldControl, params.opts, {
+      newControl: control.publicKey(),
+      oldControl: oldControl.publicKey(),
+    });
+
+    // The account is now signed by the new key; keep this session usable.
+    this.control = control;
+    this.dek = dek;
+    const evictedSlots = Object.keys(env.deviceWraps).filter((s) => s !== mySlot);
+    return { transactionHash, controlAddress: control.publicKey(), evictedSlots };
+  }
+
   /** The control key's public G address (the weight-1 real signer), for display. */
   get controlAddress(): string | undefined {
     return this.control?.publicKey();
@@ -613,22 +709,44 @@ export class CavosStellar {
    *     own reserve for the new subentries).
    */
   private async submitDataWrite(
-    entries: Record<string, Uint8Array>,
+    entries: DataEntryWrites,
     control: Keypair,
     opts?: ExecuteOptions,
+    rotation?: ControlRotation,
   ): Promise<string> {
     const sponsored = opts?.sponsored !== false;
     if (sponsored && this.relayer) {
-      const relayerSource = await this.relayer.getSource();
-      const tx = await this.adapter.buildSponsoredDataTx({
-        relayer: relayerSource,
-        account: this.address,
-        entries,
-      });
-      tx.sign(control); // account-sourced manageData + endSponsoring
-      return this.relayer.submit("sponsored-data", tx.toXDR());
+      // The relayer account is the tx source, and EVERY sponsored write from
+      // every user of this app consumes one of its sequence numbers. Two writes
+      // landing in the same ledger therefore collide, and the loser is rejected
+      // with `tx_bad_seq`. Changing the sequence changes the tx hash, so the
+      // relay cannot fix it up for us — the control signature would no longer
+      // match — which means the retry has to rebuild and re-sign here.
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { address, sequence } = await this.relayer.fetchSourceAccount();
+        const tx = await this.adapter.buildSponsoredDataTx({
+          relayer: address,
+          account: this.address,
+          entries,
+          rotation,
+          ...(sequence !== undefined ? { relayerSequence: sequence } : {}),
+        });
+        tx.sign(control); // account-sourced manageData + endSponsoring
+        try {
+          return await this.relayer.submit("sponsored-data", tx.toXDR());
+        } catch (e) {
+          lastError = e;
+          if (!isBadSequence(e)) throw e;
+          // Someone else took the sequence. Back off briefly — Stellar closes a
+          // ledger every ~5s, and retrying inside the same one just collides
+          // again — then rebuild against a fresh one.
+          await new Promise((resolve) => setTimeout(resolve, 1_500 * (attempt + 1)));
+        }
+      }
+      throw lastError;
     }
-    const tx = await this.adapter.buildDataTx({ account: this.address, entries });
+    const tx = await this.adapter.buildDataTx({ account: this.address, entries, rotation });
     tx.sign(control);
     return this.adapter.submit(tx);
   }
@@ -704,4 +822,14 @@ async function loadEnvelope(adapter: StellarAdapter, address: string): Promise<A
 function openControl(env: AccountEnvelope, dek: Uint8Array): Unlocked {
   const controlSeed = openControlSeed(env.ct, dek);
   return { control: controlKeypairFromSeed(controlSeed), dek };
+}
+
+/**
+ * Whether a relay rejection was a sequence-number collision. The relay returns
+ * the network's `result_codes` in its error text, so match on the code rather
+ * than on prose that may be reworded.
+ */
+function isBadSequence(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("tx_bad_seq");
 }

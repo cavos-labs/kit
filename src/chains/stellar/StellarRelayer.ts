@@ -40,11 +40,26 @@ export class StellarRelayer {
   /** The relayer's source/fee-payer/sponsor G-account (fetched + cached). */
   async getSource(): Promise<string> {
     if (this.source) return this.source;
+    this.source = (await this.fetchSourceAccount()).address;
+    return this.source;
+  }
+
+  /**
+   * The relayer account together with its CURRENT sequence number, straight from
+   * the server. Sponsored writes are sourced by the relayer, so building one
+   * needs its sequence — and reading that from this device's own Horizon is
+   * reading a stale view of an account the server owns, which the network then
+   * rejects as `tx_bad_seq`. The sequence is deliberately NOT cached.
+   *
+   * `sequence` is undefined on older backends, in which case the caller falls
+   * back to loading the account itself.
+   */
+  async fetchSourceAccount(): Promise<{ address: string; sequence?: string }> {
     const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay?network=${this.opts.network}`);
     if (!res.ok) throw new Error(`kit/stellar: relayer source lookup failed (${res.status})`);
-    const { fee_payer } = (await res.json()) as { fee_payer: string };
+    const { fee_payer, sequence } = (await res.json()) as { fee_payer: string; sequence?: string };
     this.source = fee_payer;
-    return this.source;
+    return { address: fee_payer, ...(sequence ? { sequence } : {}) };
   }
 
   /** POST a (partially) signed transaction XDR for the relayer to co-sign + submit.

@@ -12,7 +12,8 @@ import type { WalletRegistry } from "../../registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
 import { deriveAddressSeedSolana } from "../../identity";
-import { SolanaAdapter } from "./SolanaAdapter";
+import { SolanaAdapter, compressedPubkey } from "./SolanaAdapter";
+import type { PendingRecovery } from "./SolanaAdapter";
 import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
@@ -261,6 +262,54 @@ export class CavosSolana {
   async addSigner(pubkey: DevicePublicKey): Promise<string> {
     const ixs = await this.adapter.buildAddSigner(this.address, pubkey);
     return this.send(ixs);
+  }
+
+  /**
+   * Revoke a device signer — the escape hatch behind the "this wasn't me" link
+   * in the device-added email. Authorization is a device signature through the
+   * secp256r1 precompile: only a device that is ALREADY authorized can revoke
+   * another one, and Cavos holds no key that can do it on the user's behalf.
+   */
+  async removeSigner(pubkey: DevicePublicKey): Promise<string> {
+    if (this.status !== "ready") {
+      throw new Error(
+        "kit/solana: removeSigner requires a device that is already an authorized signer",
+      );
+    }
+    if (pubkey.x === this.devicePubkey.x && pubkey.y === this.devicePubkey.y) {
+      throw new Error(
+        "kit/solana: cannot revoke the device you are signing with — revoke it from another authorized device",
+      );
+    }
+    const authorized = await this.adapter.isAuthorizedSigner(this.address, pubkey);
+    if (!authorized) {
+      throw new Error("kit/solana: that device is not an authorized signer of this wallet");
+    }
+    const ixs = await this.adapter.buildRemoveSigner(this.address, pubkey);
+    return this.send(ixs);
+  }
+
+  /**
+   * The social-recovery authorization already scheduled on-chain, if any.
+   *
+   * A run that scheduled but never finalized — a closed tab, a relay error
+   * between the two calls — leaves one behind, and the program refuses to
+   * schedule over it until it expires. Callers should check this before
+   * scheduling and resume the existing authorization instead.
+   */
+  async pendingSocialRecovery(): Promise<PendingRecovery | null> {
+    return this.adapter.pendingSocialRecovery(this.address);
+  }
+
+  /** Whether `pending` authorizes THIS device (so it can simply be finalized). */
+  async pendingRecoveryIsForThisDevice(): Promise<boolean> {
+    const pending = await this.pendingSocialRecovery();
+    if (!pending) return false;
+    const mine = compressedPubkey(this.devicePubkey);
+    return (
+      pending.signerCompressed.length === mine.length &&
+      pending.signerCompressed.every((byte, i) => byte === mine[i])
+    );
   }
 
   async enrollSocialRecovery(params: {

@@ -46,6 +46,17 @@ export interface InstructionData {
   data: Uint8Array;
 }
 
+/** A social-recovery authorization that was scheduled but not yet finalized. */
+export interface PendingRecovery {
+  /** Compressed SEC1 key the enclave authorized. */
+  signerCompressed: Uint8Array;
+  /** Unix seconds after which `finalize` is allowed (the on-chain timelock). */
+  readyAt: number;
+  /** Unix seconds after which it can no longer be finalized, and a new
+   *  authorization may replace it. */
+  expiresAt: number;
+}
+
 export interface SolanaAdapterOptions {
   /** Cavos device-account program id (defaults to the deployed one). */
   programId?: string;
@@ -268,6 +279,34 @@ export class SolanaAdapter {
     if (!info) throw new Error("kit/solana: social recovery is not enrolled");
     // discriminator + device_account + recovery_pubkey + delay + policy_hash
     return readU64le(info.data, 8 + 32 + 33 + 4 + 32);
+  }
+
+  /**
+   * Read the pending social-recovery authorization, if any.
+   *
+   * `schedule_social_recovery` refuses to overwrite a pending authorization
+   * until it has expired, so a run that scheduled but never finalized — a closed
+   * tab, a relay error between the two calls — locks the account out of retrying
+   * for the whole expiry window (an hour, by default). Reading the state first
+   * lets the caller resume that authorization instead of trying to replace it.
+   *
+   * Layout after the 8-byte discriminator: device_account(32), recovery_pubkey
+   * (33), delay_seconds(4), policy_hash(32), recovery_nonce(8), pending(1),
+   * pending_signer(33), ready_at(8), expires_at(8).
+   */
+  async pendingSocialRecovery(account: string): Promise<PendingRecovery | null> {
+    const info = await this.requireConnection().getAccountInfo(
+      this.socialRecoveryPda(account),
+    );
+    if (!info) return null;
+    const PENDING = 8 + 32 + 33 + 4 + 32 + 8;
+    if (info.data[PENDING] !== 1) return null;
+    const signerAt = PENDING + 1;
+    return {
+      signerCompressed: new Uint8Array(info.data.subarray(signerAt, signerAt + 33)),
+      readyAt: readI64le(info.data, signerAt + 33),
+      expiresAt: readI64le(info.data, signerAt + 41),
+    };
   }
 
   /** Build `[P-256 precompile, schedule_social_recovery]` from the enclave's
@@ -694,6 +733,13 @@ function readU64le(buf: Buffer, offset: number): bigint {
   return new DataView(buf.buffer, buf.byteOffset, buf.length).getBigUint64(
     offset,
     true,
+  );
+}
+
+/** Signed 64-bit read, for the unix timestamps in the recovery config. */
+function readI64le(buf: Buffer, offset: number): number {
+  return Number(
+    new DataView(buf.buffer, buf.byteOffset, buf.length).getBigInt64(offset, true),
   );
 }
 
