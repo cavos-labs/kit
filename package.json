@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.2.0",
+  "version": "0.1.4",
   "description": "Cavos Kit - device-native verifiable smart accounts for Starknet, Solana and Stellar.",
   "repository": {
     "type": "git",
