@@ -23,6 +23,13 @@ export interface WalletRegistry {
     address: string;
     signer: DevicePublicKey;
   }): Promise<void>;
+
+  /** Drop a device signer after it has been revoked on-chain. */
+  removeDevice?(params: {
+    userId: string;
+    address: string;
+    signer: DevicePublicKey;
+  }): Promise<void>;
 }
 
 export interface RegisteredWallet {
@@ -44,5 +51,13 @@ export class InMemoryWalletRegistry implements WalletRegistry {
   async addDevice(params: { userId: string; address: string; signer: DevicePublicKey }) {
     const w = this.wallets.get(params.userId);
     if (w) w.devices = [...(w.devices ?? []), params.signer];
+  }
+  async removeDevice(params: { userId: string; address: string; signer: DevicePublicKey }) {
+    const w = this.wallets.get(params.userId);
+    if (w?.devices) {
+      w.devices = w.devices.filter(
+        (d) => d.x !== params.signer.x || d.y !== params.signer.y,
+      );
+    }
   }
 }

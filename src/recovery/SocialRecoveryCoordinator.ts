@@ -108,6 +108,28 @@ export async function recoverHardwareIsolatedDevice(params: {
 }): Promise<CoordinatedRecoveryResult> {
   const { client, wallet, credential, network, delaySeconds } = params;
   const now = Math.floor(Date.now() / 1000);
+
+  // Resume before re-authorizing. Scheduling and finalizing are two separate
+  // transactions with an enclave round-trip in front of them, so a closed tab or
+  // a relay error in between leaves an authorization scheduled but not applied —
+  // and the program refuses to schedule over a live one, failing every retry with
+  // RecoveryAlreadyPending until it expires (an hour, by default).
+  //
+  // If the standing authorization is already for THIS device, it is exactly what
+  // we were about to ask the enclave for. Finalize it and skip the round-trip
+  // entirely: correct, and it turns a two-minute cold start into one transaction.
+  if (wallet.chain === "solana") {
+    const pending = await wallet.pendingSocialRecovery();
+    if (pending && now <= pending.expiresAt && (await wallet.pendingRecoveryIsForThisDevice())) {
+      if (now < pending.readyAt) {
+        // Still inside the on-chain timelock — the caller waits and finalizes.
+        return { finalized: false, readyAt: pending.readyAt };
+      }
+      const finalizeTransaction = await wallet.finalizeSocialRecovery();
+      return { finalized: true, readyAt: pending.readyAt, finalizeTransaction };
+    }
+  }
+
   const expiresAt = now + Math.max(delaySeconds + 3600, 3600);
   let authorizations: ChainAuthorization[] | undefined;
   let stellarRecipientPublicKey: Uint8Array | undefined;
@@ -196,25 +218,37 @@ export async function recoverHardwareIsolatedDevice(params: {
       authorization.chain === "solana",
   );
   if (!signed) throw new Error("kit/social-recovery: Solana authorization is missing");
-  const scheduleTransaction = await wallet.scheduleSocialRecovery({
+  const authorization = {
     expiresAt: signed.expires_at,
     message: fromB64(signed.message_b64),
     signature: fromB64(signed.signature_b64),
     recoveryPubkeyCompressed: fromB64(signed.recovery_pubkey_compressed_b64),
-  });
-  if (delaySeconds > 0) {
+  };
+
+  // With no timelock there is nothing to wait for between scheduling and
+  // finalizing, so both go in one transaction — one relay round trip and one
+  // confirmation instead of two. That is roughly half the wall-clock time of
+  // adding a device, and the enclave itself only accounts for about a second
+  // of it.
+  //
+  // The program still enforces the delay: it computes `ready_at` from its own
+  // clock and refuses to finalize before it, so batching cannot skip a delay
+  // that exists. It simply removes a wait that does not.
+  if (delaySeconds === 0) {
+    const transaction = await wallet.scheduleAndFinalizeSocialRecovery(authorization);
     return {
-      finalized: false,
-      readyAt: now + delaySeconds,
-      scheduleTransaction,
+      finalized: true,
+      readyAt: now,
+      scheduleTransaction: transaction,
+      finalizeTransaction: transaction,
     };
   }
-  const finalizeTransaction = await wallet.finalizeSocialRecovery();
+
+  const scheduleTransaction = await wallet.scheduleSocialRecovery(authorization);
   return {
-    finalized: true,
-    readyAt: now,
+    finalized: false,
+    readyAt: now + delaySeconds,
     scheduleTransaction,
-    finalizeTransaction,
   };
 }
 

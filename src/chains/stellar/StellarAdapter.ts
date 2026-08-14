@@ -35,6 +35,25 @@ export interface StellarAdapterOptions {
 /** How long a built transaction stays valid before it must be rebuilt. */
 const TX_TIMEOUT = 180;
 
+/**
+ * A batch of `MANAGE_DATA` writes. A `null` value DELETES the entry (Stellar's
+ * `manageData` with no value), which is how a revoked device's ECIES wrap is
+ * erased — and which refunds the entry's reserve.
+ */
+export type DataEntryWrites = Record<string, Uint8Array | null>;
+
+/**
+ * Swap the account's weight-1 signer. Used by device revocation: the tx is
+ * signed by `oldControl` (still weight 1 when signatures are checked), and by
+ * the time it has applied only `newControl` can sign. Rotating is what makes a
+ * revocation real — a device that was evicted from the envelope may still have
+ * cached the old control seed, so the old key must stop being a signer.
+ */
+export interface ControlRotation {
+  newControl: string;
+  oldControl: string;
+}
+
 /** Default per-request timeout for Horizon/RPC reads and submits. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -264,12 +283,18 @@ export class StellarAdapter {
    * Build a data-entry write (e.g. re-wrapping the DEK for a newly approved
    * device) as an inner tx sourced by the account, signed by the control key.
    */
-  async buildDataTx(params: { account: string; entries: Record<string, Uint8Array> }): Promise<Transaction> {
+  async buildDataTx(params: {
+    account: string;
+    entries: DataEntryWrites;
+    /** Rotate the weight-1 signer in the same tx (device revocation). */
+    rotation?: ControlRotation;
+  }): Promise<Transaction> {
     const source = await this.server().loadAccount(params.account);
     const builder = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.passphrase });
     for (const [name, value] of Object.entries(params.entries)) {
-      builder.addOperation(Operation.manageData({ name, value: Buffer.from(value) }));
+      builder.addOperation(Operation.manageData({ name, value: value === null ? null : Buffer.from(value) }));
     }
+    for (const op of rotationOps(params.rotation)) builder.addOperation(op);
     return builder.setTimeout(TX_TIMEOUT).build();
   }
 
@@ -289,9 +314,19 @@ export class StellarAdapter {
   async buildSponsoredDataTx(params: {
     relayer: string;
     account: string;
-    entries: Record<string, Uint8Array>;
+    entries: DataEntryWrites;
+    /** Rotate the weight-1 signer in the same tx (device revocation). The new
+     *  signer is a subentry, so it is created inside the sponsorship window. */
+    rotation?: ControlRotation;
+    /** The relayer's current sequence, as reported BY the relayer. Prefer this
+     *  over reading it here: this Horizon may lag the one that will accept the
+     *  submission, and a stale sequence is rejected as `tx_bad_seq`. */
+    relayerSequence?: string;
   }): Promise<Transaction> {
-    const relayerAccount = await this.server().loadAccount(params.relayer);
+    const relayerAccount =
+      params.relayerSequence !== undefined
+        ? new Account(params.relayer, params.relayerSequence)
+        : await this.server().loadAccount(params.relayer);
     const builder = new TransactionBuilder(relayerAccount, {
       fee: BASE_FEE,
       networkPassphrase: this.passphrase,
@@ -300,8 +335,15 @@ export class StellarAdapter {
       Operation.beginSponsoringFutureReserves({ sponsoredId: params.account, source: params.relayer }),
     );
     for (const [name, value] of Object.entries(params.entries)) {
-      builder.addOperation(Operation.manageData({ name, value: Buffer.from(value), source: params.account }));
+      builder.addOperation(
+        Operation.manageData({
+          name,
+          value: value === null ? null : Buffer.from(value),
+          source: params.account,
+        }),
+      );
     }
+    for (const op of rotationOps(params.rotation, params.account)) builder.addOperation(op);
     builder.addOperation(Operation.endSponsoringFutureReserves({ source: params.account }));
     return builder.setTimeout(TX_TIMEOUT).build();
   }
@@ -493,6 +535,27 @@ function isNotFound(e: unknown): boolean {
   const status = (e as { response?: { status?: number }; status?: number })?.response?.status ??
     (e as { status?: number })?.status;
   return status === 404;
+}
+
+/**
+ * The two `setOptions` ops that swap the weight-1 control signer: add the new
+ * key first, then drop the old one — never the reverse, which would momentarily
+ * leave the account with no signer able to meet its thresholds. Stellar checks
+ * the envelope's signatures against the signer set as it stands *before* the
+ * operations apply, so the old key's signature still authorizes its own removal.
+ */
+function rotationOps(rotation?: ControlRotation, source?: string) {
+  if (!rotation) return [];
+  return [
+    Operation.setOptions({
+      source,
+      signer: { ed25519PublicKey: rotation.newControl, weight: 1 },
+    }),
+    Operation.setOptions({
+      source,
+      signer: { ed25519PublicKey: rotation.oldControl, weight: 0 },
+    }),
+  ];
 }
 
 function horizonError(e: unknown): string {

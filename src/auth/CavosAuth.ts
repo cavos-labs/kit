@@ -31,7 +31,7 @@ export interface CavosAuthOptions {
  * from it — the RSA/JWKS/nonce machinery react relies on is dead weight for the
  * device model, because the device key (not the JWT) authorizes on-chain calls.
  * The fresh provider token is retained only in memory. Its SHA-256 fingerprint
- * reserves exactly one Confidential Space recovery session while the token
+ * reserves exactly one enclave recovery session while the token
  * itself is sent only through the attested encrypted channel.
  */
 export class CavosAuth implements AuthProvider {
@@ -157,7 +157,7 @@ export class CavosAuth implements AuthProvider {
   }
 
   /**
-   * Return the fresh social credential required by Confidential Space.
+   * Return the fresh social credential the recovery enclave requires.
    * Callers should use it immediately; it is intentionally not restorable
    * after a refresh. A new social login is required for each recovery attempt.
    */

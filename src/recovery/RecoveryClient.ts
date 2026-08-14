@@ -31,8 +31,43 @@ export interface RecoveryClient {
    */
   getPendingRequest(requestId: string): Promise<PendingDeviceRequest | null>;
 
-  /** Mark a request approved after the `add_signer` tx is submitted. */
-  confirmDeviceAddition(params: { requestId: string; txHash: string }): Promise<void>;
+  /**
+   * Mark a request approved after the `add_signer` tx is submitted. `email` lets
+   * the backend send the "a new device was added" notice, which carries the
+   * revocation link — the wallet row stores no email (PII), so the SDK, which
+   * has it from login, must pass it here.
+   */
+  confirmDeviceAddition(params: {
+    requestId: string;
+    txHash: string;
+    email?: string;
+  }): Promise<void>;
+
+  /**
+   * Fetch a removal request — the target of the "this wasn't me" link in the
+   * device-added email. Returns null if the link is unknown. Reading it grants
+   * nothing: the revocation itself still needs an on-chain signature from a
+   * device that is already authorized.
+   */
+  getRemovalRequest?(requestId: string): Promise<DeviceRemovalRequest | null>;
+
+  /** Mark a removal request done after the `remove_signer` tx is submitted. */
+  confirmDeviceRemoval?(params: { requestId: string; txHash: string }): Promise<void>;
+}
+
+export interface DeviceRemovalRequest {
+  requestId: string;
+  appId?: string;
+  accountAddress: string;
+  network?: string;
+  /** Per-app salt, so the revoking page rebuilds the same identity context. */
+  appSalt?: string;
+  /** The signer to revoke. */
+  target: DevicePublicKey;
+  /** Label of the device as recorded when it was added (UA string). */
+  deviceLabel?: string;
+  createdAt: string;
+  status: "available" | "revoked" | "expired";
 }
 
 export interface PendingDeviceRequest {
@@ -40,6 +75,13 @@ export interface PendingDeviceRequest {
   appId?: string;
   userId: string;
   accountAddress: string;
+  /**
+   * The chain this wallet lives on, as `wallets.network`. An approval page has
+   * to mount the provider for this chain — see `configForNetwork`. Optional
+   * because requests created before it was returned carry none; those are all
+   * Starknet.
+   */
+  network?: string;
   newSigner: DevicePublicKey;
   createdAt: string;
   status: "pending" | "approved" | "expired";
