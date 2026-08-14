@@ -357,6 +357,39 @@ export class CavosSolana {
   }
 
   /**
+   * Schedule and finalize in a single transaction. Only valid when the
+   * environment's recovery delay is zero.
+   *
+   * The two-step shape exists for the timelock: an account with a delay wants a
+   * window in which a still-controlled device can cancel a recovery it did not
+   * ask for. With no delay there is no window, and splitting the work costs a
+   * second relay round trip and a second confirmation — about half the
+   * wall-clock time of adding a device.
+   *
+   * This is safe because the program computes `ready_at` itself, as
+   * `clock.unix_timestamp + delay_seconds`, and `finalize` requires
+   * `clock.unix_timestamp >= ready_at`. Solana instructions in one transaction
+   * see the same `Clock`, so with `delay_seconds == 0` the check passes — and
+   * with any non-zero delay it fails, which is exactly the protection the
+   * timelock is for. Batching cannot skip a delay that exists.
+   */
+  async scheduleAndFinalizeSocialRecovery(params: {
+    expiresAt: number;
+    message: Uint8Array;
+    signature: Uint8Array;
+    recoveryPubkeyCompressed: Uint8Array;
+  }): Promise<string> {
+    return this.send([
+      ...this.adapter.buildScheduleSocialRecovery({
+        account: this.address,
+        newSigner: this.devicePubkey,
+        ...params,
+      }),
+      this.adapter.buildFinalizeSocialRecovery(this.address),
+    ]);
+  }
+
+  /**
    * Enroll a passkey as an approver (2FA-style step-up). Device-signed + gasless;
    * requires a ready device. Idempotent. Returns the passkey pubkey + tx hash.
    */

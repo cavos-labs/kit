@@ -79,6 +79,7 @@ export class HttpRecoveryClient implements RecoveryClient {
       appId: data.app_id,
       userId: "", // the approving device already knows its own identity
       accountAddress: data.wallet_address,
+      network: data.network,
       newSigner: { x: fromHex(data.new_pub_x), y: fromHex(data.new_pub_y) },
       createdAt: data.created_at,
       status,

@@ -159,7 +159,6 @@ export async function recoverHardwareIsolatedDevice(params: {
     stellarRecipientPublicKey = wallet.socialRecoveryRecipientPublicKey();
   }
 
-  console.info("[cavos:tee] coordinator: calling enclave");
   const recovered = await client.recover({
     walletAddress: wallet.address,
     credential,
@@ -219,28 +218,37 @@ export async function recoverHardwareIsolatedDevice(params: {
       authorization.chain === "solana",
   );
   if (!signed) throw new Error("kit/social-recovery: Solana authorization is missing");
-  console.info("[cavos:tee] coordinator: schedule (solana)");
-  const scheduleTransaction = await wallet.scheduleSocialRecovery({
+  const authorization = {
     expiresAt: signed.expires_at,
     message: fromB64(signed.message_b64),
     signature: fromB64(signed.signature_b64),
     recoveryPubkeyCompressed: fromB64(signed.recovery_pubkey_compressed_b64),
-  });
-  if (delaySeconds > 0) {
+  };
+
+  // With no timelock there is nothing to wait for between scheduling and
+  // finalizing, so both go in one transaction — one relay round trip and one
+  // confirmation instead of two. That is roughly half the wall-clock time of
+  // adding a device, and the enclave itself only accounts for about a second
+  // of it.
+  //
+  // The program still enforces the delay: it computes `ready_at` from its own
+  // clock and refuses to finalize before it, so batching cannot skip a delay
+  // that exists. It simply removes a wait that does not.
+  if (delaySeconds === 0) {
+    const transaction = await wallet.scheduleAndFinalizeSocialRecovery(authorization);
     return {
-      finalized: false,
-      readyAt: now + delaySeconds,
-      scheduleTransaction,
+      finalized: true,
+      readyAt: now,
+      scheduleTransaction: transaction,
+      finalizeTransaction: transaction,
     };
   }
-  console.info("[cavos:tee] coordinator: finalize (solana)");
-  const finalizeTransaction = await wallet.finalizeSocialRecovery();
-  console.info("[cavos:tee] coordinator: DONE", finalizeTransaction);
+
+  const scheduleTransaction = await wallet.scheduleSocialRecovery(authorization);
   return {
-    finalized: true,
-    readyAt: now,
+    finalized: false,
+    readyAt: now + delaySeconds,
     scheduleTransaction,
-    finalizeTransaction,
   };
 }
 

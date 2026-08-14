@@ -75,6 +75,13 @@ export interface PendingDeviceRequest {
   appId?: string;
   userId: string;
   accountAddress: string;
+  /**
+   * The chain this wallet lives on, as `wallets.network`. An approval page has
+   * to mount the provider for this chain — see `configForNetwork`. Optional
+   * because requests created before it was returned carry none; those are all
+   * Starknet.
+   */
+  network?: string;
   newSigner: DevicePublicKey;
   createdAt: string;
   status: "pending" | "approved" | "expired";
