@@ -8,7 +8,8 @@ import { verifyNitroAttestation } from "./attestation";
  * deploy is what we accept.
  */
 const PCR0 = "f2f81237afb5ecd3287e622c711bef8e5fe382f13c549794e478be3f54877d0c0c80a7bc9f97150fc28150130f373f87";
-const SESSION_ID = "11111111-2222-3333-4444-555555555555";
+// Must match the session id used to capture /tmp/live-session.json.
+const SESSION_ID = process.env.CAVOS_LIVE_SESSION_ID ?? "";
 
 // Opt-in: this needs a live deployment. Capture a session response with
 //   curl -H "x-cavos-relay-key: $SECRET" -d '{"session_id":"<uuid>"}' \
