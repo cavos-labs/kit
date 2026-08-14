@@ -24,7 +24,7 @@ export function createSocialRecoveryCredential(
   };
 }
 
-/** Only provider-signed tokens accepted by the Confidential Space workload. */
+/** Only provider-signed tokens the recovery enclave accepts. */
 export function isSocialRecoveryIssuer(issuer: unknown): issuer is string {
   return (
     issuer === "https://accounts.google.com" ||

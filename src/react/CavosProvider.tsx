@@ -21,11 +21,11 @@ import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
+import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
   SocialRecoveryClient,
   type AttestationPolicy,
-  type SocialRecoveryPrewarm,
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
 import {
@@ -192,6 +192,15 @@ export interface CavosContextValue {
   signMessage: (message: string | Uint8Array) => Promise<MessageSignature>;
   /** Authorize another device signer on this wallet (sponsored add_signer). */
   addSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
+  /**
+   * Revoke a device signer (sponsored remove_signer) — the escape hatch behind
+   * the "this wasn't me" link in the device-added email. Must be called from a
+   * device that is already an authorized signer, and cannot revoke itself.
+   * Stellar revokes by envelope slot instead: use `wallet.removeDevice(...)`.
+   */
+  removeSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
+  /** Device signers currently authorized on this wallet, for a management UI. */
+  listDevices: () => Promise<{ x: bigint; y: bigint }[]>;
   /** Re-request the device-approval email for the current pending request. */
   resendDeviceApproval: () => Promise<void>;
   /**
@@ -362,8 +371,6 @@ export function CavosProvider({
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
-  const socialPrewarmRef = useRef<SocialRecoveryPrewarm | null>(null);
-  const socialPrewarmPromiseRef = useRef<Promise<SocialRecoveryPrewarm | null> | null>(null);
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
 
@@ -513,54 +520,10 @@ export function CavosProvider({
     return w;
   }, [modal]);
 
-  const ensureSocialRecoveryPrewarm = useCallback(async (): Promise<SocialRecoveryPrewarm | null> => {
-    const cfg = configRef.current;
-    if (!cfg.appId || !resolveSocialRecoveryPolicy(cfg) || typeof window === "undefined") {
-      return null;
-    }
-    const existing =
-      socialPrewarmRef.current ?? loadSocialRecoveryPrewarm(cfg.appId, cfg.environment);
-    if (existing) {
-      socialPrewarmRef.current = existing;
-      return existing;
-    }
-    if (socialPrewarmPromiseRef.current) return socialPrewarmPromiseRef.current;
-
-    const client = new SocialRecoveryClient({
-      baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
-      appId: cfg.appId,
-      environment: cfg.environment,
-      attestation: resolveSocialRecoveryPolicy(cfg)!,
-    });
-    const promise = client
-      .prewarm()
-      .then((prewarm) => {
-        socialPrewarmRef.current = prewarm;
-        persistSocialRecoveryPrewarm(cfg.appId!, cfg.environment, prewarm);
-        return prewarm;
-      })
-      .catch((error) => {
-        // Prewarming is an optimization only. Login and the normal cold-start
-        // recovery path must remain available if capacity or rate limits reject it.
-        console.warn('[CavosProvider] social recovery prewarm skipped:', error);
-        return null;
-      })
-      .finally(() => {
-        socialPrewarmPromiseRef.current = null;
-      });
-    socialPrewarmPromiseRef.current = promise;
-    return promise;
-  }, []);
-
   const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
-    // On redirect callbacks, continue/recreate the prewarm concurrently with
-    // provider-token verification and deterministic wallet discovery.
-    const [id] = await Promise.all([
-      auth.handleCallback(authData, redirectUri),
-      ensureSocialRecoveryPrewarm(),
-    ]);
+    const id = await auth.handleCallback(authData, redirectUri);
     await connect(id);
-  }, [auth, connect, ensureSocialRecoveryPrewarm]);
+  }, [auth, connect]);
 
   // On mount: exchange the one-time OAuth code after removing it from the
   // address bar immediately. Legacy auth_data is accepted only for callbacks
@@ -635,17 +598,11 @@ export function CavosProvider({
       return;
     }
 
-    const prewarm =
-      socialPrewarmRef.current ??
-      takeSocialRecoveryPrewarm(config.appId, config.environment);
-    socialPrewarmRef.current = null;
-    clearSocialRecoveryPrewarm(config.appId, config.environment);
     const client = new SocialRecoveryClient({
       baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
       appId: config.appId,
       environment: config.environment,
       attestation: socialRecoveryPolicy,
-      ...(prewarm ? { prewarm } : {}),
     });
     let cancelled = false;
 
@@ -654,7 +611,7 @@ export function CavosProvider({
         // A newly-created wallet is already controlled by this device. TEE
         // enrollment is a hardening step and must not downgrade the usable
         // wallet back to a blocking "deploying" state while an on-demand
-        // Confidential Space VM boots. Browsers may suspend timers in the
+        // enclave answers. Browsers may suspend timers in the
         // background; the in-flight task resumes when the app is foregrounded.
         setWalletStatus((status) => ({
           ...status,
@@ -743,6 +700,26 @@ export function CavosProvider({
           return;
         }
         await waitUntilWalletReady(wallet);
+        // This device is now an authorized signer, and it got there without the
+        // owner approving anything — the enclave did. Tell them, with a link to
+        // revoke it. Best-effort: the signer is already on-chain, so a failed
+        // notice must never fail the recovery the user is standing in front of.
+        if (config.appId && wallet.chain !== 'stellar') {
+          try {
+            await new HttpRecoveryClient({
+              baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
+              appId: config.appId,
+              ...(config.environment ? { environment: config.environment } : {}),
+            }).notifyDeviceAdded({
+              accountAddress: wallet.address,
+              signer: wallet.publicKey,
+              ...(identity.email ? { email: identity.email } : {}),
+              ...(outcome.finalizeTransaction ? { txHash: outcome.finalizeTransaction } : {}),
+            });
+          } catch (e) {
+            console.warn('[CavosProvider] device-added notice failed:', e);
+          }
+        }
         if (!cancelled) await connect(identity, { silent: true });
       } catch (error) {
         if (!cancelled) {
@@ -912,29 +889,25 @@ export function CavosProvider({
     }
     if (typeof window === 'undefined') throw new Error('OAuth requires a browser');
     setAuthError(null);
-    await ensureSocialRecoveryPrewarm();
     const url = await (provider === 'google'
       ? auth.getGoogleOAuthUrl(window.location.origin + window.location.pathname)
       : auth.getAppleOAuthUrl(window.location.origin + window.location.pathname));
     window.location.href = url;
-  }, [auth, ensureSocialRecoveryPrewarm]);
+  }, [auth]);
 
   const sendMagicLink = useCallback(async (email: string) => {
-    await Promise.all([auth.sendMagicLink(email), ensureSocialRecoveryPrewarm()]);
-  }, [auth, ensureSocialRecoveryPrewarm]);
+    await auth.sendMagicLink(email);
+  }, [auth]);
 
   const sendOtp = useCallback(async (email: string) => {
-    await Promise.all([auth.sendOtp(email), ensureSocialRecoveryPrewarm()]);
-  }, [auth, ensureSocialRecoveryPrewarm]);
+    await auth.sendOtp(email);
+  }, [auth]);
 
   const verifyOtp = useCallback(async (email: string, code: string) => {
     setAuthError(null);
-    const [id] = await Promise.all([
-      auth.verifyOtp(email, code),
-      ensureSocialRecoveryPrewarm(),
-    ]);
+    const id = await auth.verifyOtp(email, code);
     await connect(id);
-  }, [auth, connect, ensureSocialRecoveryPrewarm]);
+  }, [auth, connect]);
 
   const execute = useCallback(async (calls: ChainCall[], opts?: ExecuteOptions) => {
     if (!wallet) throw new Error('Not logged in');
@@ -966,6 +939,44 @@ export function CavosProvider({
     },
     [wallet],
   );
+
+  const removeSigner = useCallback(
+    async (pubkey: { x: bigint; y: bigint }) => {
+      if (!wallet) throw new Error('Not logged in');
+      if (wallet.chain === 'stellar') {
+        throw new Error(
+          'kit: on Stellar, use wallet.removeDevice({ slotId }) — devices are envelope slots, not signer pubkeys, and revoking rotates the control key.',
+        );
+      }
+      if (wallet.chain !== 'starknet') {
+        throw new Error('kit: removeSigner via useCavos() is Starknet-only; use the `wallet` handle on other chains.');
+      }
+      return wallet.removeSigner(pubkey);
+    },
+    [wallet],
+  );
+
+  // The authorized device signers, read from the backend's `wallet_devices`
+  // mirror (`/api/wallets`). On Stellar the account is self-describing, so its
+  // own envelope slots are the source of truth instead.
+  const listDevices = useCallback(async (): Promise<{ x: bigint; y: bigint }[]> => {
+    const cfg = configRef.current;
+    if (!identity || !wallet) throw new Error('Not logged in');
+    if (wallet.chain === 'stellar') {
+      throw new Error(
+        'kit: on Stellar, use wallet.listDevices() — devices are envelope slots, not signer pubkeys.',
+      );
+    }
+    if (!cfg.appId) throw new Error('kit: listDevices requires an appId');
+    const registry = new HttpWalletRegistry({
+      baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+      appId: cfg.appId,
+      network: cfg.network,
+      ...(cfg.environment ? { environment: cfg.environment } : {}),
+    });
+    const found = await registry.lookup(identity.userId);
+    return found?.devices ?? [];
+  }, [identity, wallet]);
 
   const enrollPasskey = useCallback(
     async (passkey: PasskeyApprover, params: PasskeyEnrollParams) => {
@@ -1186,6 +1197,8 @@ export function CavosProvider({
     execute,
     signMessage,
     addSigner,
+    removeSigner,
+    listDevices,
     enrollPasskey,
     passkeySupported,
     enrollPasskeyDefault,
@@ -1280,61 +1293,3 @@ function clearPendingSocialRecovery(chain: Chain, address: string): void {
   window.localStorage.removeItem(pendingSocialRecoveryKey(chain, address));
 }
 
-function socialRecoveryPrewarmKey(
-  appId: string,
-  environment?: 'development' | 'production',
-): string {
-  return `cavos-kit:social-recovery-prewarm:${appId}:${environment ?? 'production'}`;
-}
-
-function persistSocialRecoveryPrewarm(
-  appId: string,
-  environment: 'development' | 'production' | undefined,
-  prewarm: SocialRecoveryPrewarm,
-): void {
-  if (typeof window === 'undefined') return;
-  window.sessionStorage.setItem(
-    socialRecoveryPrewarmKey(appId, environment),
-    JSON.stringify(prewarm),
-  );
-}
-
-function loadSocialRecoveryPrewarm(
-  appId: string,
-  environment?: 'development' | 'production',
-): SocialRecoveryPrewarm | null {
-  if (typeof window === 'undefined') return null;
-  const key = socialRecoveryPrewarmKey(appId, environment);
-  try {
-    const value = JSON.parse(window.sessionStorage.getItem(key) ?? 'null');
-    if (
-      typeof value?.prewarmId === 'string' &&
-      typeof value?.claimToken === 'string' &&
-      typeof value?.expiresAt === 'string' &&
-      new Date(value.expiresAt).getTime() > Date.now()
-    ) {
-      return value as SocialRecoveryPrewarm;
-    }
-  } catch {
-    // Malformed browser state is discarded below.
-  }
-  window.sessionStorage.removeItem(key);
-  return null;
-}
-
-function takeSocialRecoveryPrewarm(
-  appId: string,
-  environment?: 'development' | 'production',
-): SocialRecoveryPrewarm | null {
-  const prewarm = loadSocialRecoveryPrewarm(appId, environment);
-  clearSocialRecoveryPrewarm(appId, environment);
-  return prewarm;
-}
-
-function clearSocialRecoveryPrewarm(
-  appId: string,
-  environment?: 'development' | 'production',
-): void {
-  if (typeof window === 'undefined') return;
-  window.sessionStorage.removeItem(socialRecoveryPrewarmKey(appId, environment));
-}

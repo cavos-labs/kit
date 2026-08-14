@@ -37,7 +37,11 @@ export { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
 export type { HttpWalletRegistryOptions } from "./registry/HttpWalletRegistry";
 
 // Multi-device recovery relay (device-approval request → on-chain add_signer)
-export type { RecoveryClient, PendingDeviceRequest } from "./recovery/RecoveryClient";
+export type {
+  RecoveryClient,
+  PendingDeviceRequest,
+  DeviceRemovalRequest,
+} from "./recovery/RecoveryClient";
 export { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
 export type { HttpRecoveryClientOptions } from "./recovery/HttpRecoveryClient";
 
@@ -55,7 +59,6 @@ export type {
   ProviderPolicy as SocialProviderPolicy,
   SocialRecoveryAction,
   SocialRecoveryClientOptions,
-  SocialRecoveryPrewarm,
   SocialRecoveryProvider,
   SocialRecoveryResult,
 } from "./recovery/SocialRecoveryClient";

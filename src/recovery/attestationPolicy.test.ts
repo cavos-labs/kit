@@ -1,13 +1,14 @@
 import { resolveSocialRecoveryPolicy } from "../react/CavosProvider";
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "./attestationDefaults";
-import { isAcceptedImageDigest, type AttestationPolicy } from "./SocialRecoveryClient";
+import type { AttestationPolicy } from "./SocialRecoveryClient";
 
-const custom: AttestationPolicy = {
-  audience: "https://example.test/attest",
-  imageDigest: "sha256:deadbeef",
-  projectNumber: "1",
-  serviceAccount: "someone@example.iam.gserviceaccount.com",
-};
+/**
+ * The `isAcceptedImageDigest` cases that used to live here moved to
+ * `nitro/attestation.test.ts` as `isAcceptedMeasurement`, which is the same
+ * check against a PCR0 measurement rather than a container image digest.
+ */
+
+const custom: AttestationPolicy = { pcr0: "ab".repeat(48) };
 
 describe("resolveSocialRecoveryPolicy", () => {
   it("is off unless the app opts in", () => {
@@ -38,60 +39,20 @@ describe("resolveSocialRecoveryPolicy", () => {
 });
 
 describe("shipped attestation defaults", () => {
-  it("pins concrete values, not placeholders", () => {
-    const p = DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
-    expect(p.audience).toMatch(/^https:\/\//);
-    expect(p.projectNumber).toMatch(/^\d+$/);
-    expect(p.serviceAccount).toMatch(/^[^@]+@[^@]+\.iam\.gserviceaccount\.com$/);
-  });
+  const measurements = () => {
+    const { pcr0 } = DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
+    return Array.isArray(pcr0) ? pcr0 : [pcr0];
+  };
 
-  it("pins full-length sha256 digests", () => {
-    const digests = Array.isArray(p().imageDigest)
-      ? (p().imageDigest as string[])
-      : [p().imageDigest as string];
-    expect(digests.length).toBeGreaterThan(0);
-    for (const d of digests) expect(d).toMatch(/^sha256:[0-9a-f]{64}$/);
+  // This is deliberately allowed to be empty right now: the enclave image has
+  // not been published, and an empty list fails closed, so social recovery is
+  // simply unavailable rather than accepting an unverified enclave. The shape
+  // check below is what stops a placeholder from shipping as if it were real.
+  it("pins full-length SHA-384 measurements, when it pins any", () => {
+    for (const measurement of measurements()) {
+      expect(measurement).toMatch(/^[0-9a-f]{96}$/);
+    }
     // A rollout window needs the incoming and outgoing image to both verify.
-    expect(new Set(digests).size).toBe(digests.length);
-  });
-
-  function p() {
-    return DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
-  }
-});
-
-describe("isAcceptedImageDigest", () => {
-  const A = "sha256:" + "a".repeat(64);
-  const B = "sha256:" + "b".repeat(64);
-
-  it("accepts a digest during a rollout window", () => {
-    expect(isAcceptedImageDigest(A, [A, B])).toBe(true);
-    expect(isAcceptedImageDigest(B, [A, B])).toBe(true);
-  });
-
-  it("still accepts a single pinned digest", () => {
-    expect(isAcceptedImageDigest(A, A)).toBe(true);
-  });
-
-  // The list widens which images are accepted; it must not stop the check from
-  // being a check. These are the ways a policy could silently become a no-op.
-  it("rejects an image that is not pinned", () => {
-    expect(isAcceptedImageDigest("sha256:" + "c".repeat(64), [A, B])).toBe(false);
-  });
-
-  it("rejects a missing attested digest", () => {
-    expect(isAcceptedImageDigest(undefined, [A, B])).toBe(false);
-    expect(isAcceptedImageDigest(null, [A, B])).toBe(false);
-    expect(isAcceptedImageDigest("", [A, B])).toBe(false);
-  });
-
-  it("fails closed on an empty accepted list", () => {
-    expect(isAcceptedImageDigest(A, [])).toBe(false);
-  });
-
-  it("requires an exact match, not a prefix", () => {
-    expect(isAcceptedImageDigest("sha256:" + "a".repeat(63), [A])).toBe(false);
-    expect(isAcceptedImageDigest(A + "x", [A])).toBe(false);
-    expect(isAcceptedImageDigest(A.toUpperCase(), [A])).toBe(false);
+    expect(new Set(measurements()).size).toBe(measurements().length);
   });
 });

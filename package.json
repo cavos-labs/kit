@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.1.3",
+  "version": "0.1.15",
   "description": "Cavos Kit - device-native verifiable smart accounts for Starknet, Solana and Stellar.",
   "repository": {
     "type": "git",
@@ -60,7 +60,8 @@
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "jest"
+    "test": "jest",
+    "verify:nitro-root": "node scripts/verify_nitro_root.mjs"
   },
   "keywords": [
     "starknet",

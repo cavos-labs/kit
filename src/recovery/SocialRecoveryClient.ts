@@ -1,37 +1,17 @@
 import { utf8ToBytes } from "../crypto/encoding";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
+import {
+  verifyNitroAttestation,
+  type NitroAttestationPolicy,
+} from "./nitro/attestation";
 
 export type SocialRecoveryProvider = "google" | "apple" | "email";
 export type SocialRecoveryAction = "enroll" | "recover";
 
-export interface AttestationPolicy {
-  audience: string;
-  /**
-   * Accepted Confidential Space image digest(s). A list lets a rollout overlap:
-   * the new digest ships alongside the one still deployed, so apps on either
-   * release keep working across the transition.
-   */
-  imageDigest: string | string[];
-  projectNumber: string;
-  serviceAccount: string;
-}
-
 /**
- * Whether the enclave that produced this attestation is one we accept.
- *
- * A policy may list several digests so an image rollout can overlap, but the
- * attested digest must still match one of them exactly. A missing or empty
- * attested digest never matches, and an empty accepted list accepts nothing —
- * a policy that cannot be satisfied must fail closed, not wave everything past.
+ * Which enclave this build will talk to. See `attestationDefaults.ts`.
  */
-export function isAcceptedImageDigest(
-  attested: string | undefined | null,
-  expected: string | string[],
-): boolean {
-  if (!attested) return false;
-  const accepted = Array.isArray(expected) ? expected : [expected];
-  return accepted.length > 0 && accepted.includes(attested);
-}
+export type AttestationPolicy = NitroAttestationPolicy;
 
 export interface SocialRecoveryClientOptions {
   baseUrl: string;
@@ -42,14 +22,6 @@ export interface SocialRecoveryClientOptions {
    * They must not be learned from the same control plane being attested.
    */
   attestation: AttestationPolicy;
-  /** Optional ready one-shot worker reserved before OAuth and claimed once. */
-  prewarm?: SocialRecoveryPrewarm;
-}
-
-export interface SocialRecoveryPrewarm {
-  prewarmId: string;
-  claimToken: string;
-  expiresAt: string;
 }
 
 export interface ProviderPolicy {
@@ -85,105 +57,62 @@ export interface SocialRecoveryResult {
   [key: string]: unknown;
 }
 
+/**
+ * A started session. The enclave is already running, so this arrives ready and
+ * attested in the same response — there is no `starting` state to wait out.
+ */
 interface StartedSession {
   session_id: string;
   provider: SocialRecoveryProvider;
   policy: ProviderPolicy;
   delay_seconds: number;
+  ephemeral_public_key_b64?: string;
+  attestation_document_b64?: string;
+  sealed_record_b64?: string;
   resume_result?: SocialRecoveryResult;
 }
 
-interface ReadySession {
-  session_id: string;
-  action: SocialRecoveryAction;
-  provider: SocialRecoveryProvider;
-  status: string;
-  ephemeral_public_key_b64?: string;
-  attestation_nonce_b64?: string;
-  attestation_claims?: { token?: string };
-  sealed_record_b64?: string;
-  result?: SocialRecoveryResult;
-  error_code?: string;
-}
-
 /**
- * Real Google Confidential Space recovery transport.
+ * Talks to the Cavos recovery enclave.
  *
  * The OIDC credential and (for Stellar enrolment) DEK are encrypted in-browser
- * to an ephemeral P-256 key whose hash is bound into the Google attestation
- * token. The Cavos API only relays ciphertext.
+ * to a P-256 key held only by an AWS Nitro Enclave whose measurement this build
+ * pins. The Cavos API and the enclave's parent instance relay ciphertext and
+ * are not trusted with any of it.
+ *
+ * Two round trips, both synchronous: start a session, then run the job. The
+ * previous Confidential Space transport had to prewarm a VM before login and
+ * then poll two endpoints for up to two minutes while it booted.
  */
 export class SocialRecoveryClient {
-  private activePrewarm?: SocialRecoveryPrewarm;
-
-  constructor(private readonly opts: SocialRecoveryClientOptions) {
-    this.activePrewarm = opts.prewarm;
-  }
-
-  /**
-   * Reserve an empty, already-attested Confidential Space worker before OAuth.
-   * The returned capability contains no identity or wallet data and is useful
-   * only once, when `enroll` or `recover` atomically claims the worker.
-   */
-  async prewarm(): Promise<SocialRecoveryPrewarm> {
-    if (
-      this.activePrewarm &&
-      new Date(this.activePrewarm.expiresAt).getTime() > Date.now()
-    ) {
-      return this.activePrewarm;
-    }
-    const response = await this.fetchJson("/api/recovery/social/prewarm", {
-      method: "POST",
-      body: JSON.stringify({
-        app_id: this.opts.appId,
-        ...(this.opts.environment ? { environment: this.opts.environment } : {}),
-      }),
-    });
-    const prewarm: SocialRecoveryPrewarm = {
-      prewarmId: response.prewarm_id,
-      claimToken: response.claim_token,
-      expiresAt: response.expires_at,
-    };
-    if (
-      !prewarm.prewarmId ||
-      !prewarm.claimToken ||
-      !prewarm.expiresAt ||
-      !Number.isFinite(new Date(prewarm.expiresAt).getTime())
-    ) {
-      throw new Error("kit/social-recovery: malformed prewarm response");
-    }
-    this.activePrewarm = prewarm;
-    return prewarm;
-  }
+  constructor(private readonly opts: SocialRecoveryClientOptions) {}
 
   async enroll(params: {
     walletAddress: string;
     credential: SocialRecoveryCredential;
     stellarDek?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
-    const started = await this.start(
+    const session = await this.start(
       params.walletAddress,
       "enroll",
       params.credential.tokenFingerprint,
     );
-    if (started.resume_result?.result === "enrolled") {
-      return { sessionId: started.session_id, result: started.resume_result };
+    if (session.resume_result?.result === "enrolled") {
+      return { sessionId: session.session_id, result: session.resume_result };
     }
-    const ready = await this.waitReady(started.session_id);
-    await this.submitEncryptedJob(ready, {
+
+    const channelKey = await this.verifiedChannelKey(session);
+    const result = await this.runJob(session.session_id, channelKey, {
       action: "enroll",
       credential: {
-        provider: started.provider,
+        provider: session.provider,
         id_token: params.credential.idToken,
         token_fingerprint: params.credential.tokenFingerprint,
       },
-      policy: started.policy,
+      policy: session.policy,
       stellar_dek_b64: params.stellarDek ? toB64(params.stellarDek) : undefined,
     });
-    return {
-      sessionId: started.session_id,
-      result: await this.waitCompleted(started.session_id),
-    };
+    return { sessionId: session.session_id, result };
   }
 
   async recover(params: {
@@ -192,32 +121,30 @@ export class SocialRecoveryClient {
     authorizations?: ChainAuthorization[];
     stellarRecipientPublicKey?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
-    const started = await this.start(
+    const session = await this.start(
       params.walletAddress,
       "recover",
       params.credential.tokenFingerprint,
     );
-    const ready = await this.waitReady(started.session_id);
-    if (!ready.sealed_record_b64) {
+    if (!session.sealed_record_b64) {
       throw new Error("kit/social-recovery: enrollment record is missing");
     }
-    await this.submitEncryptedJob(ready, {
+
+    const channelKey = await this.verifiedChannelKey(session);
+    const result = await this.runJob(session.session_id, channelKey, {
       action: "recover",
       credential: {
-        provider: started.provider,
+        provider: session.provider,
         id_token: params.credential.idToken,
         token_fingerprint: params.credential.tokenFingerprint,
       },
-      sealed_record_b64: ready.sealed_record_b64,
+      sealed_record_b64: session.sealed_record_b64,
       authorizations: params.authorizations ?? [],
       stellar_recipient_pubkey_b64: params.stellarRecipientPublicKey
         ? toB64(params.stellarRecipientPublicKey)
         : undefined,
     });
-    return {
-      sessionId: started.session_id,
-      result: await this.waitCompleted(started.session_id),
-    };
+    return { sessionId: session.session_id, result };
   }
 
   async confirmEnrollment(sessionId: string, txHash: string): Promise<void> {
@@ -227,17 +154,12 @@ export class SocialRecoveryClient {
     });
   }
 
-  private async start(
+  private start(
     walletAddress: string,
     action: SocialRecoveryAction,
     authChallenge: string,
   ): Promise<StartedSession> {
-    const prewarm =
-      this.activePrewarm &&
-      new Date(this.activePrewarm.expiresAt).getTime() > Date.now()
-        ? this.activePrewarm
-        : undefined;
-    const started = await this.fetchJson("/api/recovery/social/sessions", {
+    return this.fetchJson("/api/recovery/social/sessions", {
       method: "POST",
       body: JSON.stringify({
         app_id: this.opts.appId,
@@ -245,68 +167,61 @@ export class SocialRecoveryClient {
         wallet_address: walletAddress,
         action,
         auth_challenge: authChallenge,
-        ...(prewarm
-          ? {
-              prewarm_id: prewarm.prewarmId,
-              prewarm_token: prewarm.claimToken,
-            }
-          : {}),
       }),
     });
-    // A successful start either claimed the worker or deliberately fell back
-    // to a fresh session. Never present the one-shot capability twice.
-    this.activePrewarm = undefined;
-    return started;
   }
 
-  private async waitReady(sessionId: string): Promise<ReadySession> {
-    for (let attempt = 0; attempt < 390; attempt++) {
-      const session = await this.session(sessionId);
-      if (session.status === "ready") {
-        await verifyAttestedChannel(session, this.opts.attestation);
-        return session;
-      }
-      if (["failed", "expired"].includes(session.status)) {
-        throw new Error(
-          `kit/social-recovery: enclave startup failed (${session.error_code ?? session.status})`,
-        );
-      }
-      await delay(sessionPollDelay(attempt));
+  /**
+   * Verify the enclave's attestation and return the channel key **from inside
+   * it**.
+   *
+   * This is the security boundary of the whole flow. The key is deliberately
+   * read out of the signed document rather than from the JSON field beside it:
+   * that way there is nothing to cross-check, because a relay that substituted
+   * a key it controls would have to produce an AWS-signed document containing
+   * it. `user_data` binds the document to this session, so a document minted
+   * for one session cannot be replayed as the answer to another.
+   */
+  private async verifiedChannelKey(session: StartedSession): Promise<Uint8Array> {
+    if (!session.attestation_document_b64) {
+      throw new Error("kit/social-recovery: the session carried no attestation");
     }
-    throw new Error("kit/social-recovery: enclave startup timed out");
-  }
+    const attestation = await verifyNitroAttestation(
+      fromB64(session.attestation_document_b64),
+      this.opts.attestation,
+    );
 
-  private async waitCompleted(sessionId: string): Promise<SocialRecoveryResult> {
-    for (let attempt = 0; attempt < 390; attempt++) {
-      const session = await this.session(sessionId);
-      if (session.status === "completed" && session.result) return session.result;
-      if (["failed", "expired"].includes(session.status)) {
-        throw new Error(
-          `kit/social-recovery: recovery failed (${session.error_code ?? session.status})`,
-        );
-      }
-      await delay(sessionPollDelay(attempt));
+    if (!attestation.publicKey) {
+      throw new Error("kit/social-recovery: the attestation carried no channel key");
     }
-    throw new Error("kit/social-recovery: workload timed out");
-  }
-
-  private session(sessionId: string): Promise<ReadySession> {
-    return this.fetchJson(`/api/recovery/social/sessions/${sessionId}`);
-  }
-
-  private async submitEncryptedJob(session: ReadySession, job: unknown): Promise<void> {
-    if (!session.ephemeral_public_key_b64) {
-      throw new Error("kit/social-recovery: enclave channel key is missing");
+    const expectedBinding = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", utf8ToBytes(session.session_id) as unknown as BufferSource),
+    );
+    if (!attestation.userData || !bytesEqual(attestation.userData, expectedBinding)) {
+      throw new Error("kit/social-recovery: the attestation is not bound to this session");
     }
+    return attestation.publicKey;
+  }
+
+  /** Encrypt the job to the attested key and return the enclave's result. */
+  private async runJob(
+    sessionId: string,
+    channelKey: Uint8Array,
+    job: unknown,
+  ): Promise<SocialRecoveryResult> {
     const encrypted = await encryptForEnclave(
-      session.session_id,
-      fromB64(session.ephemeral_public_key_b64),
+      sessionId,
+      channelKey,
       utf8ToBytes(JSON.stringify(job)),
     );
-    await this.fetchJson(`/api/recovery/social/sessions/${session.session_id}/job`, {
-      method: "POST",
-      body: JSON.stringify(encrypted),
-    });
+    const response = await this.fetchJson(
+      `/api/recovery/social/sessions/${sessionId}/job`,
+      { method: "POST", body: JSON.stringify(encrypted) },
+    );
+    if (!response?.result) {
+      throw new Error("kit/social-recovery: the enclave returned no result");
+    }
+    return response.result as SocialRecoveryResult;
   }
 
   private async fetchJson(path: string, init?: RequestInit): Promise<any> {
@@ -381,83 +296,11 @@ async function encryptForEnclave(
   };
 }
 
-async function verifyAttestedChannel(
-  session: ReadySession,
-  expected: AttestationPolicy,
-): Promise<void> {
-  // The control plane deliberately returns parsed claims for display only, but
-  // the signed token itself must be available for independent SDK validation.
-  const token = (session.attestation_claims as any)?.token as string | undefined;
-  if (!token || !session.ephemeral_public_key_b64 || !session.attestation_nonce_b64) {
-    throw new Error("kit/social-recovery: signed attestation is missing");
-  }
-  const [encodedHeader, encodedPayload, encodedSignature] = token.split(".");
-  if (!encodedSignature) throw new Error("kit/social-recovery: malformed attestation JWT");
-  const header = JSON.parse(new TextDecoder().decode(fromB64(encodedHeader)));
-  const claims = JSON.parse(new TextDecoder().decode(fromB64(encodedPayload)));
-  if (header.alg !== "RS256" || typeof header.kid !== "string") {
-    throw new Error("kit/social-recovery: unsupported attestation signature");
-  }
-  const jwksResponse = await fetch(
-    "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com",
-  );
-  if (!jwksResponse.ok) throw new Error("kit/social-recovery: attestation JWKS unavailable");
-  const jwks = await jwksResponse.json();
-  const jwk = jwks.keys?.find(
-    (key: JsonWebKey & { kid?: string }) => key.kid === header.kid,
-  );
-  if (!jwk) throw new Error("kit/social-recovery: attestation signing key not found");
-  const key = await crypto.subtle.importKey(
-    "jwk",
-    jwk,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const valid = await crypto.subtle.verify(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    fromB64(encodedSignature) as unknown as BufferSource,
-    utf8ToBytes(`${encodedHeader}.${encodedPayload}`) as unknown as BufferSource,
-  );
-  if (!valid) throw new Error("kit/social-recovery: invalid attestation signature");
-
-  const nonce = toB64(
-    new Uint8Array(
-      await crypto.subtle.digest(
-        "SHA-256",
-        concat(
-          fromB64(session.ephemeral_public_key_b64),
-          utf8ToBytes(session.session_id),
-        ) as unknown as BufferSource,
-      ),
-    ),
-  );
-  const nonces = Array.isArray(claims.eat_nonce) ? claims.eat_nonce : [claims.eat_nonce];
-  const support = claims.submods?.confidential_space?.support_attributes ?? [];
-  const attestedDigest = claims.submods?.container?.image_digest;
-  if (
-    claims.iss !== "https://confidentialcomputing.googleapis.com" ||
-    claims.aud !== expected.audience ||
-    claims.exp * 1000 <= Date.now() ||
-    claims.swname !== "CONFIDENTIAL_SPACE" ||
-    claims.dbgstat !== "disabled-since-boot" ||
-    !support.includes("STABLE") ||
-    !isAcceptedImageDigest(attestedDigest, expected.imageDigest) ||
-    claims.submods?.gce?.project_number !== expected.projectNumber ||
-    !claims.google_service_accounts?.includes(expected.serviceAccount) ||
-    !nonces.includes(nonce) ||
-    nonce !== session.attestation_nonce_b64
-  ) {
-    throw new Error("kit/social-recovery: attestation policy mismatch");
-  }
-}
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a);
-  out.set(b, a.length);
-  return out;
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index];
+  return difference === 0;
 }
 
 function toB64(bytes: Uint8Array): string {
@@ -470,14 +313,4 @@ function fromB64(value: string): Uint8Array {
   const normal = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(normal.padEnd(Math.ceil(normal.length / 4) * 4, "="));
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// A reserved warm enclave normally finishes in a few seconds. Poll tightly in
-// that window, then back off for cold fallback/capacity incidents.
-function sessionPollDelay(attempt: number): number {
-  return attempt < 40 ? 250 : 1_000;
 }
