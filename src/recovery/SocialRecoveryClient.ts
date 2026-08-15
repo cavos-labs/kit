@@ -95,7 +95,7 @@ export class SocialRecoveryClient {
     const session = await this.start(
       params.walletAddress,
       "enroll",
-      params.credential.tokenFingerprint,
+      params.credential,
     );
     if (session.resume_result?.result === "enrolled") {
       return { sessionId: session.session_id, result: session.resume_result };
@@ -124,7 +124,7 @@ export class SocialRecoveryClient {
     const session = await this.start(
       params.walletAddress,
       "recover",
-      params.credential.tokenFingerprint,
+      params.credential,
     );
     if (!session.sealed_record_b64) {
       throw new Error("kit/social-recovery: enrollment record is missing");
@@ -157,7 +157,7 @@ export class SocialRecoveryClient {
   private start(
     walletAddress: string,
     action: SocialRecoveryAction,
-    authChallenge: string,
+    credential: SocialRecoveryCredential,
   ): Promise<StartedSession> {
     return this.fetchJson("/api/recovery/social/sessions", {
       method: "POST",
@@ -166,7 +166,11 @@ export class SocialRecoveryClient {
         ...(this.opts.environment ? { environment: this.opts.environment } : {}),
         wallet_address: walletAddress,
         action,
-        auth_challenge: authChallenge,
+        // An app may offer every provider, so the one this credential came from
+        // decides the policy. Control planes predating that ignore the field and
+        // fall back to the environment's single configured provider.
+        provider: credential.provider,
+        auth_challenge: credential.tokenFingerprint,
       }),
     });
   }
