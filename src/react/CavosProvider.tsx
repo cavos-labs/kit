@@ -674,9 +674,16 @@ export function CavosProvider({
             break;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            // Only an enrolment actually in flight is worth waiting for.
+            // `not_enrolled` means no recovery authority was ever written
+            // on-chain, so there is nothing to wait for and retrying just spins
+            // for five minutes behind a spinner. Older control planes answer
+            // `not_enrolled` for both, so it stays in the retryable set for
+            // them; newer ones distinguish it.
             const enrollmentIsPending =
-              message.includes('not_enrolled') ||
-              message.includes('social recovery is not enrolled');
+              message.includes('enrollment_pending') ||
+              message.includes('social recovery is not enrolled') ||
+              (message.includes('not_enrolled') && !message.includes('nothing to recover'));
             if (
               !enrollmentIsPending ||
               Date.now() >= enrollmentDeadline ||

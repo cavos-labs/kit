@@ -105,7 +105,12 @@ export class SocialRecoveryClient {
     const result = await this.runJob(session.session_id, channelKey, {
       action: "enroll",
       credential: {
-        provider: session.provider,
+        // The credential's own provider, read from the token's `iss`, not the
+        // one the server echoed back. The enclave refuses a job whose credential
+        // provider differs from its policy, before it checks anything else, so
+        // echoing a stale field turned a correct token into an opaque
+        // `request_failed`. The token is the authority on who issued it.
+        provider: params.credential.provider,
         id_token: params.credential.idToken,
         token_fingerprint: params.credential.tokenFingerprint,
       },
@@ -134,7 +139,12 @@ export class SocialRecoveryClient {
     const result = await this.runJob(session.session_id, channelKey, {
       action: "recover",
       credential: {
-        provider: session.provider,
+        // The credential's own provider, read from the token's `iss`, not the
+        // one the server echoed back. The enclave refuses a job whose credential
+        // provider differs from its policy, before it checks anything else, so
+        // echoing a stale field turned a correct token into an opaque
+        // `request_failed`. The token is the authority on who issued it.
+        provider: params.credential.provider,
         id_token: params.credential.idToken,
         token_fingerprint: params.credential.tokenFingerprint,
       },
