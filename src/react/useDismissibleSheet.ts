@@ -40,8 +40,35 @@ export interface DismissibleSheet {
   };
   /** Live translation, in px. Apply as `translateY`. */
   offset: Offset;
+  /**
+   * How far gone the sheet is, 0 at rest and 1 when fully dismissed.
+   *
+   * The scrim is driven from this rather than animated separately. A backdrop
+   * that holds full strength while the sheet slides out from under it reads as
+   * two unrelated layers, and the moment the sheet lands the backdrop pops —
+   * which is the single clearest tell that a sheet is not the real thing.
+   */
+  progress: number;
   /** True while a finger is down, so the caller can suppress its own entry animation. */
   dragging: boolean;
+  /**
+   * Whether this element takes the gesture at all.
+   *
+   * The caller needs it for `touch-action`, which the browser reads once when
+   * the touch starts and never again — so it cannot be flipped on mid-drag.
+   * Leaving it at `pan-y` until a drag was detected meant the browser claimed
+   * the first vertical move for scrolling, cancelled the pointer stream, and
+   * the sheet stopped following the finger it had just started following.
+   */
+  /**
+   * Tuck the sheet away and call back once it has gone.
+   *
+   * The same spring the gesture uses, so closing by tapping outside and closing
+   * by throwing it look like the same object doing the same thing — which is
+   * the point of a sheet having a physical position at all.
+   */
+  dismiss: (done: () => void) => void;
+  draggable: boolean;
 }
 
 /** Damping ratio and response, in Apple's terms, for a drawer. */
@@ -87,6 +114,7 @@ function prefersReducedMotion(): boolean {
 
 export function useDismissibleSheet(
   enabled: boolean,
+  open: boolean,
   onDismiss: () => void,
 ): DismissibleSheet {
   const [offset, setOffset] = useState<Offset>(0);
@@ -95,6 +123,8 @@ export function useDismissibleSheet(
   // Everything the gesture needs lives in a ref: it is read inside pointer
   // handlers and an rAF loop, neither of which should re-render to read it.
   const state = useRef({
+    /** Explicit, because clientY is legitimately 0 when you grab at the very top. */
+    active: false,
     grabbedAt: 0,
     startOffset: 0,
     /** The last few samples, for a velocity that reflects the release and not the whole drag. */
@@ -113,6 +143,26 @@ export function useDismissibleSheet(
   }, []);
 
   useEffect(() => stop, [stop]);
+
+  // Reopening has to start from the top.
+  //
+  // Dismissing leaves the offset at the sheet's full height — that is what put
+  // it off screen — and the modal only returns null when closed, so it stays
+  // mounted and this hook keeps its state. Without this, a sheet dismissed by
+  // dragging reopens still translated off the bottom: the backdrop appears and
+  // the sheet does not.
+  //
+  // Only on the way open. Resetting on close would yank the sheet back into
+  // view for a frame in the middle of the animation that is dismissing it.
+  useEffect(() => {
+    if (!open) return;
+    stop();
+    state.current.offset = 0;
+    state.current.active = false;
+    state.current.committed = false;
+    setOffset(0);
+    setDragging(false);
+  }, [open, stop]);
 
   /**
    * Spring to `target`, starting at the current position and the given
@@ -172,6 +222,7 @@ export function useDismissibleSheet(
       element.setPointerCapture(event.pointerId);
       const current = state.current;
       current.height = element.getBoundingClientRect().height || 1;
+      current.active = true;
       current.grabbedAt = event.clientY;
       current.startOffset = current.offset;
       current.samples = [{ y: event.clientY, at: event.timeStamp }];
@@ -183,7 +234,7 @@ export function useDismissibleSheet(
   const onPointerMove = useCallback(
     (event: React.PointerEvent) => {
       const current = state.current;
-      if (!enabled || !current.grabbedAt) return;
+      if (!enabled || !current.active) return;
 
       const travelled = event.clientY - current.grabbedAt;
       current.samples.push({ y: event.clientY, at: event.timeStamp });
@@ -207,13 +258,13 @@ export function useDismissibleSheet(
   const release = useCallback(
     (event: React.PointerEvent) => {
       const current = state.current;
-      if (!enabled || !current.grabbedAt) return;
+      if (!enabled || !current.active) return;
       const element = event.currentTarget as HTMLElement;
       if (element.hasPointerCapture?.(event.pointerId)) {
         element.releasePointerCapture(event.pointerId);
       }
       const wasDragging = current.committed;
-      current.grabbedAt = 0;
+      current.active = false;
       current.committed = false;
       setDragging(false);
       if (!wasDragging) return; // a tap, not a drag — leave it to the click handler
@@ -239,6 +290,15 @@ export function useDismissibleSheet(
     [enabled, onDismiss, springTo],
   );
 
+  const dismiss = useCallback(
+    (done: () => void) => {
+      // From rest, so there is no velocity to inherit; a throw goes through
+      // `release` instead and brings its own.
+      springTo(state.current.height || window.innerHeight, 0, done);
+    },
+    [springTo],
+  );
+
   return {
     handlers: {
       onPointerDown,
@@ -247,6 +307,12 @@ export function useDismissibleSheet(
       onPointerCancel: release,
     },
     offset,
+    progress: Math.min(
+      Math.max(offset / (state.current.height || (typeof window === "undefined" ? 1 : window.innerHeight)), 0),
+      1,
+    ),
     dragging,
+    dismiss,
+    draggable: enabled,
   };
 }
