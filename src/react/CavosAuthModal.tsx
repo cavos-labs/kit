@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import { Fingerprint } from '@phosphor-icons/react';
 import { useCavos } from './CavosProvider';
+import { useDismissibleSheet } from './useDismissibleSheet';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,41 @@ function injectStyles() {
       from { transform:translateY(100%); }
       to   { transform:translateY(0); }
     }
+    /* Reduced motion is not "no feedback" — it is the same information
+       without the vestibular part. Slides, springs and the success pop become
+       plain cross-fades; the spinner stays, because a progress indicator that
+       stops indicating progress is worse than one that moves. */
+    @media (prefers-reduced-motion: reduce) {
+      .cavos-root *, .cavos-root *::before, .cavos-root *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.08ms !important;
+      }
+      .cavos-root [data-cavos-spinner] {
+        animation-duration: 0.75s !important;
+        animation-iteration-count: infinite !important;
+      }
+      .cavos-provider:active, .cavos-primary-btn:active { transform: none; }
+    }
+    /* A frosted panel is decoration; legibility is not. Asked for less
+       transparency, the blur goes and the surface turns solid. */
+    @media (prefers-reduced-transparency: reduce) {
+      .cavos-overlay { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+    }
+    /* And asked for more contrast, the card gets a real edge rather than
+       relying on a shadow to separate it from what is behind. */
+    @media (prefers-contrast: more) {
+      .cavos-overlay { background: rgba(0,0,0,0.75) !important; backdrop-filter: none !important; }
+      .cavos-card { outline: 1px solid currentColor; outline-offset: -1px; }
+    }
+    /* Exits mirror their entrances. A card that grew up into place and then
+       vanished would read as two different objects; the return path has to be
+       the outbound one reversed. */
+    @keyframes cavos-up-out {
+      from { opacity:1; transform:translateY(0)    scale(1);     }
+      to   { opacity:0; transform:translateY(12px) scale(0.985); }
+    }
+    @keyframes cavos-fade-out { from { opacity:1; } to { opacity:0; } }
     @keyframes cavos-spin {
       from { transform:rotate(0deg); } to { transform:rotate(360deg); }
     }
@@ -285,6 +321,7 @@ const BrandKey = ({ size = 46, tone = BRAND }: { size?: number; tone?: string })
 function Spinner({ size = 16, color = '#888' }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      data-cavos-spinner
       style={{ animation: 'cavos-spin 0.75s linear infinite', flexShrink: 0 }}>
       <circle cx="12" cy="12" r="10" stroke={color} strokeOpacity="0.2" strokeWidth="2.5"/>
       <path d="M12 2a10 10 0 0110 10" stroke={color} strokeWidth="2.5" strokeLinecap="round"/>
@@ -468,10 +505,46 @@ export function CavosAuthModal({
   const errBorder = isLight ? 'rgba(239,68,68,0.18)' : 'rgba(239,68,68,0.2)';
   const cardRadius = radius ?? 16;
   const btnRadius = Math.min(radius ?? 8, 12);
+  // Held above the styles below, which read it to pick the exit animation.
+  const [exiting, setExiting] = useState(false);
+  // The sheet follows the thumb; the desktop card has nothing to drag.
+  // A ref, because the callback is defined below and a sheet thrown away must
+  // finish exactly the way tapping outside does — same reset, same teardown.
+  const closeRef = useRef<() => void>(() => {});
+  const sheet = useDismissibleSheet(isMobile && !inline, open, () => closeRef.current());
   const card = lightCard(isMobile, backgroundColor, cardRadius, inline);
-  const overlay: CSSProperties = inline
+  if (exiting && !sheet.draggable) card.animation = 'cavos-up-out 0.18s ease-in forwards';
+  if (sheet.dragging || sheet.offset !== 0) {
+    // Hand the position to a transform and drop the entry keyframe: an
+    // animation still running would fight the finger for the same property.
+    card.transform = `translateY(${sheet.offset}px)`;
+    card.animation = 'none';
+    // Only while it moves. Promoting permanently costs memory on every mount
+    // and blurs text on some Android compositors.
+    card.willChange = 'transform';
+  }
+  const baseOverlayStyle: CSSProperties = inline
     ? { display: 'flex', justifyContent: 'center', width: '100%', fontFamily: FONT }
     : baseOverlay(isMobile);
+  // The scrim is not on its own clock.
+  //
+  // While the sheet is being dragged, the dimming and the blur recede in step
+  // with it, so the two read as one surface leaving rather than a panel sliding
+  // out from under a backdrop that stays solid and then blinks off. On desktop
+  // there is nothing to drag, so the mirrored fade does the same job.
+  const overlay: CSSProperties = inline
+    ? baseOverlayStyle
+    : sheet.draggable && (sheet.progress > 0 || exiting)
+      ? {
+          ...baseOverlayStyle,
+          background: `rgba(0,0,0,${(0.5 * (1 - sheet.progress)).toFixed(3)})`,
+          backdropFilter: `blur(${(10 * (1 - sheet.progress)).toFixed(1)}px)`,
+          WebkitBackdropFilter: `blur(${(10 * (1 - sheet.progress)).toFixed(1)}px)`,
+          animation: 'none',
+        }
+      : exiting
+        ? { ...baseOverlayStyle, animation: 'cavos-fade-out 0.18s ease-in forwards' }
+        : baseOverlayStyle;
   const handle = mobileHandle();
   const footer = footerBar(textColor);
   const close = closeBtn(textColor);
@@ -648,13 +721,30 @@ export function CavosAuthModal({
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
   }, []);
 
-  const handleClose = () => {
-    if (screen === 'deploying') return;
+  // Closing used to be instantaneous: `open` went false and the modal returned
+  // null the same frame. Something that slid in and then blinked out does not
+  // read as one object leaving, so the exit now runs first and `onClose` is
+  // what happens when it finishes.
+  const finishClose = useCallback(() => {
+    setExiting(false);
     setScreen('select'); setEmail(''); setOtpCode(''); setError('');
     setPkError(''); setSavedRecoveryCode(''); setCopied(false);
     doneHandledRef.current = false;
     secureHandledRef.current = false;
     onClose();
+  }, [onClose]);
+
+  // Kept current so the sheet's own dismiss lands here too.
+  closeRef.current = finishClose;
+
+  const handleClose = () => {
+    if (screen === 'deploying' || exiting) return;
+    setExiting(true);
+    // On mobile the sheet leaves on the same spring a throw uses, so tapping
+    // outside and flicking it away are visibly the same gesture's ending.
+    // On desktop there is nothing to grab, and the mirrored keyframe finishes
+    // the job — `onAnimationEnd` below is what calls back.
+    if (sheet.draggable) sheet.dismiss(finishClose);
   };
 
   // ── Passkey / account-security handlers ────────────────────────────────────
@@ -825,8 +915,8 @@ export function CavosAuthModal({
     const readyAt = walletStatus.socialRecoveryReadyAt;
     const remaining = readyAt ? Math.max(0, readyAt - Math.floor(Date.now() / 1000)) : 0;
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
@@ -856,8 +946,8 @@ export function CavosAuthModal({
 
   if (screen === 'secure-account') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: isMobile ? '28px 24px 28px' : '44px 24px 28px', textAlign: 'center' }}>
             <BrandBadge><BrandShield tone={primaryColor} /></BrandBadge>
@@ -910,8 +1000,8 @@ export function CavosAuthModal({
 
   if (screen === 'recovery-code') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: isMobile ? '28px 24px 28px' : '44px 24px 28px', textAlign: 'center' }}>
             <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
@@ -940,8 +1030,8 @@ export function CavosAuthModal({
 
   if (screen === 'passkey-approval') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
@@ -977,8 +1067,8 @@ export function CavosAuthModal({
     // device is still awaiting approval) — that's our signal to switch copy.
     const expired = walletStatus.awaitingApproval && !walletStatus.pendingRequestId;
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '48px 24px 32px', textAlign: 'center' }}>
@@ -1038,8 +1128,8 @@ export function CavosAuthModal({
 
   if (screen === 'recover') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen(walletStatus.hasPasskey && passkeySupported ? 'passkey-approval' : 'device-approval'); setError(''); setRecoverCode(''); }} aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
@@ -1080,7 +1170,7 @@ export function CavosAuthModal({
   if (screen === 'deploying') {
     const isDone = deployState === 'done';
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
         <div style={card}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: '52px 28px 44px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '16px' }}>
@@ -1136,8 +1226,8 @@ export function CavosAuthModal({
 
   if (screen === 'verify') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 24px 32px' : '40px 24px 24px', textAlign: 'center' }}>
@@ -1168,8 +1258,8 @@ export function CavosAuthModal({
 
   if (screen === 'otp-code') {
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen('magic-link'); setError(''); setOtpCode(''); }} aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
@@ -1238,8 +1328,8 @@ export function CavosAuthModal({
   if (screen === 'magic-link') {
     const isOtp = emailMode === 'otp';
     return (
-      <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-        <div style={{ ...card, position: 'relative' }}>
+      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
+        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
           <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen('select'); setError(''); }} aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
@@ -1281,8 +1371,8 @@ export function CavosAuthModal({
   );
 
   return (
-    <div style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-      <div style={{ ...card, position: 'relative' }}>
+    <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
+      <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
         {isMobile && <div style={handle} />}
         <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
 
