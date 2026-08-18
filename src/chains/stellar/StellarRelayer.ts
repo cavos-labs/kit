@@ -55,7 +55,12 @@ export class StellarRelayer {
    * back to loading the account itself.
    */
   async fetchSourceAccount(): Promise<{ address: string; sequence?: string }> {
-    const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay?network=${this.opts.network}`);
+    const qs = new URLSearchParams({
+      network: this.opts.network,
+      app_id: this.opts.appId,
+    });
+    if (this.opts.environment) qs.set('environment', this.opts.environment);
+    const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay?${qs.toString()}`);
     if (!res.ok) throw new Error(`kit/stellar: relayer source lookup failed (${res.status})`);
     const { fee_payer, sequence } = (await res.json()) as { fee_payer: string; sequence?: string };
     this.source = fee_payer;
