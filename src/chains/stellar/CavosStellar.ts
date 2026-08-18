@@ -336,7 +336,7 @@ export class CavosStellar {
         limit: opts?.limit,
       });
       tx.sign(control);
-      return this.relayer.submit("sponsored-data", tx.toXDR());
+      return this.relayer.submit("trustline", tx.toXDR());
     }
     const tx = await this.adapter.buildChangeTrustTx({ account: this.address, asset, limit: opts?.limit });
     tx.sign(control);
