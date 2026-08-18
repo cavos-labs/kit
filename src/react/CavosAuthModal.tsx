@@ -704,11 +704,17 @@ export function CavosAuthModal({
       screen !== 'device-approval' &&
       screen !== 'passkey-approval'
     ) {
-      if (walletStatus.socialRecoveryReadyAt || walletStatus.isSocialRecovering) {
-        setScreen('social-recovery');
-        doneHandledRef.current = false;
-      } else if (walletStatus.hasPasskey && passkeySupported) {
+      // Passkey first when one is available: it approves this device now, where
+      // the enclave path waits out an on-chain timelock and costs a sponsored
+      // transaction. Social recovery stays the route that always works — a
+      // passkey enrolled on a phone is no use from a browser that cannot reach
+      // it — so a passkey that fails to produce an assertion falls back here,
+      // and a recovery already in flight is never interrupted.
+      if (walletStatus.hasPasskey && passkeySupported && !walletStatus.isSocialRecovering) {
         setScreen('passkey-approval');
+        doneHandledRef.current = false;
+      } else if (walletStatus.socialRecoveryReadyAt || walletStatus.isSocialRecovering) {
+        setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (walletStatus.awaitingApproval) {
         setScreen('device-approval');

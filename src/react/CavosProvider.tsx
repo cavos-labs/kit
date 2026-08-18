@@ -133,6 +133,22 @@ export interface WalletStatus {
   isSocialRecovering: boolean;
   /** Unix seconds when an on-chain timelocked recovery can be finalized. */
   socialRecoveryReadyAt: number | null;
+  /**
+   * Can this user get back in from a device they do not have yet?
+   *
+   * The one recovery question an app actually has to answer. The flags above
+   * describe work in flight; this describes the standing guarantee, and it is
+   * the only one most integrations need to read. `methods` is there so an app
+   * can nudge — "add a passkey" reads better than "you are unprotected".
+   *
+   * `protected` is false until the lookup that fills it returns, so treat it as
+   * "not known to be protected" rather than "known to be unprotected" during
+   * the first moments of a connect.
+   */
+  recovery: {
+    protected: boolean;
+    methods: ('passkey' | 'social')[];
+  };
 }
 
 export interface UserInfo {
@@ -287,6 +303,7 @@ const INITIAL_STATUS: WalletStatus = {
   isNewAccount: false,
   isSocialRecovering: false,
   socialRecoveryReadyAt: null,
+  recovery: { protected: false, methods: [] },
 };
 
 interface SocialRecoveryEnvironment {
@@ -368,6 +385,9 @@ export function CavosProvider({
   const [authError, setAuthError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
+  /** Latest known social-enrolment answer, for the enrolment effect to consult
+   *  without waiting on a re-render. */
+  const socialEnrolledRef = useRef(false);
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
@@ -438,6 +458,55 @@ export function CavosProvider({
       })
       .catch(() => setSocialRecovery({ enabled: false, provider: null, delaySeconds: 0 }));
   }, [config.appId, config.environment, config.authBackendUrl]);
+
+  /**
+   * Resolve the standing recovery guarantee once the wallet is known: does it
+   * carry a passkey, and is it enrolled with the enclave. Both are cheap reads
+   * and both are best-effort — a wallet whose recovery state cannot be read is
+   * reported as unprotected, which is the safe direction to be wrong in.
+   *
+   * This also feeds the enrolment effect below, which uses it to skip a wallet
+   * that is already enrolled instead of running the enclave to be told 409.
+   */
+  useEffect(() => {
+    if (!wallet || !config.appId) return;
+    let cancelled = false;
+
+    (async () => {
+      const [passkey, social] = await Promise.all([
+        wallet.hasPasskey().catch(() => false),
+        (async () => {
+          const base = config.authBackendUrl ?? 'https://cavos.xyz';
+          const query = new URLSearchParams({
+            app_id: config.appId!,
+            wallet_address: wallet.address,
+            ...(config.environment ? { environment: config.environment } : {}),
+          });
+          try {
+            const res = await fetch(`${base}/api/recovery/social/enrollment?${query}`);
+            if (!res.ok) return false;
+            return (await res.json()).enrolled === true;
+          } catch {
+            return false;
+          }
+        })(),
+      ]);
+      if (cancelled) return;
+      socialEnrolledRef.current = social;
+      const methods: ('passkey' | 'social')[] = [];
+      // Passkey first: it is the immediate route, where the enclave path waits
+      // out a timelock.
+      if (passkey) methods.push('passkey');
+      if (social) methods.push('social');
+      setWalletStatus((status) => ({
+        ...status,
+        hasPasskey: status.hasPasskey || passkey,
+        recovery: { protected: methods.length > 0, methods },
+      }));
+    })();
+
+    return () => { cancelled = true; };
+  }, [wallet, config.appId, config.environment, config.authBackendUrl]);
 
   const openModal = useCallback(() => {
     // Under external auth there is nothing for the modal to do: showing a
@@ -515,6 +584,8 @@ export function CavosProvider({
       isNewAccount: w.isNewAccount,
       isSocialRecovering: false,
       socialRecoveryReadyAt: null,
+      // Unknown until the lookup above answers for this wallet.
+      recovery: { protected: false, methods: [] },
     });
     modal?.onSuccess?.(w.address);
     return w;
@@ -583,6 +654,10 @@ export function CavosProvider({
       return;
     }
     const action = wallet.status === 'ready' ? 'enroll' : 'recover';
+    // A wallet that is already enrolled has nothing to enrol. Without this the
+    // enclave ran on every fresh login purely to answer 409, and the UI flashed
+    // "securing recovery" each time it did.
+    if (action === 'enroll' && socialEnrolledRef.current) return;
     const attemptKey =
       `${wallet.chain}:${wallet.address}:${action}:${credential.tokenFingerprint}`;
     if (socialAttemptRef.current.has(attemptKey)) return;
@@ -626,6 +701,18 @@ export function CavosProvider({
             credential,
             delaySeconds: socialRecovery.delaySeconds,
           });
+          socialEnrolledRef.current = true;
+          if (!cancelled) {
+            setWalletStatus((status) => ({
+              ...status,
+              recovery: {
+                protected: true,
+                methods: status.recovery.methods.includes('social')
+                  ? status.recovery.methods
+                  : [...status.recovery.methods, 'social'],
+              },
+            }));
+          }
         } catch (error) {
           // Enrollment is opt-in and must never make an already-working wallet
           // unusable. A 409 means this wallet was enrolled on a prior login.
