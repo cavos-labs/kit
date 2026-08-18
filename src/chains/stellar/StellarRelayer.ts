@@ -15,8 +15,8 @@ export interface StellarRelayerOptions {
  *  - `fee-bump`       a control-signed payment wrapped in a relayer fee-bump
  *  - `sponsored-data` a control-signed data write (add factor/device slot) whose
  *                     new subentry reserves the relayer sponsors
- *  - `trustline`      a control-signed `changeTrust`, sponsored only for the
- *                     assets the app has configured in the Cavos dashboard
+ *  - `trustline`      a control-signed `changeTrust` whose new subentry reserve
+ *                     the relayer sponsors
  *  - `soroban`        a control-signed Soroban contract invocation wrapped in a
  *                     relayer fee-bump (the relayer pays the resource + inclusion
  *                     fees; the account's control key signs the auth entries) */
