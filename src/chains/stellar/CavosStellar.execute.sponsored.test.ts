@@ -4,6 +4,7 @@ import { StellarAdapter } from "./StellarAdapter";
 import { deriveStellarMasterKeypair, generateControlKey } from "./keys";
 import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
+import { KeypairControlKey } from "./WebCryptoControlKey";
 
 /**
  * Verifies the per-`execute()` `sponsored` flag on `CavosStellar`. The control
@@ -35,7 +36,7 @@ function makeWallet(opts: { relayer?: StellarRelayer; control: Keypair }): Cavos
     "stellar-testnet",
     adapter,
     device,
-    opts.control,
+    new KeypairControlKey(opts.control),
     new Uint8Array(32), // dek — unused on the execute() path
     opts.relayer,
   );
