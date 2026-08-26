@@ -165,7 +165,7 @@ The approved workload digest, Google Confidential Space/KMS, and image-upgrade
 policy remain in the trust model; Stellar classic has the broader TEE scope
 described above.
 
-## Quickstart — Starknet
+## Quickstart
 
 One call logs the user in and returns a ready, deployed, gas-sponsored smart
 account controlled by a silent device key. The user only sees the login.
@@ -174,25 +174,41 @@ account controlled by a silent device key. The user only sees the login.
 import { Cavos, StaticIdentity } from "@cavos/kit";
 
 const wallet = await Cavos.connect({
-  chain: "starknet",
-  network: "testnet",                 // "testnet" (sepolia) | "mainnet"
+  chain: "starknet",                  // "starknet" | "solana" | "stellar"
+  network: "testnet",                 // "testnet" | "mainnet"
   appSalt: "my-app",
-  // Identity from your login (use CavosAuth for hosted Google/Apple/email, or
-  // wrap your own userId with StaticIdentity)
   auth: new StaticIdentity({ userId: user.id, email: user.email }),
-  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,        // hosted registry + recovery
-  paymasterApiKey: process.env.NEXT_PUBLIC_CAVOS_PAYMASTER_API_KEY!, // app-scoped, client-visible
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
 console.log(wallet.address);          // deterministic; auto-deployed on first connect
 
-if (wallet.chain === "starknet" && wallet.status === "ready") {
-  await wallet.execute(calls);        // gasless; signed invisibly by the device key
+if (wallet.status === "ready") {
+  // Chain-specific execution — see chain quickstarts below
 }
 ```
 
 `wallet` is a discriminated union (`Cavos | CavosSolana | CavosStellar`); narrow on
 `wallet.chain` before calling `execute`, since its signature differs per chain.
+
+## Quickstart — Starknet
+
+```ts
+import { Cavos, StaticIdentity } from "@cavos/kit";
+
+const wallet = await Cavos.connect({
+  chain: "starknet",
+  network: "testnet",                 // "testnet" (sepolia) | "mainnet"
+  appSalt: "my-app",
+  auth: new StaticIdentity({ userId: user.id, email: user.email }),
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
+  paymasterApiKey: process.env.NEXT_PUBLIC_CAVOS_PAYMASTER_API_KEY!, // app-scoped, client-visible
+});
+
+if (wallet.chain === "starknet" && wallet.status === "ready") {
+  await wallet.execute(calls);        // gasless; signed invisibly by the device key
+}
+```
 
 ## Quickstart — Solana
 

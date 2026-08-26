@@ -65,6 +65,8 @@
   },
   "keywords": [
     "starknet",
+    "solana",
+    "stellar",
     "account-abstraction",
     "device-signer",
     "passkey",
