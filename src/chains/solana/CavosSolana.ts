@@ -189,9 +189,14 @@ export class CavosSolana {
     const deployed = (await connection.getAccountInfo(new PublicKey(address))) !== null;
 
     if (!deployed) {
-      // Deploy: register the first device signer via `initialize`. Anti-squatting
-      // is NOT enforced on-chain — it is the integrator's responsibility to keep
-      // `appSalt` secret and to deploy each account on the user's first login.
+      // Deploy: register the first device signer via `initialize`.
+      //
+      // ANTI-SQUATTING: The relayer validates the caller's identity token (JWT)
+      // before sponsoring initialization. This ensures only the authenticated user
+      // (not an attacker who knows userId + appSalt) can claim the deterministic
+      // address. Self-funded deploys (feePayer) bypass this protection and are
+      // strongly discouraged for production — they require the integrator to
+      // implement their own anti-squatting verification.
       //
       // Whoever pays must be the `initialize` payer/fee payer: the relayer (when
       // sponsoring) or the self-funded feePayer. buildInitialize returns the
@@ -199,12 +204,24 @@ export class CavosSolana {
       if (relayer) {
         const payer = await relayer.getFeePayer();
         const ixs = adapter.buildInitialize(addressSeed, payer.toBase58(), devicePubkey);
-        await relayer.send(ixs);
+        // Pass the identity token for anti-squatting verification: the relayer
+        // validates the token's subject matches the userId in the address derivation.
+        await relayer.send(ixs, { idToken: identity.idToken });
       } else if (opts.feePayer) {
+        // Self-funded path: BYPASSES anti-squatting protection. Use only in
+        // controlled environments where the integrator verifies identity themselves.
+        console.warn(
+          "[Cavos/solana] Self-funded deploy bypasses anti-squatting protection. " +
+            "For production, use appId-based relayer sponsorship to ensure only " +
+            "authenticated users can initialize their addresses.",
+        );
         const ixs = adapter.buildInitialize(addressSeed, opts.feePayer.publicKey.toBase58(), devicePubkey);
         await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [opts.feePayer]);
       } else {
-        throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize a new account");
+        throw new Error(
+          "kit/solana: a relayer (appId) is required to initialize a new account. " +
+            "The relayer enforces anti-squatting by verifying identity before sponsoring.",
+        );
       }
 
       // Record the deterministic address for backend bookkeeping (device-approval

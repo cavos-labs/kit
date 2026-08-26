@@ -175,8 +175,17 @@ export class CavosStellar {
     }
 
     // First sign-up on this identity: create the account.
+    //
+    // ANTI-SQUATTING: The relayer validates the caller's identity token (JWT)
+    // before sponsoring account creation. This ensures only the authenticated user
+    // (not an attacker who knows userId + appSalt) can claim the deterministic
+    // address. Self-funded creates (sourceKeypair) bypass this protection and are
+    // strongly discouraged for production.
     if (!relayer && !opts.sourceKeypair) {
-      throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required to create the account");
+      throw new Error(
+        "kit/stellar: a relayer (appId) is required to create the account. " +
+          "The relayer enforces anti-squatting by verifying identity before sponsoring.",
+      );
     }
     const { keypair: control, seed: controlSeed } = generateControlKey();
     const dek = generateDEK();
@@ -196,8 +205,17 @@ export class CavosStellar {
         envelope,
       });
       tx.sign(master);
-      await relayer.submit("create", tx.toXDR());
+      // Pass the identity token for anti-squatting verification: the relayer
+      // validates the token's subject matches the userId in the master keypair.
+      await relayer.submit("create", tx.toXDR(), { idToken: identity.idToken });
     } else {
+      // Self-funded path: BYPASSES anti-squatting protection. Use only in
+      // controlled environments where the integrator verifies identity themselves.
+      console.warn(
+        "[Cavos/stellar] Self-funded create bypasses anti-squatting protection. " +
+          "For production, use appId-based relayer sponsorship to ensure only " +
+          "authenticated users can create their addresses.",
+      );
       const funder = opts.sourceKeypair!;
       const tx = await adapter.buildCreateTx({
         funder: funder.publicKey(),

@@ -85,8 +85,13 @@ export class SolanaAdapter {
   /**
    * Deterministic account address: PDA of [ACCOUNT_SEED, addressSeed] — the
    * device pubkey is NOT part of the seeds, so the address is recomputable
-   * from (userId, appSalt) alone. Anti-squatting is the integrator's
-   * responsibility (keep `appSalt` secret; deploy on first login).
+   * from (userId, appSalt) alone.
+   *
+   * ANTI-SQUATTING: Since the address is deterministic and derivable by anyone
+   * who knows (userId, appSalt), the Cavos relayer enforces identity
+   * verification before sponsoring initialization. The relayer validates an
+   * identity token (JWT) to ensure only the authenticated user can claim their
+   * address. See `CavosSolana.connect` for the initialization flow.
    */
   computeAddress(addressSeed: Uint8Array): string {
     return this.pda(addressSeed).toBase58();
@@ -110,8 +115,11 @@ export class SolanaAdapter {
 
   /**
    * `initialize` instruction: creates the account PDA and registers the first
-   * device signer. No attestation is required — anti-squatting is NOT enforced
-   * on-chain.
+   * device signer.
+   *
+   * ANTI-SQUATTING: While the on-chain program does not enforce identity, the
+   * Cavos relayer validates an identity token before sponsoring initialization.
+   * This ensures only the authenticated user can initialize their address.
    */
   buildInitialize(
     addressSeed: Uint8Array,

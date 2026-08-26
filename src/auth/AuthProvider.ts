@@ -19,6 +19,17 @@ export interface Identity {
    */
   name?: string;
   provider?: "google" | "apple" | "email" | "otp" | string;
+  /**
+   * Raw identity token (JWT) from the authentication provider. Retained only in
+   * memory for anti-squatting verification: the Cavos relayer validates this token
+   * before sponsoring first-time account initialization, ensuring only the
+   * authenticated user (not an attacker who guessed userId + appSalt) can claim
+   * the deterministic address.
+   *
+   * Never persisted to localStorage. Re-authentication is required for each
+   * session that needs to initialize a new account.
+   */
+  idToken?: string;
 }
 
 /**

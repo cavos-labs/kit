@@ -23,10 +23,14 @@ export class StarknetAdapter implements ChainAdapter {
 
   /**
    * Deterministic address = f(addressSeed) ONLY. The device pubkey is NOT
-   * part of the derivation — anti-squatting is the integrator's responsibility
-   * (keep `appSalt` secret; deploy on first login). This makes the address
-   * recomputable by the user from (userId, appSalt) alone, even after losing
-   * every device.
+   * part of the derivation, so the address is recomputable by the user from
+   * (userId, appSalt) alone, even after losing every device.
+   *
+   * ANTI-SQUATTING: Since the address is deterministic and derivable by anyone
+   * who knows (userId, appSalt), the Cavos paymaster enforces identity
+   * verification before sponsoring deployment. The paymaster validates an
+   * identity token (JWT) to ensure only the authenticated user can claim their
+   * address. See `Cavos.connectStarknet` for the deployment flow.
    *
    * `initialSigner` in `ComputeAddressParams` is IGNORED on Starknet (kept in
    * the shared type for Solana/Stellar, which still include it).
@@ -73,7 +77,10 @@ export class StarknetAdapter implements ChainAdapter {
    * `initialize` call: registers the first device signer. Callable only while
    * the account has no signers (one-shot). In production this is bundled with
    * the UDC deploy in a single sponsored multicall — see `connectStarknet`.
-   * Anti-squatting is NOT enforced on-chain.
+   *
+   * ANTI-SQUATTING: While the on-chain contract does not enforce identity, the
+   * Cavos paymaster validates an identity token before sponsoring deployment.
+   * This ensures only the authenticated user can initialize their address.
    */
   buildInitialize(accountAddress: string, devicePubkey: DevicePublicKey): ChainCall {
     return {

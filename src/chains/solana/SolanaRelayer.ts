@@ -18,6 +18,17 @@ export interface SolanaRelayerOptions {
   connection: Connection;
 }
 
+/** Options for relayer submission that may include anti-squatting verification. */
+export interface SolanaRelayerSendOptions {
+  /**
+   * Identity token (JWT) for anti-squatting verification. Required for first-time
+   * account initialization to prove the caller owns the userId that the address
+   * is derived from. The relayer validates the token's subject matches the
+   * transaction's address derivation before sponsoring.
+   */
+  idToken?: string;
+}
+
 /**
  * Client for the Cavos Solana sponsoring relayer. Lets the SDK submit
  * device-account transactions WITHOUT the integrator holding a fee-payer
@@ -25,6 +36,11 @@ export interface SolanaRelayerOptions {
  * only pays — the device signature inside the instructions (verified by the
  * secp256r1 precompile) is what authorizes the action, and it does not bind the
  * fee payer, so sponsorship needs no re-signing.
+ *
+ * Anti-squatting: for first-time account initialization, the relayer validates
+ * an identity token (JWT) to ensure the caller owns the userId that the address
+ * is derived from. This prevents attackers who know (userId, appSalt) from
+ * squatting deterministic addresses before the legitimate user.
  */
 export class SolanaRelayer {
   private feePayer?: PublicKey;
@@ -44,8 +60,13 @@ export class SolanaRelayer {
   /**
    * Build a tx with the relayer as fee payer, serialize it unsigned, and POST it
    * to the relayer to co-sign + submit. Returns the confirmed signature.
+   *
+   * For first-time account initialization (`initialize` instruction), pass
+   * `opts.idToken` to enable anti-squatting verification. The relayer validates
+   * that the token's subject matches the userId in the address derivation before
+   * sponsoring, preventing attackers from claiming addresses they don't own.
    */
-  async send(instructions: TransactionInstruction[]): Promise<string> {
+  async send(instructions: TransactionInstruction[], opts?: SolanaRelayerSendOptions): Promise<string> {
     const feePayer = await this.getFeePayer();
     const { blockhash } = await this.opts.connection.getLatestBlockhash("confirmed");
     const tx = new Transaction();
@@ -65,6 +86,9 @@ export class SolanaRelayer {
         ...(this.opts.environment ? { environment: this.opts.environment } : {}),
         network: this.opts.network,
         transaction: serialized,
+        // Anti-squatting: the relayer verifies the identity token matches the
+        // userId in the address derivation before sponsoring initialization.
+        ...(opts?.idToken ? { id_token: opts.idToken } : {}),
       }),
     });
     if (!res.ok) {

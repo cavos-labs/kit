@@ -211,6 +211,11 @@ export class CavosAuth implements AuthProvider {
    * Build an `Identity` from whatever the backend returned. The Cavos backend
    * wraps the user id in a JWT (its `sub` claim); for the device model we only
    * need that stable id — the signature is never checked on-chain.
+   *
+   * The raw token is preserved in `idToken` for anti-squatting verification:
+   * when initializing a new account, the relayer validates that the token's
+   * subject matches the derived address's userId, preventing attackers from
+   * squatting addresses they don't own.
    */
   private async identityFromAuthData(
     authData: string,
@@ -235,6 +240,9 @@ export class CavosAuth implements AuthProvider {
       // Cavos-signed Firebase JWT (email/OTP/magic-link) and Apple's token.
       name: claims.name,
       provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
+      // Preserve the raw token for anti-squatting: the relayer verifies this
+      // before sponsoring first-time account initialization.
+      idToken: token,
     });
   }
 
@@ -259,7 +267,11 @@ export class CavosAuth implements AuthProvider {
   private remember(id: Identity): Identity {
     this.last = id;
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+      // Persist only the public profile data — the idToken is kept in memory only
+      // and must not be stored to localStorage (it's for anti-squatting verification
+      // during this session only, not for restoration across sessions).
+      const { idToken: _omit, ...publicProfile } = id;
+      window.localStorage.setItem(this.identityStorageKey, JSON.stringify(publicProfile));
     }
     return id;
   }

@@ -10,6 +10,17 @@ export interface StellarRelayerOptions {
   network: StellarNetwork;
 }
 
+/** Options for relayer submission that may include anti-squatting verification. */
+export interface StellarRelayerSubmitOptions {
+  /**
+   * Identity token (JWT) for anti-squatting verification. Required for account
+   * creation (`kind: "create"`) to prove the caller owns the userId that the
+   * master keypair is derived from. The relayer validates the token's subject
+   * matches the transaction's address derivation before sponsoring.
+   */
+  idToken?: string;
+}
+
 /** What the transaction is, so the backend applies the right validation gate.
  *  - `create`         sponsored account creation (relayer = source + sponsor)
  *  - `fee-bump`       a control-signed payment wrapped in a relayer fee-bump
@@ -38,6 +49,11 @@ export type StellarRelayKind =
  *     outer envelope only — it pays the fee, never moves the user's funds.
  *
  * Either way the relayer is a fee payer / reserve sponsor, never a custodian.
+ *
+ * Anti-squatting: for account creation, the relayer validates an identity token
+ * (JWT) to ensure the caller owns the userId that the master keypair is derived
+ * from. This prevents attackers who know (userId, appSalt) from squatting
+ * deterministic addresses before the legitimate user.
  */
 export class StellarRelayer {
   private source?: string;
@@ -74,9 +90,16 @@ export class StellarRelayer {
     return { address: fee_payer, ...(sequence ? { sequence } : {}) };
   }
 
-  /** POST a (partially) signed transaction XDR for the relayer to co-sign + submit.
-   *  `kind` selects the validation gate. Returns the confirmed transaction hash. */
-  async submit(kind: StellarRelayKind, transactionXdr: string): Promise<string> {
+  /**
+   * POST a (partially) signed transaction XDR for the relayer to co-sign + submit.
+   * `kind` selects the validation gate. Returns the confirmed transaction hash.
+   *
+   * For account creation (`kind: "create"`), pass `opts.idToken` to enable
+   * anti-squatting verification. The relayer validates that the token's subject
+   * matches the userId in the master keypair derivation before sponsoring,
+   * preventing attackers from claiming addresses they don't own.
+   */
+  async submit(kind: StellarRelayKind, transactionXdr: string, opts?: StellarRelayerSubmitOptions): Promise<string> {
     const res = await fetch(`${this.opts.baseUrl}/api/stellar/relay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -86,6 +109,9 @@ export class StellarRelayer {
         network: this.opts.network,
         kind,
         transaction: transactionXdr,
+        // Anti-squatting: the relayer verifies the identity token matches the
+        // userId in the master keypair derivation before sponsoring creation.
+        ...(opts?.idToken ? { id_token: opts.idToken } : {}),
       }),
     });
     if (!res.ok) {

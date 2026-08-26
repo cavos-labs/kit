@@ -344,9 +344,13 @@ export class Cavos {
     if (!alreadyDeployed) {
       // Deploy + initialize atomically. The constructor takes only the seed
       // (so the address is seed-bound); `initialize` registers the first device
-      // signer. Anti-squatting is NOT enforced on-chain — it is the integrator's
-      // responsibility to keep `appSalt` secret and to deploy each account on
-      // the user's first login.
+      // signer.
+      //
+      // ANTI-SQUATTING: The Cavos paymaster validates the caller's identity token
+      // (JWT) before sponsoring deployment. This ensures only the authenticated
+      // user (not an attacker who knows userId + appSalt) can claim the
+      // deterministic address. The identity token is passed via the
+      // `x-identity-token` header to the paymaster.
       const deploymentData = {
         address,
         class_hash: classHash,
@@ -358,7 +362,28 @@ export class Cavos {
       // The paymaster submits deploy + initialize atomically; if initialize
       // fails, the deploy reverts too.
       const initCall = adapter.buildInitialize(address, devicePubkey);
-      const deployRes = await account.executePaymasterTransaction([initCall], {
+
+      // For anti-squatting, create a paymaster instance with the identity token.
+      // The paymaster backend validates the token's subject matches the userId
+      // in the addressSeed derivation before sponsoring the deploy.
+      const deployPaymaster = new PaymasterRpc({
+        nodeUrl: paymasterUrl,
+        headers: {
+          "x-paymaster-api-key": opts.paymasterApiKey,
+          // Anti-squatting: the paymaster verifies the identity token matches
+          // the userId in the address derivation before sponsoring deployment.
+          ...(identity.idToken ? { "x-identity-token": identity.idToken } : {}),
+        },
+      });
+      const deployAccount = new Account({
+        provider,
+        address,
+        signer: new StarknetDeviceSigner(signer),
+        paymaster: deployPaymaster,
+        cairoVersion: "1",
+      });
+
+      const deployRes = await deployAccount.executePaymasterTransaction([initCall], {
         feeMode: { mode: "sponsored" },
         deploymentData,
       });
