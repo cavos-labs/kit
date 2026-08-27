@@ -200,7 +200,7 @@ Configure multiple chains and a default chain. Connect derives addresses for all
 configured chains but never deploys on connect — deployment is always lazy.
 
 ```ts
-const wallet = await Cavos.connect({
+const session = await Cavos.connect({
   chains: ["solana", "stellar"],      // chains to configure
   defaultChain: "stellar",            // must be in chains
   network: "testnet",
@@ -209,12 +209,42 @@ const wallet = await Cavos.connect({
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
-// wallet.chain is "stellar" (the default)
-// wallet.status may be "undeployed" — first execute creates the account
+// session IS the default-chain wallet (back-compat)
+console.log(session.chain);           // "stellar" (the default)
+console.log(session.address);         // the stellar address
+console.log(session.status);          // "undeployed" | "ready" | "needs-device-approval"
+
+// Access other configured chains without reconnecting
+const solanaWallet = session.wallet("solana");
+console.log(session.chainStatus("solana")); // status of solana wallet
+console.log(session.chainAddress("solana")); // solana address
+
+// Execute on the default chain
+if (session.status === "ready" || session.status === "undeployed") {
+  await session.execute(10_000_000n, dest); // stellar payment (deploys if needed)
+}
+
+// Execute on another chain
+if (solanaWallet.status === "ready" || solanaWallet.status === "undeployed") {
+  await solanaWallet.execute(1_000_000n, recipient); // solana payment
+}
 ```
 
 **Note:** The `chains` config ensures only the specified chains are ever derived,
 deployed, or enrolled. A chain not in the list is never touched.
+
+#### React: switching chains without re-auth
+
+In `CavosProvider`, use `setChain()` to switch the active chain without
+re-authenticating or re-connecting:
+
+```tsx
+const { chain, setChain, wallet, session, configuredChains } = useCavos();
+
+// Switch to Solana
+setChain("solana");
+// wallet is now the Solana wallet; no login prompt, no new deploy
+```
 
 ### Enroll once, deploy later
 

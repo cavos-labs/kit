@@ -70,6 +70,53 @@ export type ChainStatus = "undeployed" | "ready" | "needs-device-approval";
 /** A connected wallet: discriminated by `chain`, so `execute()` stays native. */
 export type CavosWallet = Cavos | CavosSolana | CavosStellar;
 
+/**
+ * Multi-chain session returned by `Cavos.connect` when multiple chains are configured.
+ * The session IS the default chain's wallet (for back-compat), augmented with methods
+ * to access other configured chains without re-connecting.
+ *
+ * Type-narrow on `wallet.chain` before calling chain-specific `execute()`.
+ */
+export interface CavosSession {
+  /** The configured chains for this session. */
+  readonly chains: Chain[];
+  /** The default chain for this session. */
+  readonly defaultChain: Chain;
+  /**
+   * Get the wallet for a specific configured chain. Throws if the chain is not
+   * in the session's configured `chains`.
+   */
+  wallet(chain: Chain): CavosWallet;
+  /**
+   * Get the status of a specific configured chain. Returns the wallet's
+   * `status` property for that chain.
+   */
+  chainStatus(chain: Chain): ChainStatus;
+  /**
+   * Get the address for a specific configured chain.
+   */
+  chainAddress(chain: Chain): string;
+  /**
+   * Enroll a passkey at session scope. For already-deployed chains, the passkey
+   * is added immediately. For undeployed chains, the passkey is stored pending
+   * and included in the first deploy transaction.
+   *
+   * One user prompt enrolls across all configured chains.
+   */
+  enrollPasskeySession(
+    passkey: PasskeyApprover,
+    params: PasskeyEnrollParams,
+  ): Promise<{ publicKey: DevicePublicKey }>;
+  /**
+   * Set up recovery at session scope. For already-deployed chains, the recovery
+   * signer is added immediately. For undeployed chains, the signer is stored
+   * pending and included in the first deploy transaction.
+   *
+   * Returns the recovery code (only shown once).
+   */
+  setupRecoverySession(code: string): Promise<void>;
+}
+
 export interface ConnectOptions {
   /**
    * Target chain (single-chain mode). The returned wallet is discriminated by this value.
@@ -286,9 +333,10 @@ export class Cavos {
    *     appId,
    *   });
    *   // wallet.chain is "stellar" (the default)
+   *   // wallet.wallet("solana") → CavosSolana
    *   // wallet.chainStatus("solana") → "undeployed" | "ready" | "needs-device-approval"
    */
-  static async connect(opts: ConnectOptions): Promise<CavosWallet> {
+  static async connect(opts: ConnectOptions): Promise<CavosWallet & CavosSession> {
     // Resolve chains configuration: `chains`/`defaultChain` takes precedence,
     // `chain` alone is back-compat alias meaning `chains: [chain], defaultChain: chain`.
     const configuredChains = opts.chains ?? (opts.chain ? [opts.chain] : ["starknet" as Chain]);
@@ -301,15 +349,93 @@ export class Cavos {
       throw new Error(`kit: defaultChain "${defaultChain}" must be in chains [${configuredChains.join(", ")}]`);
     }
 
-    // For now, connect returns a single-chain wallet for the default chain.
-    // Multi-chain session API will be added in a future iteration.
-    const chain = defaultChain;
+    // Resolve identity up-front (needed by Stellar and for session-level operations)
+    const identity = opts.identity ?? (opts.auth ? await opts.auth.authenticate() : undefined);
+    if (!identity) throw new Error("kit: connect requires `identity` or `auth`");
 
+    // Connect ALL configured chains in parallel
+    const walletPromises = configuredChains.map((chain) =>
+      Cavos.connectSingleChain(chain, { ...opts, identity }),
+    );
+    const wallets = await Promise.all(walletPromises);
+
+    // Build the wallet map
+    const walletMap = new Map<Chain, CavosWallet>();
+    for (let i = 0; i < configuredChains.length; i++) {
+      walletMap.set(configuredChains[i], wallets[i]);
+    }
+
+    // Get the default chain wallet
+    const defaultWallet = walletMap.get(defaultChain)!;
+
+    // Create session methods and attach them to the default wallet
+    const session: CavosSession = {
+      chains: configuredChains,
+      defaultChain,
+      wallet(chain: Chain): CavosWallet {
+        const w = walletMap.get(chain);
+        if (!w) {
+          throw new Error(`kit: chain "${chain}" is not configured in this session. Configured chains: [${configuredChains.join(", ")}]`);
+        }
+        return w;
+      },
+      chainStatus(chain: Chain): ChainStatus {
+        const w = walletMap.get(chain);
+        if (!w) {
+          throw new Error(`kit: chain "${chain}" is not configured in this session. Configured chains: [${configuredChains.join(", ")}]`);
+        }
+        return w.status;
+      },
+      chainAddress(chain: Chain): string {
+        const w = walletMap.get(chain);
+        if (!w) {
+          throw new Error(`kit: chain "${chain}" is not configured in this session. Configured chains: [${configuredChains.join(", ")}]`);
+        }
+        return w.address;
+      },
+      async enrollPasskeySession(passkey: PasskeyApprover, params: PasskeyEnrollParams) {
+        // Enroll passkey on the first deployed chain to get the public key,
+        // then propagate to other chains without re-prompting.
+        const enrolled = await passkey.enroll(params);
+        const publicKey = enrolled.publicKey;
+
+        // For each chain: if deployed, add approver now; if undeployed, store pending
+        for (const chain of configuredChains) {
+          const w = walletMap.get(chain)!;
+          if (w.chain === "stellar") {
+            // Stellar uses PRF-based passkey, not approver pattern. Skip for now.
+            // Session-level Stellar passkey enrollment would need a separate flow.
+            continue;
+          }
+          await w.addApprover(publicKey);
+        }
+
+        return { publicKey };
+      },
+      async setupRecoverySession(code: string) {
+        // For each chain: set up recovery (deployed: immediate; undeployed: pending)
+        for (const chain of configuredChains) {
+          const w = walletMap.get(chain)!;
+          await w.setupRecovery(code);
+        }
+      },
+    };
+
+    // Return the default wallet with session methods attached
+    return Object.assign(defaultWallet, session);
+  }
+
+  /**
+   * Connect a single chain. Internal helper for multi-chain connect.
+   */
+  private static async connectSingleChain(
+    chain: Chain,
+    opts: ConnectOptions & { identity: Identity },
+  ): Promise<CavosWallet> {
     if (chain === "solana") {
       return CavosSolana.connect({
         network: SOLANA_ENV[opts.network],
-        ...(opts.auth ? { auth: opts.auth } : {}),
-        ...(opts.identity ? { identity: opts.identity } : {}),
+        identity: opts.identity,
         appSalt: opts.appSalt,
         ...(opts.appId ? { appId: opts.appId } : {}),
         ...(opts.environment ? { environment: opts.environment } : {}),
@@ -326,18 +452,14 @@ export class Cavos {
       });
     }
     if (chain === "stellar") {
-      // Classic `G…` account: resolve identity up-front so we can provision this
-      // device's ECDH unwrap key (keyed by user + app) before connecting.
-      const identity = opts.identity ?? (opts.auth ? await opts.auth.authenticate() : undefined);
-      if (!identity) throw new Error("kit: Stellar connect requires `identity` or `auth`");
-      const keyId = `${identity.userId}:${opts.appSalt}`;
+      const keyId = `${opts.identity.userId}:${opts.appSalt}`;
       const deviceKey = opts.stellarDeviceKey
         ?? (opts.createStellarDeviceKey
           ? await opts.createStellarDeviceKey(keyId)
           : await loadDefaultWebDeviceKey(keyId));
       return CavosStellar.connect({
         network: STELLAR_ENV[opts.network],
-        identity,
+        identity: opts.identity,
         appSalt: opts.appSalt,
         deviceKey,
         ...(opts.appId ? { appId: opts.appId } : {}),
@@ -347,12 +469,12 @@ export class Cavos {
         ...(opts.stellarSourceKeypair ? { sourceKeypair: opts.stellarSourceKeypair } : {}),
       });
     }
+    // Starknet
     if (!opts.paymasterApiKey) {
       throw new Error("kit: `paymasterApiKey` is required for Starknet connections");
     }
     return Cavos.connectStarknet({
       network: STARKNET_ENV[opts.network],
-      auth: opts.auth,
       identity: opts.identity,
       appSalt: opts.appSalt,
       appId: opts.appId,

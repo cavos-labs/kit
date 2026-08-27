@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from 'react';
 import { Cavos } from '../Cavos';
-import type { Chain, NetworkEnv, CavosWallet } from '../Cavos';
+import type { Chain, NetworkEnv, CavosWallet, CavosSession } from '../Cavos';
 import { CavosSolana } from '../chains/solana/CavosSolana';
 import type { SolanaNetwork } from '../chains/solana/constants';
 import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
@@ -186,14 +186,26 @@ export interface CavosContextValue {
   closeModal: () => void;
   isAuthenticated: boolean;
   user: UserInfo | null;
-  /** The active chain ('starknet' | 'solana' | 'stellar'). */
+  /** The currently selected chain ('starknet' | 'solana' | 'stellar'). */
   chain: Chain;
+  /** All configured chains for this session. */
+  configuredChains: Chain[];
   /**
-   * The connected wallet, discriminated by `wallet.chain`. Narrow on
-   * `wallet.chain` before chain-native calls (e.g. Solana `wallet.execute(amount,
-   * dest)`). Null until connected.
+   * Switch the selected chain. Must be one of the configured chains. Does not
+   * re-deploy or re-authenticate — just changes which wallet is active.
+   */
+  setChain: (chain: Chain) => void;
+  /**
+   * The connected wallet for the selected chain, discriminated by `wallet.chain`.
+   * Narrow on `wallet.chain` before chain-native calls (e.g. Solana
+   * `wallet.execute(amount, dest)`). Null until connected.
    */
   wallet: CavosWallet | null;
+  /**
+   * The session containing wallets for all configured chains. Use this to access
+   * wallets for chains other than the selected one: `session.wallet("solana")`.
+   */
+  session: (CavosWallet & CavosSession) | null;
   address: string | null;
   walletStatus: WalletStatus;
   isLoading: boolean;
@@ -398,9 +410,23 @@ export function CavosProvider({
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );
-  const [wallet, setWallet] = useState<CavosWallet | null>(null);
+  const [session, setSession] = useState<(CavosWallet & CavosSession) | null>(null);
+  const [selectedChain, setSelectedChain] = useState<Chain>(
+    config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet',
+  );
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [walletStatus, setWalletStatus] = useState<WalletStatus>(INITIAL_STATUS);
+
+  // Derive the active wallet from the session and selected chain
+  const wallet = useMemo<CavosWallet | null>(() => {
+    if (!session) return null;
+    try {
+      return session.wallet(selectedChain);
+    } catch {
+      // If the selected chain is not in the session, fall back to the default
+      return session;
+    }
+  }, [session, selectedChain]);
   // Keep children behind the loading state until we have checked for a
   // persisted identity and silently reconnected this browser's device signer.
   const [isLoading, setIsLoading] = useState(true);
@@ -564,10 +590,11 @@ export function CavosProvider({
     });
   }, [identity, wallet]);
 
-  // Connect the configured chain for an identity (deploys if needed), then
-  // publish its status. `silent` reconnects keep the current screen instead of
-  // resetting to the deploying state (used right after a passkey approval).
-  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet> => {
+  // Connect the configured chains for an identity (deploys if needed), then
+  // publish the status for the default chain. `silent` reconnects keep the
+  // current screen instead of resetting to the deploying state (used right
+  // after a passkey approval).
+  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet & CavosSession> => {
     const cfg = configRef.current;
     if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
 
@@ -577,7 +604,7 @@ export function CavosProvider({
       ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
       : { chain: cfg.chain ?? 'starknet' as Chain };
 
-    const w = await Cavos.connect({
+    const s = await Cavos.connect({
       ...connectOpts,
       network: cfg.network,
       identity: id,
@@ -591,8 +618,12 @@ export function CavosProvider({
         ? { legacyDeviceApproval: false }
         : {}),
     });
-    setWallet(w);
+    setSession(s);
+    setSelectedChain(s.defaultChain);
     setIdentity(id);
+
+    // Get the default wallet for status updates
+    const w = s.wallet(s.defaultChain);
 
     // Starknet and Solana both support the email device-approval flow (both carry
     // a pendingRequestId when a returning-new-device request was filed). Stellar
@@ -618,13 +649,43 @@ export function CavosProvider({
       recovery: { protected: false, methods: [] },
     });
     modal?.onSuccess?.(w.address);
-    return w;
+    return s;
   }, [modal]);
 
   const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
     const id = await auth.handleCallback(authData, redirectUri);
     await connect(id);
   }, [auth, connect]);
+
+  // Switch the selected chain without re-authenticating
+  const setChain = useCallback(async (chain: Chain) => {
+    if (!session) {
+      throw new Error('kit/react: cannot setChain before connecting');
+    }
+    if (!session.chains.includes(chain)) {
+      throw new Error(`kit/react: chain "${chain}" is not configured in this session. Configured chains: [${session.chains.join(', ')}]`);
+    }
+    setSelectedChain(chain);
+
+    // Update wallet status for the new chain
+    const w = session.wallet(chain);
+    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+    let hasPasskey = false;
+    if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
+      try { hasPasskey = await w.hasPasskey(); } catch { /* leave false */ }
+    }
+
+    setWalletStatus((status) => ({
+      ...status,
+      isReady: w.status === 'ready',
+      isUndeployed: w.status === 'undeployed',
+      needsDeviceApproval: w.status === 'needs-device-approval',
+      awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
+      pendingRequestId,
+      hasPasskey,
+      isNewAccount: w.isNewAccount,
+    }));
+  }, [session]);
 
   // On mount: exchange the one-time OAuth code after removing it from the
   // address bar immediately. Legacy auth_data is accepted only for callbacks
@@ -971,7 +1032,7 @@ export function CavosProvider({
     if (!externalIdentity) {
       // Signed out (or still loading). Drop wallet state so a previous user's
       // address can never be read by whoever comes next.
-      setWallet(null);
+      setSession(null);
       setIdentity(null);
       setWalletStatus(INITIAL_STATUS);
       setAuthError(null);
@@ -982,7 +1043,7 @@ export function CavosProvider({
     setIsLoading(true);
     // Clear the outgoing user's wallet before connecting the incoming one, so
     // a slow connect cannot briefly expose the wrong account.
-    setWallet(null);
+    setSession(null);
     setWalletStatus(INITIAL_STATUS);
     (async () => {
       try {
@@ -1194,10 +1255,9 @@ export function CavosProvider({
     setAuthError(null);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     try {
-      const chain = cfg.chain ?? 'starknet';
-      let w: CavosWallet;
+      const chain = cfg.chain ?? cfg.defaultChain ?? cfg.chains?.[0] ?? 'starknet';
       if (chain === 'solana') {
-        w = await CavosSolana.recover({
+        await CavosSolana.recover({
           code,
           identity,
           network: (cfg.network === 'mainnet' ? 'solana-mainnet' : 'solana-devnet') as SolanaNetwork,
@@ -1221,9 +1281,8 @@ export function CavosProvider({
         if (sw.chain === 'stellar' && sw.status === 'needs-device-approval') {
           await sw.approveThisDeviceWithRecovery(code);
         }
-        w = sw;
       } else {
-        w = await Cavos.recover({
+        await Cavos.recover({
           code,
           identity,
           network: cfg.network,
@@ -1234,16 +1293,16 @@ export function CavosProvider({
           ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         });
       }
-      setWallet(w);
-      setWalletStatus({ ...INITIAL_STATUS, isReady: true });
-      modal?.onSuccess?.(w.address);
+      // After recovery, reconnect to get a proper session with all chains
+      await connect(identity);
+      modal?.onSuccess?.(wallet?.address ?? '');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Recovery failed. Check your code and try again.';
       setAuthError(msg);
       setWalletStatus(INITIAL_STATUS);
       throw e;
     }
-  }, [identity, modal]);
+  }, [identity, modal, connect, wallet]);
 
   // Poll the pending device-addition request while awaiting the owner's approval
   // (Starknet email flow). Once approved, reconnect to flip to "ready".
@@ -1286,7 +1345,7 @@ export function CavosProvider({
 
   const logout = useCallback(() => {
     auth.clearStoredIdentity();
-    setWallet(null);
+    setSession(null);
     setIdentity(null);
     setWalletStatus(INITIAL_STATUS);
     setAuthError(null);
@@ -1302,12 +1361,15 @@ export function CavosProvider({
   const value: CavosContextValue = {
     openModal,
     closeModal,
-    isAuthenticated: !!wallet,
+    isAuthenticated: !!session,
     user: identity
       ? { userId: identity.userId, email: identity.email, name: identity.name, provider: identity.provider }
       : null,
-    chain: config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet',
+    chain: selectedChain,
+    configuredChains: session?.chains ?? [config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet'],
+    setChain,
     wallet,
+    session,
     address: wallet?.address ?? null,
     walletStatus,
     isLoading,
