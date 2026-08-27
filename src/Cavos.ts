@@ -59,12 +59,37 @@ const STELLAR_ENV: Record<NetworkEnv, StellarNetwork> = {
   testnet: "stellar-testnet",
 };
 
+/**
+ * Chain status indicates whether an account is deployed, ready, or needs approval.
+ * - `undeployed`: Address derived but no on-chain account exists yet.
+ * - `ready`: Account deployed and this device is an authorized signer.
+ * - `needs-device-approval`: Account deployed but this device is not yet authorized.
+ */
+export type ChainStatus = "undeployed" | "ready" | "needs-device-approval";
+
 /** A connected wallet: discriminated by `chain`, so `execute()` stays native. */
 export type CavosWallet = Cavos | CavosSolana | CavosStellar;
 
 export interface ConnectOptions {
-  /** Target chain. The returned wallet is discriminated by this same value. */
-  chain: Chain;
+  /**
+   * Target chain (single-chain mode). The returned wallet is discriminated by this value.
+   * @deprecated Use `chains` and `defaultChain` for multi-chain sessions.
+   * When `chains` is provided, this is ignored. If only `chain` is provided,
+   * it's treated as `chains: [chain], defaultChain: chain` but connect still
+   * does NOT deploy on connect (lazy deploy on first execute).
+   */
+  chain?: Chain;
+  /**
+   * Chains to configure for this session. Connect derives addresses for all
+   * configured chains but NEVER deploys on connect. Deployment happens lazily
+   * on the first `execute` call for each chain.
+   */
+  chains?: Chain[];
+  /**
+   * Default chain for the session. Must be in `chains`. When using the
+   * single-chain `chain` option, `defaultChain` defaults to that chain.
+   */
+  defaultChain?: Chain;
   /** Environment. Resolved to sepolia/devnet (testnet) or mainnet per chain. */
   network: NetworkEnv;
   /** Authenticated user (pass `identity` directly, or an `auth` provider). */
@@ -148,8 +173,13 @@ interface StarknetConnectOptions {
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
 }
 
-/** Whether this device can already operate the wallet, or needs to be added. */
-export type ConnectStatus = "ready" | "needs-device-approval";
+/**
+ * Whether this device can already operate the wallet, or needs to be added.
+ * - `undeployed`: Address derived but no on-chain account exists yet. First execute will deploy.
+ * - `ready`: Account deployed and this device is an authorized signer.
+ * - `needs-device-approval`: Account deployed but this device is not yet authorized.
+ */
+export type ConnectStatus = "undeployed" | "ready" | "needs-device-approval";
 
 /** Options for recovering an account after losing every device signer. */
 export interface RecoveryOptions {
@@ -180,11 +210,15 @@ export interface RecoveryOptions {
 }
 
 /**
- * High-level Cavos wallet. One call logs the user in and returns a ready, gas-
- * sponsored smart account controlled by a silent device key.
+ * High-level Cavos wallet. One call logs the user in and returns a wallet handle
+ * controlled by a silent device key.
+ *
+ * **Lazy deploy**: Connect NEVER deploys. The first `execute` call on an
+ * undeployed account triggers deployment + the user operation atomically.
  *
  *   const cavos = await Cavos.connect({ network, identity, appSalt, registry, paymasterApiKey });
- *   if (cavos.status === "ready") await cavos.execute(calls);
+ *   // cavos.status may be "undeployed" — first execute will deploy
+ *   await cavos.execute(calls); // deploys + runs calls atomically if undeployed
  *
  * The account address is `f(identity, appSalt)` and is resolved from chain state,
  * never from the hosted registry. A new device derives the same address and is
@@ -199,29 +233,79 @@ export class Cavos {
    * sign-up), so the UI can offer a one-time "secure your account" step. */
   isNewAccount = false;
 
+  /** Track whether deployment happened (for lazy deploy). */
+  private _isDeployed: boolean;
+  /** Pending passkey enrollment to include in first deploy. */
+  private _pendingApprover: DevicePublicKey | null = null;
+  /** Pending recovery signer to include in first deploy. */
+  private _pendingRecoverySigner: DevicePublicKey | null = null;
+
   private constructor(
     readonly identity: Identity,
     readonly address: string,
-    readonly status: ConnectStatus,
+    private readonly addressSeed: bigint,
+    private readonly classHash: string,
+    private statusValue: ConnectStatus,
     readonly account: Account,
     private readonly adapter: StarknetAdapter,
     private readonly devicePubkey: DevicePublicKey,
     /** Paymaster URL + API key, for the sponsored passkey-approval path. */
     private readonly paymaster?: { url: string; apiKey?: string },
-  ) {}
+    private readonly provider?: RpcProvider,
+    private readonly registry?: WalletRegistry,
+  ) {
+    this._isDeployed = statusValue !== "undeployed";
+  }
+
+  /** Current status of this wallet. May change from "undeployed" to "ready" after first execute. */
+  get status(): ConnectStatus {
+    return this.statusValue;
+  }
 
   /**
-   * Unified entry point. Pick a `chain` and an `network` environment; the kit
-   * resolves the concrete network (sepolia/devnet for testnet, mainnet for
-   * mainnet) and returns a chain-native wallet. The result is a discriminated
-   * union (`wallet.chain`), so `execute()` keeps each chain's native signature:
+   * Unified entry point. Pick a `chain` (or `chains` + `defaultChain`) and a
+   * `network` environment; the kit resolves the concrete network and returns
+   * a chain-native wallet. The result is a discriminated union (`wallet.chain`),
+   * so `execute()` keeps each chain's native signature.
+   *
+   * **Lazy deploy**: Connect NEVER deploys on connect. The first `execute` call
+   * on an undeployed chain triggers deployment + the user operation atomically.
    *
    *   const wallet = await Cavos.connect({ chain: "solana", network: "testnet", identity, appSalt, appId });
-   *   if (wallet.chain === "starknet") await wallet.execute(calls);
+   *   if (wallet.chain === "starknet") await wallet.execute(calls); // deploys here if needed
    *   else                              await wallet.execute(amount, dest);
+   *
+   * **Multi-chain** (new):
+   *
+   *   const wallet = await Cavos.connect({
+   *     chains: ["solana", "stellar"],
+   *     defaultChain: "stellar",
+   *     network: "testnet",
+   *     identity,
+   *     appSalt,
+   *     appId,
+   *   });
+   *   // wallet.chain is "stellar" (the default)
+   *   // wallet.chainStatus("solana") → "undeployed" | "ready" | "needs-device-approval"
    */
   static async connect(opts: ConnectOptions): Promise<CavosWallet> {
-    if (opts.chain === "solana") {
+    // Resolve chains configuration: `chains`/`defaultChain` takes precedence,
+    // `chain` alone is back-compat alias meaning `chains: [chain], defaultChain: chain`.
+    const configuredChains = opts.chains ?? (opts.chain ? [opts.chain] : ["starknet" as Chain]);
+    const defaultChain = opts.defaultChain ?? configuredChains[0];
+
+    if (configuredChains.length === 0) {
+      throw new Error("kit: at least one chain must be configured");
+    }
+    if (!configuredChains.includes(defaultChain)) {
+      throw new Error(`kit: defaultChain "${defaultChain}" must be in chains [${configuredChains.join(", ")}]`);
+    }
+
+    // For now, connect returns a single-chain wallet for the default chain.
+    // Multi-chain session API will be added in a future iteration.
+    const chain = defaultChain;
+
+    if (chain === "solana") {
       return CavosSolana.connect({
         network: SOLANA_ENV[opts.network],
         ...(opts.auth ? { auth: opts.auth } : {}),
@@ -241,7 +325,7 @@ export class Cavos {
           : {}),
       });
     }
-    if (opts.chain === "stellar") {
+    if (chain === "stellar") {
       // Classic `G…` account: resolve identity up-front so we can provision this
       // device's ECDH unwrap key (keyed by user + app) before connecting.
       const identity = opts.identity ?? (opts.auth ? await opts.auth.authenticate() : undefined);
@@ -331,60 +415,33 @@ export class Cavos {
         : defaultRegistry);
     const recovery =
       opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null);
+
     // Compute the deterministic address = f(addressSeed) ONLY. The device pubkey
     // no longer enters the derivation, so the address is recomputable from
-    // (userId, appSalt) alone — recovery is self-custodial. The address may
-    // already be deployed on-chain (same device reconnecting, or a re-run after
-    // a deploy that succeeded before a timeout). Ask the chain before
-    // deploying: re-deploying an existing account reverts.
+    // (userId, appSalt) alone — recovery is self-custodial.
     const address = adapter.computeAddress({ addressSeed });
     const account = makeAccount(address);
+
+    // LAZY DEPLOY: Check deployment status but DO NOT deploy here.
+    // Deployment happens on first execute() call.
     const alreadyDeployed = await isDeployed(provider, address);
 
-    if (!alreadyDeployed) {
-      // Deploy + initialize atomically. The constructor takes only the seed
-      // (so the address is seed-bound); `initialize` registers the first device
-      // signer. Anti-squatting is NOT enforced on-chain — it is the integrator's
-      // responsibility to keep `appSalt` secret and to deploy each account on
-      // the user's first login.
-      const deploymentData = {
-        address,
-        class_hash: classHash,
-        salt: num.toHex(addressSeed),
-        calldata: adapter.constructorCalldata(addressSeed),
-        version: 1 as const,
-      };
-      // The initialize call rides in the same sponsored multicall as the deploy.
-      // The paymaster submits deploy + initialize atomically; if initialize
-      // fails, the deploy reverts too.
-      const initCall = adapter.buildInitialize(address, devicePubkey);
-      const deployRes = await account.executePaymasterTransaction([initCall], {
-        feeMode: { mode: "sponsored" },
-        deploymentData,
-      });
-      // Wait for the deploy to land before declaring the device "ready". Assuming
-      // readiness here would report "ready" if the tx silently failed or hadn't
-      // indexed yet — and the user would hit a confusing error on their first tx.
-      try {
-        await provider.waitForTransaction(deployRes.transaction_hash);
-      } catch (e) {
-        console.warn("[Cavos] deploy receipt wait failed:", e);
-      }
-    }
+    // Determine status: undeployed, ready, or needs-device-approval
+    let status: ConnectStatus;
+    let isSigner = false;
 
-    // Resolve readiness from the chain: this device is "ready" iff its pubkey is
-    // an authorized signer.
-    // We re-read even right after a fresh deploy, so a deploy that failed to
-    // index (or silently reverted) surfaces as needs-device-approval rather than
-    // a false "ready".
-    let isSigner: boolean;
-    try {
-      isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
-    } catch (e) {
-      // Fall back to the deploy assumption only if the chain read itself errors
-      // (e.g. node hiccup right after indexing) — the deploy did submit.
-      console.warn("[Cavos] isAuthorizedSigner read failed:", e);
-      isSigner = !alreadyDeployed;
+    if (!alreadyDeployed) {
+      // Account not deployed yet — first execute will deploy + initialize
+      status = "undeployed";
+    } else {
+      // Account exists — check if this device is authorized
+      try {
+        isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
+      } catch (e) {
+        console.warn("[Cavos] isAuthorizedSigner read failed:", e);
+        isSigner = false;
+      }
+      status = isSigner ? "ready" : "needs-device-approval";
     }
 
     // Mirror only a signer that the chain actually recognizes. Registration is
@@ -401,18 +458,21 @@ export class Cavos {
     const cavos = new Cavos(
       identity,
       address,
-      isSigner ? "ready" : "needs-device-approval",
+      addressSeed,
+      classHash,
+      status,
       account,
       adapter,
       devicePubkey,
       paymasterConfig,
+      provider,
+      registry,
     );
-    // First sign-up: a fresh deploy that made this device an authorized signer.
-    cavos.isNewAccount = !alreadyDeployed && isSigner;
+    // isNewAccount is set after first deploy in execute(), not here
+    cavos.isNewAccount = false;
 
-    // New device on the derived wallet: ask the backend to notify the owner when
-    // the legacy approval flow is enabled. Social recovery disables this path.
-    if (!isSigner && recovery && opts.legacyDeviceApproval !== false) {
+    // Deployed account, but THIS device isn't an authorized signer yet — request approval
+    if (status === "needs-device-approval" && recovery && opts.legacyDeviceApproval !== false) {
       const dedup = lastDeviceRequest.get(identity.userId);
       const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
       try {
@@ -440,11 +500,23 @@ export class Cavos {
     return this.devicePubkey;
   }
 
-  /** Execute a sponsored (gasless) multicall, signed silently by the device. */
+  /**
+   * Execute a sponsored (gasless) multicall, signed silently by the device.
+   *
+   * **Lazy deploy**: If the account is undeployed, the first execute deploys +
+   * initializes + runs the calls atomically in a single sponsored transaction.
+   * The status changes from "undeployed" to "ready" after successful execution.
+   */
   async execute(calls: ChainCall[], opts?: ExecuteOptions): Promise<{ transactionHash: string }> {
-    if (this.status !== "ready") {
+    // Handle lazy deploy: first execute on undeployed account
+    if (this.statusValue === "undeployed") {
+      return this._deployAndExecute(calls, opts);
+    }
+
+    if (this.statusValue !== "ready") {
       throw new Error("kit: this device is not yet an authorized signer of the wallet");
     }
+
     // `sponsored` defaults to true → paymaster pays the gas. Pass `sponsored:
     // false` to submit directly: the account pays its own fee from its ETH
     // balance (starknet.js' `Account.execute` ignores the paymaster entirely, so
@@ -457,6 +529,89 @@ export class Cavos {
     const res = await this.account.executePaymasterTransaction(calls as Call[], {
       feeMode: { mode: "sponsored" },
     });
+    return { transactionHash: res.transaction_hash };
+  }
+
+  /**
+   * Deploy + initialize + execute calls atomically in a single sponsored transaction.
+   * Called automatically by execute() when status is "undeployed".
+   */
+  private async _deployAndExecute(
+    userCalls: ChainCall[],
+    opts?: ExecuteOptions,
+  ): Promise<{ transactionHash: string }> {
+    // Build deployment data for the paymaster
+    const deploymentData = {
+      address: this.address,
+      class_hash: this.classHash,
+      salt: num.toHex(this.addressSeed),
+      calldata: this.adapter.constructorCalldata(this.addressSeed),
+      version: 1 as const,
+    };
+
+    // Build all calls: initialize first, then any pending factors, then user calls
+    const allCalls: ChainCall[] = [];
+
+    // 1. Initialize with device signer (required)
+    allCalls.push(this.adapter.buildInitialize(this.address, this.devicePubkey));
+
+    // 2. Add pending approver if enrolled before first deploy
+    if (this._pendingApprover) {
+      allCalls.push(this.adapter.buildAddApprover(this.address, this._pendingApprover));
+    }
+
+    // 3. Add pending recovery signer if set up before first deploy
+    if (this._pendingRecoverySigner) {
+      allCalls.push(this.adapter.buildAddSigner(this.address, this._pendingRecoverySigner));
+    }
+
+    // 4. User's calls
+    allCalls.push(...userCalls);
+
+    // Self-funded deploy is not supported — deploy always needs paymaster sponsorship
+    if (opts?.sponsored === false) {
+      throw new Error(
+        "kit: self-funded deploy is not supported. The first execute on an undeployed account requires sponsored mode.",
+      );
+    }
+
+    // Execute deploy + init + calls atomically via paymaster
+    const res = await this.account.executePaymasterTransaction(allCalls as Call[], {
+      feeMode: { mode: "sponsored" },
+      deploymentData,
+    });
+
+    // Wait for the transaction to land before updating status
+    if (this.provider) {
+      try {
+        await this.provider.waitForTransaction(res.transaction_hash);
+      } catch (e) {
+        console.warn("[Cavos] deploy+execute receipt wait failed:", e);
+      }
+    }
+
+    // Update status to ready
+    this._isDeployed = true;
+    this.statusValue = "ready";
+    this.isNewAccount = true;
+
+    // Clear pending factors
+    this._pendingApprover = null;
+    this._pendingRecoverySigner = null;
+
+    // Register with registry (best-effort)
+    if (this.registry) {
+      try {
+        await this.registry.register({
+          userId: this.identity.userId,
+          address: this.address,
+          initialSigner: this.devicePubkey,
+        });
+      } catch (e) {
+        console.warn("[Cavos/starknet] registry.register failed (non-fatal):", e);
+      }
+    }
+
     return { transactionHash: res.transaction_hash };
   }
 
@@ -674,10 +829,14 @@ export class Cavos {
 
   /**
    * Enroll a passkey as an APPROVER so the user can later add devices from any
-   * browser (2FA-style step-up). Requires a ready device (the enrollment call is
-   * device-signed and gasless). Idempotent: a no-op if the passkey is already an
-   * approver. Call this whenever the app decides to prompt "turn on device
-   * approvals". Returns the passkey's public key + the enrollment tx hash.
+   * browser (2FA-style step-up). Idempotent: a no-op if the passkey is already
+   * an approver.
+   *
+   * **Undeployed accounts**: The passkey is stored pending and will be included
+   * in the first deploy transaction. No on-chain write happens until execute().
+   *
+   * Call this whenever the app decides to prompt "turn on device approvals".
+   * Returns the passkey's public key + the enrollment tx hash (if deployed).
    */
   async enrollPasskey(
     passkey: PasskeyApprover,
@@ -693,14 +852,24 @@ export class Cavos {
    * Register an ALREADY-enrolled passkey public key as an approver (gasless by
    * default, device-signed). Idempotent. Use this to register ONE passkey across
    * multiple chains without re-prompting `passkey.enroll()` on each: enroll once,
-   * then call `addApprover(pubkey)` on each chain's wallet. Pass
-   * `{ sponsored: false }` to pay the fee from the account's own balance.
+   * then call `addApprover(pubkey)` on each chain's wallet.
+   *
+   * **Undeployed accounts**: The approver is stored pending and will be included
+   * in the first deploy transaction. No on-chain write happens until execute().
+   *
+   * Pass `{ sponsored: false }` to pay the fee from the account's own balance.
    */
   async addApprover(
     pubkey: DevicePublicKey,
     opts?: ExecuteOptions,
   ): Promise<{ transactionHash?: string }> {
-    if (this.status !== "ready") {
+    // For undeployed accounts, store the pending approver for first deploy
+    if (this.statusValue === "undeployed") {
+      this._pendingApprover = pubkey;
+      return {}; // No tx yet — will be included in first deploy
+    }
+
+    if (this.statusValue !== "ready") {
       throw new Error("kit: addApprover requires a ready, authorized device");
     }
     if (await this.adapter.isApprover(this.address, pubkey)) return {};
@@ -719,17 +888,39 @@ export class Cavos {
     return { transactionHash };
   }
 
-  /** True if this account already has a passkey enrolled as an approver, so a
-   * new device can be approved with the passkey instead of the email flow. */
+  /**
+   * True if this account already has a passkey enrolled as an approver, so a
+   * new device can be approved with the passkey instead of the email flow.
+   *
+   * Returns true for undeployed accounts if a passkey is pending enrollment.
+   */
   async hasPasskey(): Promise<boolean> {
+    if (this.statusValue === "undeployed") {
+      return this._pendingApprover !== null;
+    }
     return this.adapter.hasPasskeyApprover(this.address);
   }
 
-  /** Re-read (from chain) whether THIS device is now an authorized signer.
+  /**
+   * Re-read (from chain) whether THIS device is now an authorized signer.
    * Cheap and side-effect free — used to poll for readiness after a passkey /
-   * device approval submits, before the new signer is indexed. */
+   * device approval submits, before the new signer is indexed.
+   *
+   * For undeployed accounts, returns false (not yet on-chain).
+   */
   async isReady(): Promise<boolean> {
+    if (this.statusValue === "undeployed") {
+      return false;
+    }
     return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+  }
+
+  /**
+   * Whether this account is deployed on-chain. Used to check if the first
+   * execute will trigger deployment.
+   */
+  get isDeployed(): boolean {
+    return this._isDeployed;
   }
 
   /**
@@ -801,16 +992,27 @@ export class Cavos {
    * can be recovered after the user loses every device. Idempotent: if the
    * derived backup key is already an authorised signer, this is a no-op.
    *
+   * **Undeployed accounts**: The backup signer is stored pending and will be
+   * included in the first deploy transaction. No on-chain write happens until
+   * execute().
+   *
    * The code never leaves the device — only its deterministic public key is
    * added on-chain as an ordinary signer. Sponsor this like any other
    * add_signer (gasless). Returns the transaction hash (or undefined when the
-   * backup was already set up).
+   * backup was already set up or account is undeployed).
    */
   async setupRecovery(
     code: string,
     opts?: ExecuteOptions,
   ): Promise<{ transactionHash: string } | undefined> {
     const { publicKey: backupPubkey } = deriveBackupKey(code);
+
+    // For undeployed accounts, store the pending recovery signer for first deploy
+    if (this.statusValue === "undeployed") {
+      this._pendingRecoverySigner = backupPubkey;
+      return undefined; // No tx yet — will be included in first deploy
+    }
+
     // Skip the on-chain call if the backup signer is already registered.
     const already = await this.adapter.isAuthorizedSigner(this.address, backupPubkey);
     if (already) return undefined;
@@ -894,7 +1096,25 @@ export class Cavos {
       paymaster,
       cairoVersion: "1",
     });
-    return new Cavos(opts.identity, existing.address, "ready", account, adapter, devicePubkey);
+    const paymasterUrl = opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[network];
+    const paymasterConfig = { url: paymasterUrl, apiKey: opts.paymasterApiKey };
+    const addressSeed = deriveAddressSeed({
+      userId: opts.identity.userId,
+      appSalt: opts.appSalt,
+    });
+    return new Cavos(
+      opts.identity,
+      existing.address,
+      addressSeed,
+      classHash,
+      "ready",
+      account,
+      adapter,
+      devicePubkey,
+      paymasterConfig,
+      provider,
+      undefined, // registry not needed for recovered account
+    );
   }
 }
 

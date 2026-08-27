@@ -88,7 +88,13 @@ export interface ConnectStellarOptions {
   startingBalance?: bigint;
 }
 
-export type StellarConnectStatus = "ready" | "needs-device-approval";
+/**
+ * Chain status for Stellar accounts.
+ * - `undeployed`: Address derived but no on-chain account exists yet. First execute will create.
+ * - `ready`: Account exists and this device can sign (control key unlocked).
+ * - `needs-device-approval`: Account exists but this device is not yet authorized.
+ */
+export type StellarConnectStatus = "undeployed" | "ready" | "needs-device-approval";
 
 /** The DEK + control key recovered by opening any single unlock factor. */
 interface Unlocked {
@@ -99,8 +105,11 @@ interface Unlocked {
 /**
  * High-level entry for the classic-Stellar (`G…`) multisig account — the classic
  * analogue of `CavosStellar` (Soroban). One `connect` derives the deterministic
- * `G…` address, creates the account if needed, and on a known device unlocks the
- * control key from the on-chain envelope so `execute` signs silently.
+ * `G…` address and on a known device unlocks the control key from the on-chain
+ * envelope so `execute` signs silently.
+ *
+ * **Lazy deploy**: Connect NEVER creates the account. The first `execute` call
+ * on an undeployed account creates the account + performs the operation.
  *
  * Multiple unlock **factors** all wrap the same DEK, so opening any one yields the
  * control key:
@@ -124,6 +133,25 @@ export class CavosStellar {
   isNewAccount = false;
   private statusValue: StellarConnectStatus;
 
+  /** Track whether account is created on-chain (for lazy deploy). */
+  private _isDeployed: boolean;
+  /** Pending passkey PRF output to include in first create. */
+  private _pendingPasskeyPrf: Uint8Array | null = null;
+  /** Pending recovery code to include in first create. */
+  private _pendingRecoveryCode: string | null = null;
+  /** App ID for backend registration. */
+  private readonly appId?: string;
+  /** App salt for address derivation. */
+  private readonly appSalt: string;
+  /** Backend URL for registration. */
+  private readonly backendUrl: string;
+  /** Environment for registration. */
+  private readonly environment?: "development" | "production";
+  /** Starting balance for account creation. */
+  private readonly startingBalance: bigint;
+  /** Source keypair for self-funded creation. */
+  private readonly sourceKeypair?: Keypair;
+
   private constructor(
     readonly identity: Identity,
     readonly address: string,
@@ -134,12 +162,32 @@ export class CavosStellar {
     private control: ControlKey | undefined,
     private dek: Uint8Array | undefined,
     private readonly relayer: StellarRelayer | undefined,
+    opts: {
+      appId?: string;
+      appSalt: string;
+      backendUrl: string;
+      environment?: "development" | "production";
+      startingBalance: bigint;
+      sourceKeypair?: Keypair;
+    },
   ) {
     this.statusValue = status;
+    this._isDeployed = status !== "undeployed";
+    this.appId = opts.appId;
+    this.appSalt = opts.appSalt;
+    this.backendUrl = opts.backendUrl;
+    this.environment = opts.environment;
+    this.startingBalance = opts.startingBalance;
+    this.sourceKeypair = opts.sourceKeypair;
   }
 
   get status(): StellarConnectStatus {
     return this.statusValue;
+  }
+
+  /** Whether this account is deployed/created on-chain. */
+  get isDeployed(): boolean {
+    return this._isDeployed;
   }
 
   static async connect(opts: ConnectStellarOptions): Promise<CavosStellar> {
@@ -158,6 +206,15 @@ export class CavosStellar {
         ? new StellarRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
         : undefined);
 
+    const buildOpts = {
+      appId: opts.appId,
+      appSalt: opts.appSalt,
+      backendUrl,
+      environment: opts.environment,
+      startingBalance,
+      sourceKeypair: opts.sourceKeypair,
+    };
+
     const build = (status: StellarConnectStatus, unlocked?: Unlocked): CavosStellar =>
       new CavosStellar(
         identity,
@@ -169,8 +226,11 @@ export class CavosStellar {
         unlocked?.control,
         unlocked?.dek,
         relayer,
+        buildOpts,
       );
 
+    // LAZY DEPLOY: Check if account exists but DO NOT create here.
+    // Account creation happens on first execute() call.
     if (await adapter.isDeployed(address)) {
       // Returning user: first try to load the non-extractable control key from
       // IndexedDB (no unwrap needed). If not found, unwrap from on-chain envelope,
@@ -179,68 +239,177 @@ export class CavosStellar {
       return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    // First sign-up on this identity: create the account.
-    if (!relayer && !opts.sourceKeypair) {
+    // Account doesn't exist yet — return "undeployed" status
+    // First execute will create the account + perform the operation
+    const wallet = build("undeployed");
+    wallet.isNewAccount = false; // Will be set to true after first deploy
+    return wallet;
+  }
+
+  /** Native XLM balance of the account, in stroops. */
+  async balance(): Promise<bigint> {
+    return this.adapter.balance(this.address);
+  }
+
+  /**
+   * True if the account has a passkey factor enrolled (`cv:wp`), so a new device
+   * can be approved with the passkey instead of a recovery code. Mirrors the
+   * other chains' `hasPasskey()` for the React provider.
+   *
+   * Returns true for undeployed accounts if a passkey is pending enrollment.
+   */
+  async hasPasskey(): Promise<boolean> {
+    if (this.statusValue === "undeployed") {
+      return this._pendingPasskeyPrf !== null;
+    }
+    try {
+      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
+      return !!env.passkeyWrap;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the control key is unlocked on this device (status ready). Classic
+   * approvals land synchronously via Horizon, so this reflects state immediately
+   * (no indexing delay to poll for).
+   *
+   * For undeployed accounts, returns false (not yet on-chain).
+   */
+  async isReady(): Promise<boolean> {
+    if (this.statusValue === "undeployed") {
+      return false;
+    }
+    return this.statusValue === "ready";
+  }
+
+  /**
+   * Move `amount` stroops of native XLM to `destination`, signed by the control
+   * key.
+   *
+   * **Lazy deploy**: If the account is undeployed, the first execute creates the
+   * account first (sponsored, 0 XLM cost), then performs the payment in a follow-up
+   * transaction. Native XLM cannot ride the create tx (the account needs to exist
+   * to send FROM it).
+   *
+   * Sponsored by default (the relayer fee-bumps and pays the fee); pass
+   * `{ sponsored: false }` to submit directly — the account pays its own (tiny)
+   * fee from its XLM balance. The control key signs identically in both modes;
+   * only the fee payer differs.
+   */
+  async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
+    // Handle lazy deploy: first execute on undeployed account
+    if (this.statusValue === "undeployed") {
+      return this._createAndExecute(amount, destination, opts);
+    }
+
+    const control = this.requireControl();
+    const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
+    return this.submitInner(inner, control, opts);
+  }
+
+  /**
+   * Create the account first (sponsored), then perform the payment.
+   * Called by execute() when status is "undeployed".
+   */
+  private async _createAndExecute(
+    amount: bigint,
+    destination: string,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    // Create the account first
+    const { control } = await this._createAccount();
+
+    // Now the account exists — perform the payment
+    const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
+    return this.submitInner(inner, control, opts);
+  }
+
+  /**
+   * Create the Stellar account on-chain. Returns the control key and DEK.
+   */
+  private async _createAccount(): Promise<Unlocked> {
+    if (!this.relayer && !this.sourceKeypair) {
       throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required to create the account");
     }
+
+    const master = deriveStellarMasterKeypair({ userId: this.identity.userId, appSalt: this.appSalt });
     const { keypair: controlKeypair, seed: controlSeed } = generateControlKey();
     const controlAddress = controlKeypair.publicKey();
     const dek = generateDEK();
+
+    // Build envelope with device wrap and any pending factors
     const envelope: AccountEnvelope = {
       ct: sealControlSeed(controlSeed, dek),
-      deviceWraps: { [opts.deviceKey.slotId()]: eciesWrapDEK(dek, opts.deviceKey.publicKeySec1()) },
+      deviceWraps: { [this.deviceKey.slotId()]: eciesWrapDEK(dek, this.deviceKey.publicKeySec1()) },
     };
 
-    if (relayer) {
+    // Add pending passkey wrap if enrolled before first create
+    if (this._pendingPasskeyPrf) {
+      envelope.passkeyWrap = wrapDEK(dek, derivePasskeyKEK(this._pendingPasskeyPrf));
+    }
+
+    // Add pending recovery wrap if set up before first create
+    if (this._pendingRecoveryCode) {
+      envelope.recoveryWrap = wrapDEK(dek, deriveRecoveryKEK(this._pendingRecoveryCode));
+    }
+
+    if (this.relayer) {
       // Gasless + sponsored: the relayer is source + fee payer + reserve sponsor.
-      // Master signs its own account ops; the relayer co-signs the envelope.
-      const relayerSource = await relayer.getSource();
-      const tx = await adapter.buildSponsoredCreateTx({
+      const relayerSource = await this.relayer.getSource();
+      const tx = await this.adapter.buildSponsoredCreateTx({
         relayer: relayerSource,
-        masterAddress: address,
+        masterAddress: this.address,
         controlAddress,
         envelope,
       });
       tx.sign(master);
-      await relayer.submit("create", tx.toXDR());
+      await this.relayer.submit("create", tx.toXDR());
     } else {
-      const funder = opts.sourceKeypair!;
-      const tx = await adapter.buildCreateTx({
+      const funder = this.sourceKeypair!;
+      const tx = await this.adapter.buildCreateTx({
         funder: funder.publicKey(),
-        masterAddress: address,
+        masterAddress: this.address,
         controlAddress,
         envelope,
-        startingBalance,
+        startingBalance: this.startingBalance,
       });
-      // Master authorizes its own account ops (while still weight 1); funder is the
-      // source + fee payer. After this tx the master is permanently weight 0.
       tx.sign(master, funder);
-      await adapter.submit(tx);
+      await this.adapter.submit(tx);
     }
 
-    // Import the control seed into WebCrypto as non-extractable, then wipe from JS.
+    // Import the control seed into WebCrypto as non-extractable, then wipe
     const control = await WebCryptoControlKey.importFromSeed(controlSeed, {
-      keyId: address,
+      keyId: this.address,
     });
     wipeSeed(controlSeed);
 
-    // Record the freshly-created G account in the Cavos backend so it lands in the
-    // `wallets` table and counts toward billing — parity with Solana/Starknet, which
-    // register via the same endpoint. The backend recognizes a Stellar classic-G
-    // wallet (network `stellar-*` + valid G address) and stores it with no blob and
-    // no device signer. Best-effort: bookkeeping must never break a successful
-    // on-chain creation, so a failed/blocked registration only warns.
-    if (opts.appId) {
+    // Update status to ready
+    this._isDeployed = true;
+    this.statusValue = "ready";
+    this.isNewAccount = true;
+
+    // Store the control key and DEK on this instance
+    this.control = control;
+    this.dek = dek;
+
+    // Clear pending factors
+    this._pendingPasskeyPrf = null;
+    this._pendingRecoveryCode = null;
+
+    // Register with backend (best-effort)
+    if (this.appId) {
       try {
-        const res = await fetch(new URL("/api/wallets", backendUrl), {
+        const res = await fetch(new URL("/api/wallets", this.backendUrl), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            app_id: opts.appId,
-            ...(opts.environment ? { environment: opts.environment } : {}),
-            user_social_id: identity.userId,
-            network: opts.network,
-            address,
+            app_id: this.appId,
+            ...(this.environment ? { environment: this.environment } : {}),
+            user_social_id: this.identity.userId,
+            network: this.network,
+            address: this.address,
           }),
         });
         if (!res.ok) {
@@ -251,46 +420,7 @@ export class CavosStellar {
       }
     }
 
-    const wallet = build("ready", { control, dek });
-    wallet.isNewAccount = true;
-    return wallet;
-  }
-
-  /** Native XLM balance of the account, in stroops. */
-  async balance(): Promise<bigint> {
-    return this.adapter.balance(this.address);
-  }
-
-  /** True if the account has a passkey factor enrolled (`cv:wp`), so a new device
-   *  can be approved with the passkey instead of a recovery code. Mirrors the
-   *  other chains' `hasPasskey()` for the React provider. */
-  async hasPasskey(): Promise<boolean> {
-    try {
-      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
-      return !!env.passkeyWrap;
-    } catch {
-      return false;
-    }
-  }
-
-  /** Whether the control key is unlocked on this device (status ready). Classic
-   *  approvals land synchronously via Horizon, so this reflects state immediately
-   *  (no indexing delay to poll for). */
-  async isReady(): Promise<boolean> {
-    return this.statusValue === "ready";
-  }
-
-  /**
-   * Move `amount` stroops of native XLM to `destination`, signed by the control
-   * key. Sponsored by default (the relayer fee-bumps and pays the fee); pass
-   * `{ sponsored: false }` to submit directly — the account pays its own (tiny)
-   * fee from its XLM balance. The control key signs identically in both modes;
-   * only the fee payer differs.
-   */
-  async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
-    const control = this.requireControl();
-    const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
-    return this.submitInner(inner, control, opts);
+    return { control, dek };
   }
 
   /**
@@ -423,9 +553,18 @@ export class CavosStellar {
    * Enroll a passkey as an unlock factor: wrap the DEK under the passkey's PRF
    * output and write the `cv:wp` entry. This is the synced anchor used to approve
    * a new device or recover — it survives device loss. Idempotent-ish: writing it
-   * again just overwrites the wrap of the same DEK. Requires a ready device.
+   * again just overwrites the wrap of the same DEK.
+   *
+   * **Undeployed accounts**: The passkey PRF output is stored pending and will be
+   * included in the first account creation. No on-chain write happens until execute().
    */
   async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
+    // For undeployed accounts, store the pending passkey PRF for first create
+    if (this.statusValue === "undeployed") {
+      this._pendingPasskeyPrf = prfOutput;
+      return ""; // No tx yet — will be included in first create
+    }
+
     const { control, dek } = this.requireUnlocked();
     const wrap = wrapDEK(dek, derivePasskeyKEK(prfOutput));
     return this.writeFactor(PASSKEY_BASE, wrap, control);
@@ -435,9 +574,17 @@ export class CavosStellar {
    * Set up a recovery code as an unlock factor: wrap the DEK under the code's KEK
    * and write the `cv:wr` entry. Optional in v1 — the integrating app decides when
    * to surface it. The code never leaves the device; only the wrap goes on-chain.
-   * Requires a ready device.
+   *
+   * **Undeployed accounts**: The recovery code is stored pending and will be
+   * included in the first account creation. No on-chain write happens until execute().
    */
   async setupRecovery(code: string): Promise<string> {
+    // For undeployed accounts, store the pending recovery code for first create
+    if (this.statusValue === "undeployed") {
+      this._pendingRecoveryCode = code;
+      return ""; // No tx yet — will be included in first create
+    }
+
     const { control, dek } = this.requireUnlocked();
     const wrap = wrapDEK(dek, deriveRecoveryKEK(code));
     return this.writeFactor(RECOVERY_BASE, wrap, control);

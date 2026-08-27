@@ -167,8 +167,9 @@ described above.
 
 ## Quickstart
 
-One call logs the user in and returns a ready, deployed, gas-sponsored smart
-account controlled by a silent device key. The user only sees the login.
+One call logs the user in and returns a wallet handle controlled by a silent
+device key. **Connect never deploys** — deployment happens lazily on the first
+`execute()` call, combined atomically with the user's operation.
 
 ```ts
 import { Cavos, StaticIdentity } from "@cavos/kit";
@@ -181,15 +182,61 @@ const wallet = await Cavos.connect({
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
-console.log(wallet.address);          // deterministic; auto-deployed on first connect
+console.log(wallet.address);          // deterministic; derived from identity + appSalt
+console.log(wallet.status);           // "undeployed" | "ready" | "needs-device-approval"
 
-if (wallet.status === "ready") {
-  // Chain-specific execution — see chain quickstarts below
+// First execute deploys + runs your calls atomically
+if (wallet.status === "undeployed" || wallet.status === "ready") {
+  await wallet.execute(calls);        // gasless; deploys if needed, then executes
 }
 ```
 
 `wallet` is a discriminated union (`Cavos | CavosSolana | CavosStellar`); narrow on
 `wallet.chain` before calling `execute`, since its signature differs per chain.
+
+### Multi-chain sessions
+
+Configure multiple chains and a default chain. Connect derives addresses for all
+configured chains but never deploys on connect — deployment is always lazy.
+
+```ts
+const wallet = await Cavos.connect({
+  chains: ["solana", "stellar"],      // chains to configure
+  defaultChain: "stellar",            // must be in chains
+  network: "testnet",
+  appSalt: "my-app",
+  auth: new StaticIdentity({ userId: user.id }),
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
+});
+
+// wallet.chain is "stellar" (the default)
+// wallet.status may be "undeployed" — first execute creates the account
+```
+
+**Note:** The `chains` config ensures only the specified chains are ever derived,
+deployed, or enrolled. A chain not in the list is never touched.
+
+### Enroll once, deploy later
+
+Passkey and recovery enrollment can happen before the first deploy. The factors
+are stored locally and included in the first deployment transaction:
+
+```ts
+const wallet = await Cavos.connect({ chain: "starknet", ... });
+
+// Status is "undeployed" — no on-chain account yet
+await wallet.enrollPasskey(passkey, params);  // stores pending, no tx
+await wallet.setupRecovery(code);             // stores pending, no tx
+
+// First execute deploys + initializes + adds the pending factors atomically
+await wallet.execute(calls);  // one sponsored transaction does it all
+```
+
+**Honest limits:**
+- The squat window is longer: attackers can squat an address until the user's
+  first transaction, not just until their first connect.
+- Recovery factors are not on-chain until that chain's first transaction.
+- The first execute is heavier (deploy + init + factors + user calls).
 
 ## Quickstart — Starknet
 

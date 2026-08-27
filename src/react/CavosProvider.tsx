@@ -47,8 +47,24 @@ export interface CavosConfig {
   appId?: string;
   /** Cavos console environment. Defaults to production when omitted. */
   environment?: 'development' | 'production';
-  /** Target chain. Defaults to 'starknet'. */
+  /**
+   * Target chain (single-chain mode). Defaults to 'starknet'.
+   * @deprecated Use `chains` and `defaultChain` for multi-chain sessions.
+   * When `chains` is provided, this is ignored. If only `chain` is provided,
+   * it's treated as `chains: [chain], defaultChain: chain`.
+   */
   chain?: Chain;
+  /**
+   * Chains to configure for this session. Connect derives addresses for all
+   * configured chains but NEVER deploys on connect. Deployment happens lazily
+   * on the first `execute` call for each chain.
+   */
+  chains?: Chain[];
+  /**
+   * Default chain for the session. Must be in `chains`. When using the
+   * single-chain `chain` option, `defaultChain` defaults to that chain.
+   */
+  defaultChain?: Chain;
   /** Environment: 'testnet' (sepolia/devnet) or 'mainnet'. */
   network: NetworkEnv;
   /** Per-app salt so the same user has distinct wallets per app. */
@@ -117,6 +133,11 @@ export interface WalletStatus {
   isDeploying: boolean;
   /** True once deployed and this device is an authorized signer. */
   isReady: boolean;
+  /**
+   * True if the account has not been deployed on-chain yet. First execute
+   * will trigger deployment + the user operation atomically.
+   */
+  isUndeployed: boolean;
   /** True if this device still needs approval to operate the wallet. */
   needsDeviceApproval: boolean;
   /** True while waiting for the owner to approve this device from another device. */
@@ -296,6 +317,7 @@ export interface CavosProviderProps {
 const INITIAL_STATUS: WalletStatus = {
   isDeploying: false,
   isReady: false,
+  isUndeployed: false,
   needsDeviceApproval: false,
   awaitingApproval: false,
   pendingRequestId: null,
@@ -548,8 +570,15 @@ export function CavosProvider({
   const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet> => {
     const cfg = configRef.current;
     if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
+
+    // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
+    // otherwise fall back to single `chain` for back-compat
+    const connectOpts = cfg.chains
+      ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
+      : { chain: cfg.chain ?? 'starknet' as Chain };
+
     const w = await Cavos.connect({
-      chain: cfg.chain ?? 'starknet',
+      ...connectOpts,
       network: cfg.network,
       identity: id,
       appSalt: cfg.appSalt,
@@ -570,13 +599,14 @@ export function CavosProvider({
     // has its own passkey-PRF device model with no email flow today.
     const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
     let hasPasskey = false;
-    if (w.status === 'needs-device-approval') {
+    if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
       try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
     }
 
     setWalletStatus({
       isDeploying: false,
       isReady: w.status === 'ready',
+      isUndeployed: w.status === 'undeployed',
       needsDeviceApproval: w.status === 'needs-device-approval',
       awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
       pendingRequestId,
@@ -1276,7 +1306,7 @@ export function CavosProvider({
     user: identity
       ? { userId: identity.userId, email: identity.email, name: identity.name, provider: identity.provider }
       : null,
-    chain: config.chain ?? 'starknet',
+    chain: config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet',
     wallet,
     address: wallet?.address ?? null,
     walletStatus,

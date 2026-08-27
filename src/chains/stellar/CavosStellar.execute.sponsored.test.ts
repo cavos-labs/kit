@@ -39,6 +39,7 @@ function makeWallet(opts: { relayer?: StellarRelayer; control: Keypair }): Cavos
     new KeypairControlKey(opts.control),
     new Uint8Array(32), // dek — unused on the execute() path
     opts.relayer,
+    { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
   );
 }
 
