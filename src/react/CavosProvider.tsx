@@ -608,6 +608,8 @@ export function CavosProvider({
       ...connectOpts,
       network: cfg.network,
       identity: id,
+      // The registry authenticates the end user with this login's token.
+      auth,
       appSalt: cfg.appSalt,
       ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
       ...(cfg.appId ? { appId: cfg.appId } : {}),
@@ -1158,6 +1160,7 @@ export function CavosProvider({
       appId: cfg.appId,
       network: cfg.network,
       ...(cfg.environment ? { environment: cfg.environment } : {}),
+      authToken: () => auth.getAuthToken(),
     });
     const found = await registry.lookup(identity.userId);
     return found?.devices ?? [];
@@ -1274,6 +1277,7 @@ export function CavosProvider({
           chain: 'stellar',
           network: cfg.network,
           identity,
+          auth,
           appSalt: cfg.appSalt,
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
@@ -1285,6 +1289,7 @@ export function CavosProvider({
         await Cavos.recover({
           code,
           identity,
+          auth,
           network: cfg.network,
           appSalt: cfg.appSalt,
           paymasterApiKey: cfg.paymasterApiKey ?? '',

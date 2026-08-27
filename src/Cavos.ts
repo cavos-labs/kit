@@ -12,14 +12,15 @@ import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
 import type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
 import type { StellarNetwork } from "./chains/stellar/constants";
 import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
-import type { ChainCall, ExecuteOptions } from "./chains/ChainAdapter";
+import type { ChainCall, ExecuteOptions, ComputeAddressParams } from "./chains/ChainAdapter";
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 import { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
 import type { RecoveryClient } from "./recovery/RecoveryClient";
 import { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
 import { BackupSigner, deriveBackupKey } from "./recovery/BackupSigner";
-import { deriveAddressSeed } from "./identity";
+import { appNamespace } from "./identity";
+import { resolveAddress } from "./registry/resolveAddress";
 import type { PasskeyApprover, PasskeyEnrollParams } from "./signer/PasskeyProvider";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "./crypto/webauthn";
 import type { PasskeyAssertion } from "./crypto/webauthn";
@@ -245,13 +246,15 @@ export interface RecoveryOptions {
   rpcUrl?: string;
   paymasterUrl?: string;
   classHash?: string;
-  /** @deprecated Starknet recovery derives the address from identity + appSalt. */
   registry?: WalletRegistry;
   /**
-   * Optional explicit account override. Normally recovery derives the address
-   * directly from (userId, appSalt), without consulting the Cavos backend.
+   * The account to recover. Optional only when `appId` is set: the address is
+   * named by the first device, so it is looked up in the registry rather than
+   * re-derived from the login.
    */
   address?: string;
+  /** Provides the login token the registry lookup authenticates with. */
+  auth?: AuthProvider;
   /** Override the new device's signer (native / tests); default WebCrypto. */
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
 }
@@ -267,7 +270,8 @@ export interface RecoveryOptions {
  *   // cavos.status may be "undeployed" — first execute will deploy
  *   await cavos.execute(calls); // deploys + runs calls atomically if undeployed
  *
- * The account address is `f(identity, appSalt)` and is resolved from chain state,
+ * The account address is named by the first device signer and looked up in the
+ * Cavos registry; deployment status is resolved from chain state,
  * never from the hosted registry. A new device derives the same address and is
  * flagged `needs-device-approval` when its key is not authorized on-chain.
  */
@@ -290,7 +294,7 @@ export class Cavos {
   private constructor(
     readonly identity: Identity,
     readonly address: string,
-    private readonly addressSeed: bigint,
+    private readonly addressParams: ComputeAddressParams,
     private readonly classHash: string,
     private statusValue: ConnectStatus,
     readonly account: Account,
@@ -508,8 +512,6 @@ export class Cavos {
       headers: { "x-paymaster-api-key": opts.paymasterApiKey },
     });
 
-    const addressSeed = deriveAddressSeed({ userId: identity.userId, appSalt: opts.appSalt });
-
     // This device's silent signer.
     const signer = opts.createSigner
       ? await opts.createSigner(`${identity.userId}:${opts.appSalt}`)
@@ -526,22 +528,32 @@ export class Cavos {
         cairoVersion: "1",
       });
 
-    // The registry is bookkeeping only. Address resolution must remain a pure
-    // function of identity + appSalt, matching Solana and Stellar. In particular,
-    // never let a stale row created under an older appSalt select this wallet.
+    // The registry is the source of truth for this user's address, so a lookup
+    // failure fails the connect (see resolveAddress): a second wallet for the
+    // same user is worse than an error.
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
         : defaultRegistry);
     const recovery =
       opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null);
 
-    // Compute the deterministic address = f(addressSeed) ONLY. The device pubkey
-    // no longer enters the derivation, so the address is recomputable from
-    // (userId, appSalt) alone — recovery is self-custodial.
-    const address = adapter.computeAddress({ addressSeed });
+    const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
+    const addressParams = { namespace, initialSigner: devicePubkey };
+    const { address } = await resolveAddress({
+      key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "starknet", network: opts.network },
+      registry: opts.appId ? registry : null,
+      initialSigner: devicePubkey,
+      compute: () => adapter.computeAddress(addressParams),
+    });
     const account = makeAccount(address);
 
     // LAZY DEPLOY: Check deployment status but DO NOT deploy here.
@@ -566,21 +578,10 @@ export class Cavos {
       status = isSigner ? "ready" : "needs-device-approval";
     }
 
-    // Mirror only a signer that the chain actually recognizes. Registration is
-    // best-effort bookkeeping for recovery/analytics and never drives address
-    // selection. A new unauthorized device must not be recorded as authorized.
-    if (isSigner) {
-      try {
-        await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
-      } catch (e) {
-        console.warn("[Cavos/starknet] registry.register failed (non-fatal):", e);
-      }
-    }
-
     const cavos = new Cavos(
       identity,
       address,
-      addressSeed,
+      addressParams,
       classHash,
       status,
       account,
@@ -666,28 +667,26 @@ export class Cavos {
     const deploymentData = {
       address: this.address,
       class_hash: this.classHash,
-      salt: num.toHex(this.addressSeed),
-      calldata: this.adapter.constructorCalldata(this.addressSeed),
+      salt: num.toHex(this.adapter.salt(this.addressParams)),
+      calldata: this.adapter.constructorCalldata(this.addressParams),
       version: 1 as const,
     };
 
-    // Build all calls: initialize first, then any pending factors, then user calls
+    // The constructor registers this device as the first signer, so there is no
+    // initialize call — only the pending factors and the user's own calls.
     const allCalls: ChainCall[] = [];
 
-    // 1. Initialize with device signer (required)
-    allCalls.push(this.adapter.buildInitialize(this.address, this.devicePubkey));
-
-    // 2. Add pending approver if enrolled before first deploy
+    // 1. Add pending approver if enrolled before first deploy
     if (this._pendingApprover) {
       allCalls.push(this.adapter.buildAddApprover(this.address, this._pendingApprover));
     }
 
-    // 3. Add pending recovery signer if set up before first deploy
+    // 2. Add pending recovery signer if set up before first deploy
     if (this._pendingRecoverySigner) {
       allCalls.push(this.adapter.buildAddSigner(this.address, this._pendingRecoverySigner));
     }
 
-    // 4. User's calls
+    // 3. User's calls
     allCalls.push(...userCalls);
 
     // Self-funded deploy is not supported — deploy always needs paymaster sponsorship
@@ -1174,15 +1173,24 @@ export class Cavos {
     const backup = BackupSigner.fromCode(opts.code);
     const backupAdapter = new StarknetAdapter({ classHash, signer: backup, provider });
 
-    // Address discovery is deterministic and backend-independent. An explicit
-    // address remains available for advanced/migration callers, but normal
-    // recovery uses the exact same identity + appSalt derivation as connect().
-    const address = opts.address ?? backupAdapter.computeAddress({
-      addressSeed: deriveAddressSeed({
-        userId: opts.identity.userId,
-        appSalt: opts.appSalt,
-      }),
-    });
+    // The address is named by the first device, so it cannot be re-derived from
+    // a login: it comes from the registry, or the caller passes it explicitly.
+    const registry = opts.appId
+      ? new HttpWalletRegistry({
+          baseUrl: opts.backendUrl ?? "https://cavos.xyz",
+          appId: opts.appId,
+          network,
+          ...(opts.environment ? { environment: opts.environment } : {}),
+          authToken: () => opts.auth?.getAuthToken?.() ?? null,
+        })
+      : null;
+    const address =
+      opts.address ?? (await registry?.lookup(opts.identity.userId))?.address;
+    if (!address) {
+      throw new Error(
+        "kit: cannot find this user's wallet — pass `address`, or set `appId` so the registry can be consulted",
+      );
+    }
     if (!(await isDeployed(provider, address))) {
       throw new Error("kit: no account found for this identity — nothing to recover");
     }
@@ -1220,14 +1228,13 @@ export class Cavos {
     });
     const paymasterUrl = opts.paymasterUrl ?? CAVOS_PAYMASTER_URL[network];
     const paymasterConfig = { url: paymasterUrl, apiKey: opts.paymasterApiKey };
-    const addressSeed = deriveAddressSeed({
-      userId: opts.identity.userId,
-      appSalt: opts.appSalt,
-    });
     return new Cavos(
       opts.identity,
       existing.address,
-      addressSeed,
+      {
+        namespace: appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment }),
+        initialSigner: devicePubkey,
+      },
       classHash,
       "ready",
       account,

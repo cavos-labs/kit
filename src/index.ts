@@ -26,12 +26,12 @@ export { StaticIdentity } from "./auth/AuthProvider";
 export { CavosAuth } from "./auth/CavosAuth";
 export type { CavosAuthOptions } from "./auth/CavosAuth";
 
-// Identity derivation
-export { deriveAddressSeed, deriveAddressSeedSolana, deriveAddressSeedStellar } from "./identity";
-export type { IdentityInput } from "./identity";
+// App namespacing (the address itself is named by the first device signer).
+export { appNamespace, appNamespaceFelt } from "./identity";
+export type { AppNamespaceInput } from "./identity";
 
 // Off-chain user_id -> wallet map (multi-device recognition; backend-implemented)
-export type { WalletRegistry, RegisteredWallet } from "./registry/WalletRegistry";
+export type { WalletRegistry, RegisteredWallet, RegisterResult } from "./registry/WalletRegistry";
 export { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 export { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
 export type { HttpWalletRegistryOptions } from "./registry/HttpWalletRegistry";
@@ -153,11 +153,7 @@ export { WebCryptoDeviceUnwrapKey } from "./chains/stellar/WebCryptoDeviceUnwrap
 export type { WebCryptoUnwrapKeyOptions } from "./chains/stellar/WebCryptoDeviceUnwrapKey";
 export { PasskeyPrf } from "./chains/stellar/PasskeyPrf";
 export type { PasskeyPrfOptions, PasskeyPrfEnrollParams } from "./chains/stellar/PasskeyPrf";
-export {
-  deriveStellarAddress,
-  deriveStellarMasterKeypair,
-  generateControlKey,
-} from "./chains/stellar/keys";
+export { generateControlKey, controlKeypairFromSeed } from "./chains/stellar/keys";
 export {
   generateDEK,
   sealControlSeed,

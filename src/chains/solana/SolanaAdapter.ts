@@ -83,18 +83,20 @@ export class SolanaAdapter {
   }
 
   /**
-   * Deterministic account address: PDA of [ACCOUNT_SEED, addressSeed] — the
-   * device pubkey is NOT part of the seeds, so the address is recomputable
-   * from (userId, appSalt) alone. Anti-squatting is the integrator's
-   * responsibility (keep `appSalt` secret; deploy on first login).
+   * Account address: PDA of [ACCOUNT_SEED, namespace, initial_signer_x]. The
+   * first device pubkey is in the seeds, so `initialize` with a different key
+   * derives a different PDA and cannot claim this address.
    */
-  computeAddress(addressSeed: Uint8Array): string {
-    return this.pda(addressSeed).toBase58();
+  computeAddress(namespace: Uint8Array, initialSigner: DevicePublicKey): string {
+    return this.pda(namespace, initialSigner).toBase58();
   }
 
-  private pda(addressSeed: Uint8Array): PublicKey {
+  private pda(namespace: Uint8Array, initialSigner: DevicePublicKey): PublicKey {
+    // A PDA seed is capped at 32 bytes, so the 33-byte compressed key
+    // contributes its X coordinate — exactly what the program re-derives.
+    const compressed = compressedPubkey(initialSigner);
     const [pda] = PublicKey.findProgramAddressSync(
-      [Buffer.from(ACCOUNT_SEED), Buffer.from(addressSeed)],
+      [Buffer.from(ACCOUNT_SEED), Buffer.from(namespace), Buffer.from(compressed.slice(1, 33))],
       this.programId,
     );
     return pda;
@@ -110,19 +112,19 @@ export class SolanaAdapter {
 
   /**
    * `initialize` instruction: creates the account PDA and registers the first
-   * device signer. No attestation is required — anti-squatting is NOT enforced
-   * on-chain.
+   * device signer. The PDA seeds contain that signer, so this can only ever
+   * create the account the caller's own key names.
    */
   buildInitialize(
-    addressSeed: Uint8Array,
+    namespace: Uint8Array,
     payer: string,
     initialSigner: DevicePublicKey,
   ): TransactionInstruction[] {
     const initialCompressed = compressedPubkey(initialSigner);
-    const account = this.pda(addressSeed);
+    const account = this.pda(namespace, initialSigner);
     const data = Buffer.concat([
       anchorDiscriminator("initialize"),
-      Buffer.from(addressSeed), // [u8;32]
+      Buffer.from(namespace), // [u8;32] app_namespace
       Buffer.from(initialCompressed), // [u8;33]
     ]);
     const programIx = new TransactionInstruction({

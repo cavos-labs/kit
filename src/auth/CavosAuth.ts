@@ -44,6 +44,8 @@ export class CavosAuth implements AuthProvider {
    * Never persisted to localStorage and never sent to the Cavos control plane
    * outside the attested encrypted channel. */
   private recoveryCredential: SocialRecoveryCredential | null = null;
+  /** The raw provider token from this session's login (memory only). */
+  private authToken: string | null = null;
 
   constructor(private readonly opts: CavosAuthOptions = {}) {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
@@ -73,6 +75,7 @@ export class CavosAuth implements AuthProvider {
   clearStoredIdentity(): void {
     this.last = null;
     this.recoveryCredential = null;
+    this.authToken = null;
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(this.identityStorageKey);
     }
@@ -225,6 +228,7 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
+    this.authToken = token;
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
       ? createSocialRecoveryCredential(token)
       : null;
@@ -236,6 +240,16 @@ export class CavosAuth implements AuthProvider {
       name: claims.name,
       provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
     });
+  }
+
+  /**
+   * The provider id_token from this session's login, for the wallet registry.
+   * Null on a page reload that restored the identity from localStorage but not
+   * the token — the address cache covers that device; a brand-new device has
+   * just logged in and therefore has one.
+   */
+  getAuthToken(): string | null {
+    return this.authToken;
   }
 
   /** Generate (and remember) the nonce the Cavos backend expects on requests. */

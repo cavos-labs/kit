@@ -151,19 +151,15 @@ export class StellarAdapter {
   /**
    * Build the account-creation transaction (source = funder, the relayer or a
    * self-funded keypair):
-   *   1. `createAccount` funds the deterministic `G…` master address,
-   *   2. `manageData` writes the control-key envelope entries (authorized by the
-   *      still-weight-1 master),
-   *   3. `setOptions` adds the control signer (weight 1), sets all thresholds to
-   *      1, and zeroes the master weight — after this the master can never sign.
+   *   1. `createAccount` funds the `G…` address — which is the control key,
+   *   2. `manageData` writes the control-key envelope entries.
    *
-   * The returned tx must be signed by BOTH the master keypair (for the account's
-   * own ops) and the funder (source + fee). Sponsorship of reserves is layered on
-   * in Phase 3.
+   * The control key is the account's master key at weight 1, so there is no
+   * signer to add and no master to demote. The returned tx must be signed by
+   * BOTH the control keypair (for the account's own ops) and the funder.
    */
   async buildCreateTx(params: {
     funder: string;
-    masterAddress: string;
     controlAddress: string;
     envelope: AccountEnvelope;
     /** Starting balance in stroops (must cover base reserve + entries). */
@@ -177,27 +173,16 @@ export class StellarAdapter {
 
     builder.addOperation(
       Operation.createAccount({
-        destination: params.masterAddress,
+        destination: params.controlAddress,
         startingBalance: fromStroops(params.startingBalance),
       }),
     );
 
     for (const [name, value] of Object.entries(toDataEntries(params.envelope))) {
       builder.addOperation(
-        Operation.manageData({ name, value: Buffer.from(value), source: params.masterAddress }),
+        Operation.manageData({ name, value: Buffer.from(value), source: params.controlAddress }),
       );
     }
-
-    builder.addOperation(
-      Operation.setOptions({
-        source: params.masterAddress,
-        masterWeight: 0,
-        lowThreshold: 1,
-        medThreshold: 1,
-        highThreshold: 1,
-        signer: { ed25519PublicKey: params.controlAddress, weight: 1 },
-      }),
-    );
 
     return builder.setTimeout(TX_TIMEOUT).build();
   }
@@ -210,16 +195,14 @@ export class StellarAdapter {
    * locked XLM of the user's. Ops:
    *   0. beginSponsoringFutureReserves(G)          source = relayer
    *   1. createAccount(G, 0)                        source = relayer
-   *   2. manageData(cv:… envelope)                  source = G (master-signed)
-   *   3. setOptions(control signer, master → 0)     source = G
-   *   4. endSponsoringFutureReserves()              source = G
+   *   2. manageData(cv:… envelope)                  source = G (control-signed)
+   *   3. endSponsoringFutureReserves()              source = G
    *
-   * Signed by the master (for the G ops, while it's still weight 1); the relayer
-   * co-signs (source + fee + sponsorship) before submitting.
+   * Signed by the control key (which IS G); the relayer co-signs (source + fee +
+   * sponsorship) before submitting.
    */
   async buildSponsoredCreateTx(params: {
     relayer: string;
-    masterAddress: string;
     controlAddress: string;
     envelope: AccountEnvelope;
   }): Promise<Transaction> {
@@ -230,27 +213,17 @@ export class StellarAdapter {
     });
 
     builder.addOperation(
-      Operation.beginSponsoringFutureReserves({ sponsoredId: params.masterAddress, source: params.relayer }),
+      Operation.beginSponsoringFutureReserves({ sponsoredId: params.controlAddress, source: params.relayer }),
     );
     builder.addOperation(
-      Operation.createAccount({ destination: params.masterAddress, startingBalance: "0", source: params.relayer }),
+      Operation.createAccount({ destination: params.controlAddress, startingBalance: "0", source: params.relayer }),
     );
     for (const [name, value] of Object.entries(toDataEntries(params.envelope))) {
       builder.addOperation(
-        Operation.manageData({ name, value: Buffer.from(value), source: params.masterAddress }),
+        Operation.manageData({ name, value: Buffer.from(value), source: params.controlAddress }),
       );
     }
-    builder.addOperation(
-      Operation.setOptions({
-        source: params.masterAddress,
-        masterWeight: 0,
-        lowThreshold: 1,
-        medThreshold: 1,
-        highThreshold: 1,
-        signer: { ed25519PublicKey: params.controlAddress, weight: 1 },
-      }),
-    );
-    builder.addOperation(Operation.endSponsoringFutureReserves({ source: params.masterAddress }));
+    builder.addOperation(Operation.endSponsoringFutureReserves({ source: params.controlAddress }));
 
     return builder.setTimeout(TX_TIMEOUT).build();
   }
@@ -551,10 +524,15 @@ function rotationOps(rotation?: ControlRotation, source?: string) {
       source,
       signer: { ed25519PublicKey: rotation.newControl, weight: 1 },
     }),
-    Operation.setOptions({
-      source,
-      signer: { ed25519PublicKey: rotation.oldControl, weight: 0 },
-    }),
+    // Stellar rejects a signer entry for the account's own master key, so the
+    // FIRST control key — which is the account — is retired with masterWeight
+    // instead. Later control keys are ordinary signers.
+    rotation.oldControl === source
+      ? Operation.setOptions({ source, masterWeight: 0, lowThreshold: 1, medThreshold: 1, highThreshold: 1 })
+      : Operation.setOptions({
+          source,
+          signer: { ed25519PublicKey: rotation.oldControl, weight: 0 },
+        }),
   ];
 }
 

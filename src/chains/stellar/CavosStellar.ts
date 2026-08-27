@@ -6,7 +6,7 @@ import {
   type DataEntryWrites,
 } from "./StellarAdapter";
 import {
-  deriveStellarMasterKeypair,
+  controlKeypairFromSeed,
   generateControlKey,
 } from "./keys";
 import {
@@ -28,6 +28,8 @@ import {
   type AccountEnvelope,
 } from "./datamap";
 import { chunkTo64 } from "./envelope";
+import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
+import { resolveAddress } from "../../registry/resolveAddress";
 import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
 import type { StellarNetwork } from "./constants";
@@ -141,14 +143,6 @@ export class CavosStellar {
   private _pendingRecoveryCode: string | null = null;
   /** Pre-generated control seed for first create (not persisted on-chain until execute). */
   private _controlSeed: Uint8Array | null = null;
-  /** App ID for backend registration. */
-  private readonly appId?: string;
-  /** App salt for address derivation. */
-  private readonly appSalt: string;
-  /** Backend URL for registration. */
-  private readonly backendUrl: string;
-  /** Environment for registration. */
-  private readonly environment?: "development" | "production";
   /** Starting balance for account creation. */
   private readonly startingBalance: bigint;
   /** Source keypair for self-funded creation. */
@@ -176,10 +170,6 @@ export class CavosStellar {
   ) {
     this.statusValue = status;
     this._isDeployed = status !== "undeployed";
-    this.appId = opts.appId;
-    this.appSalt = opts.appSalt;
-    this.backendUrl = opts.backendUrl;
-    this.environment = opts.environment;
     this.startingBalance = opts.startingBalance;
     this.sourceKeypair = opts.sourceKeypair;
     this._controlSeed = opts.controlSeed ?? null;
@@ -199,8 +189,6 @@ export class CavosStellar {
     if (!identity) throw new Error("kit/stellar: connect requires `identity` or `auth`");
 
     const adapter = new StellarAdapter({ network: opts.network, horizonUrl: opts.horizonUrl });
-    const master = deriveStellarMasterKeypair({ userId: identity.userId, appSalt: opts.appSalt });
-    const address = master.publicKey();
     const startingBalance = opts.startingBalance ?? DEFAULT_STARTING_BALANCE;
 
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
@@ -218,6 +206,32 @@ export class CavosStellar {
       startingBalance,
       sourceKeypair: opts.sourceKeypair,
     };
+
+    // The registry names the wallet. On a miss this device generates the control
+    // key and its public key BECOMES the `G…` — the first device names the
+    // account here exactly as the constructor does on Starknet.
+    const registry = opts.appId
+      ? new HttpWalletRegistry({
+          baseUrl: backendUrl,
+          appId: opts.appId,
+          network: opts.network,
+          ...(opts.environment ? { environment: opts.environment } : {}),
+          authToken: () => opts.auth?.getAuthToken?.() ?? null,
+        })
+      : null;
+
+    let fresh: { address: string; seed: Uint8Array } | null = null;
+    const { address, existing } = await resolveAddress({
+      key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "stellar", network: opts.network },
+      registry,
+      // Stellar has no secp256r1 signer in its address; the registry only needs
+      // an initial signer for the chains that record device keys.
+      initialSigner: { x: 0n, y: 0n },
+      compute: () => {
+        fresh = newControlKey();
+        return fresh.address;
+      },
+    });
 
     const build = (
       status: StellarConnectStatus,
@@ -246,10 +260,17 @@ export class CavosStellar {
       return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    // Account doesn't exist yet — pre-generate control key and DEK so off-chain
-    // signing (signMessage, signXdr) works before the first execute. The key is
-    // stored in IndexedDB; the on-chain envelope is written only on first execute.
-    const unlocked = await preGenerateControlKey(address);
+    // The row exists but the account was never created, and this device is not
+    // the one that named it: it cannot hold the control key, so it must be
+    // approved by a device that does.
+    if (existing && !fresh) {
+      return build("needs-device-approval");
+    }
+
+    // This device named the address. Persist its control key now so off-chain
+    // signing (signMessage, signXdr) works before the first execute; the
+    // on-chain envelope is written when the account is created.
+    const unlocked = await persistControlKey(address, fresh!);
     const wallet = build("undeployed", unlocked);
     wallet.isNewAccount = false; // Will be set to true after first deploy
     return wallet;
@@ -345,25 +366,17 @@ export class CavosStellar {
       throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required to create the account");
     }
 
-    const master = deriveStellarMasterKeypair({ userId: this.identity.userId, appSalt: this.appSalt });
-
-    // Use pre-generated control key from connect() if available, otherwise generate new
-    let controlSeed: Uint8Array;
-    let controlAddress: string;
-    let dek: Uint8Array;
-
-    if (this._controlSeed && this.control && this.dek) {
-      // Use pre-generated values from connect()
-      controlSeed = this._controlSeed;
-      controlAddress = this.control.publicAddress();
-      dek = this.dek;
-    } else {
-      // Generate fresh (fallback for edge cases)
-      const { keypair: controlKeypair, seed } = generateControlKey();
-      controlSeed = seed;
-      controlAddress = controlKeypair.publicKey();
-      dek = generateDEK();
+    // The control key IS the account, so it must be the exact one generated at
+    // connect — a fresh key here would create a DIFFERENT account.
+    if (!this._controlSeed || !this.control || !this.dek) {
+      throw new Error(
+        "kit/stellar: the control key for this address is not held by this device — approve this device first",
+      );
     }
+    const controlSeed = this._controlSeed;
+    const controlAddress = this.control.publicAddress();
+    const dek = this.dek;
+    const controlKeypair = controlKeypairFromSeed(controlSeed);
 
     // Build envelope with device wrap and any pending factors
     const envelope: AccountEnvelope = {
@@ -386,22 +399,20 @@ export class CavosStellar {
       const relayerSource = await this.relayer.getSource();
       const tx = await this.adapter.buildSponsoredCreateTx({
         relayer: relayerSource,
-        masterAddress: this.address,
         controlAddress,
         envelope,
       });
-      tx.sign(master);
+      tx.sign(controlKeypair);
       await this.relayer.submit("create", tx.toXDR());
     } else {
       const funder = this.sourceKeypair!;
       const tx = await this.adapter.buildCreateTx({
         funder: funder.publicKey(),
-        masterAddress: this.address,
         controlAddress,
         envelope,
         startingBalance: this.startingBalance,
       });
-      tx.sign(master, funder);
+      tx.sign(controlKeypair, funder);
       await this.adapter.submit(tx);
     }
 
@@ -429,28 +440,6 @@ export class CavosStellar {
     // Clear pending factors
     this._pendingPasskeyPrf = null;
     this._pendingRecoveryCode = null;
-
-    // Register with backend (best-effort)
-    if (this.appId) {
-      try {
-        const res = await fetch(new URL("/api/wallets", this.backendUrl), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            app_id: this.appId,
-            ...(this.environment ? { environment: this.environment } : {}),
-            user_social_id: this.identity.userId,
-            network: this.network,
-            address: this.address,
-          }),
-        });
-        if (!res.ok) {
-          console.warn(`[Cavos/stellar] wallet registration failed: ${res.status}`);
-        }
-      } catch (e) {
-        console.warn("[Cavos/stellar] wallet registration failed (non-fatal):", e);
-      }
-    }
 
     return { control, dek };
   }
@@ -1098,38 +1087,26 @@ function isBadSequence(error: unknown): boolean {
 }
 
 /**
- * Pre-generate a control key and DEK for an undeployed account. The control key
- * is stored in IndexedDB so `signMessage` and `signXdr` work before the first
- * execute. The DEK is kept in memory. Neither is written on-chain until the
- * first execute calls `_createAccount`.
- *
- * The pre-generated seed is stored alongside the key so `_createAccount` can
- * build the on-chain envelope without re-generating.
+ * A brand-new control key. Its public key IS the account's `G…` address: this
+ * is where a Stellar wallet gets named, and only the device that generated it
+ * holds the seed.
  */
-async function preGenerateControlKey(
+function newControlKey(): { address: string; seed: Uint8Array } {
+  const { keypair, seed } = generateControlKey();
+  return { address: keypair.publicKey(), seed };
+}
+
+/**
+ * Store the freshly generated control key for an account that does not exist
+ * on-chain yet, so this device can sign messages before the first execute. The
+ * seed is imported as a non-extractable WebCrypto key; the on-chain envelope is
+ * written when the account is created.
+ */
+async function persistControlKey(
   address: string,
+  fresh: { seed: Uint8Array },
 ): Promise<Unlocked & { controlSeed: Uint8Array }> {
-  // Check if we already have a pre-generated key for this address
   const cached = await WebCryptoControlKey.load({ keyId: address });
-  if (cached) {
-    // DEK is not persisted; generate a fresh one each session. This is fine
-    // because the DEK is only needed for building the on-chain envelope, which
-    // happens once in _createAccount.
-    const dek = generateDEK();
-    // We don't have the original seed, so generate a new one. This is acceptable
-    // because for undeployed accounts, the seed hasn't been committed on-chain yet.
-    const { seed: controlSeed } = generateControlKey();
-    return { control: cached, dek, controlSeed };
-  }
-
-  // Generate fresh control key and DEK
-  const { seed: controlSeed } = generateControlKey();
-  const dek = generateDEK();
-
-  // Import into WebCrypto as non-extractable and persist
-  const control = await WebCryptoControlKey.importFromSeed(controlSeed, {
-    keyId: address,
-  });
-
-  return { control, dek, controlSeed };
+  const control = cached ?? (await WebCryptoControlKey.importFromSeed(fresh.seed, { keyId: address }));
+  return { control, dek: generateDEK(), controlSeed: fresh.seed };
 }

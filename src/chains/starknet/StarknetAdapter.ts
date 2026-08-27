@@ -6,6 +6,7 @@ import { signatureToFelts } from "../../crypto/signature";
 import { u256ToFelts, bigIntTo32Bytes, bytesToByteArrayCalldata, bytesToBigInt } from "../../crypto/encoding";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
 import { UDC_ADDRESS } from "./constants";
+import { poseidon, namespaceToFelt } from "../../identity";
 
 export interface StarknetAdapterOptions {
   classHash: string;
@@ -22,33 +23,28 @@ export class StarknetAdapter implements ChainAdapter {
   constructor(private readonly opts: StarknetAdapterOptions) {}
 
   /**
-   * Deterministic address = f(addressSeed) ONLY. The device pubkey is NOT
-   * part of the derivation — anti-squatting is the integrator's responsibility
-   * (keep `appSalt` secret; deploy on first login). This makes the address
-   * recomputable by the user from (userId, appSalt) alone, even after losing
-   * every device.
-   *
-   * `initialSigner` in `ComputeAddressParams` is IGNORED on Starknet (kept in
-   * the shared type for Solana/Stellar, which still include it).
+   * Address = f(app namespace, device pubkey, classHash). The pubkey is
+   * constructor calldata and Starknet hashes the calldata into the address, so
+   * nobody without the key can land here.
    */
-  computeAddress({ addressSeed, salt }: ComputeAddressParams): string {
+  computeAddress(params: ComputeAddressParams): string {
+    const calldata = this.constructorCalldata(params);
     return hash.calculateContractAddressFromHash(
-      num.toHex(salt ?? addressSeed),
+      num.toHex(this.salt(params)),
       this.opts.classHash,
-      this.constructorCalldata(addressSeed),
+      calldata,
       0, // deployerAddress 0 => deterministic counterfactual address
     );
   }
 
   /**
-   * UDC deploy call. The constructor takes ONLY the seed — no device pubkey —
-   * so the account is born with no signers. The caller MUST follow up with
-   * `buildInitialize` in the same multicall (or a separate tx) to register the
-   * first device signer; otherwise the account is unusable.
+   * UDC deploy call. The constructor registers the first device signer itself,
+   * so the account is usable the moment it exists — there is no `initialize`
+   * follow-up and no window in which it is unowned.
    */
   buildDeploy(params: ComputeAddressParams): ChainCall[] {
-    const salt = params.salt ?? params.addressSeed;
-    const calldata = this.constructorCalldata(params.addressSeed);
+    const salt = this.salt(params);
+    const calldata = this.constructorCalldata(params);
     return [
       {
         contractAddress: UDC_ADDRESS,
@@ -64,23 +60,14 @@ export class StarknetAdapter implements ChainAdapter {
     ];
   }
 
-  /** Constructor calldata: [address_seed]. Device pubkey is registered post-deploy via initialize. */
-  constructorCalldata(addressSeed: bigint): string[] {
-    return [num.toHex(addressSeed)];
+  /** Constructor calldata: [app_namespace, x_low, x_high, y_low, y_high]. */
+  constructorCalldata({ namespace, initialSigner }: ComputeAddressParams): string[] {
+    return [num.toHex(namespaceToFelt(namespace)), ...pubkeyCalldata(initialSigner)];
   }
 
-  /**
-   * `initialize` call: registers the first device signer. Callable only while
-   * the account has no signers (one-shot). In production this is bundled with
-   * the UDC deploy in a single sponsored multicall — see `connectStarknet`.
-   * Anti-squatting is NOT enforced on-chain.
-   */
-  buildInitialize(accountAddress: string, devicePubkey: DevicePublicKey): ChainCall {
-    return {
-      contractAddress: accountAddress,
-      entrypoint: "initialize",
-      calldata: pubkeyCalldata(devicePubkey),
-    };
+  /** Deploy salt: Poseidon over the constructor calldata. */
+  salt(params: ComputeAddressParams): bigint {
+    return poseidon(this.constructorCalldata(params).map((f) => BigInt(f)));
   }
 
   buildAddSigner(accountAddress: string, signer: DevicePublicKey): ChainCall {

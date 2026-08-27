@@ -27,17 +27,16 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
  * DeviceAccount class hash, per network. Populated from
  * `account-contracts/starknet/deployments/<network>.json` after declaring.
  *
- * Sepolia re-declared 2026-08-01:
- *   - Deploy attestation REMOVED — `initialize` takes only the device pubkey.
- *   - `is_valid_signature` returns VALIDATED pre-init so the SNIP-9 outside-
- *     execution path (used by the paymaster's `deploy_and_invoke`) can carry
- *     the `initialize` call before any signer is registered. `__execute__`
- *     still enforces that ONLY `initialize` runs in that state.
- *   - Adds a separate hardware-isolated social-recovery authority with nonce,
- *     expiry, cancellation and contract-enforced timelock.
- * Mainnet still runs the prior class (with attestation) until it is re-declared.
+ * Sepolia re-declared 2026-08-27:
+ *   - `constructor(app_namespace, pub_x, pub_y)` registers the first device
+ *     signer, so the pubkey is part of the address and nobody else can claim it.
+ *   - `initialize` is GONE, and with it the uninitialized window: no unsigned
+ *     __validate__ / is_valid_signature bypass, no __execute__ selector guard.
+ *   - Addresses under the previous class are identity-derived and are NOT
+ *     migrated; the Cavos registry is the source of truth for user -> address.
+ * Mainnet still runs the prior class until it is re-declared.
  */
 export const DEVICE_ACCOUNT_CLASS_HASH: Record<StarknetNetwork, string> = {
-  sepolia: "0x03f430a93dc4436ce2ba4a78f2ae00e10a40cd8df653516a14612df0275420a6",
+  sepolia: "0x10716331f5880dd2778cbb6cff6d825e9f5441dcf9dbc8746e58042590aa621",
   mainnet: "0x1840aded59e8a0d2b440a134cb9079a7fc11b06c77f58ed189ab436a034ca6a",
 };

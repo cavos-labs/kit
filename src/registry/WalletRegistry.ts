@@ -1,21 +1,27 @@
 import type { DevicePublicKey } from "../signer/DeviceSigner";
 
 /**
- * Off-chain wallet registry used for recovery metadata, analytics, and legacy
- * lookup-based recovery APIs. Normal chain connections derive their address
- * from `identity + appSalt` and verify deployment/authorization on-chain; a
- * registry row must never override that deterministic address.
+ * The source of truth for "this user + this app + this chain -> this address".
+ *
+ * The address is named by the first device's pubkey, so it cannot be derived
+ * from identity: connect LOOKS IT UP here first and only computes an address
+ * when the user has none yet. Cavos holds this map and nothing else — it cannot
+ * spend, and a device that has cached its address can sign without it.
  */
 export interface WalletRegistry {
   /** The user's existing wallet, or null if they don't have one yet. */
   lookup(userId: string): Promise<RegisteredWallet | null>;
 
-  /** Record a freshly deployed wallet for the user (first device). */
+  /**
+   * Claim the address this device computed. Insert-only: if another device got
+   * there first, the returned address is THAT one, and this device is not the
+   * owner-by-first-write (it needs device approval).
+   */
   register(params: {
     userId: string;
     address: string;
     initialSigner: DevicePublicKey;
-  }): Promise<void>;
+  }): Promise<RegisterResult>;
 
   /** Note an additional device signer for the user's wallet (after approval). */
   addDevice?(params: {
@@ -32,6 +38,13 @@ export interface WalletRegistry {
   }): Promise<void>;
 }
 
+export interface RegisterResult {
+  /** The address that is now recorded — ours, or the winner's on a conflict. */
+  address: string;
+  /** True when someone else had already claimed this identity's row. */
+  conflict: boolean;
+}
+
 export interface RegisteredWallet {
   address: string;
   /** Public keys of the devices registered on this wallet (if tracked). */
@@ -46,7 +59,10 @@ export class InMemoryWalletRegistry implements WalletRegistry {
     return this.wallets.get(userId) ?? null;
   }
   async register(params: { userId: string; address: string; initialSigner: DevicePublicKey }) {
+    const existing = this.wallets.get(params.userId);
+    if (existing) return { address: existing.address, conflict: existing.address !== params.address };
     this.wallets.set(params.userId, { address: params.address, devices: [params.initialSigner] });
+    return { address: params.address, conflict: false };
   }
   async addDevice(params: { userId: string; address: string; signer: DevicePublicKey }) {
     const w = this.wallets.get(params.userId);

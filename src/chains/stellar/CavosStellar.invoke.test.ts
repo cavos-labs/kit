@@ -1,7 +1,6 @@
 import { Address, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { CavosStellar } from "./CavosStellar";
 import { StellarAdapter } from "./StellarAdapter";
-import { deriveStellarMasterKeypair } from "./keys";
 import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
 import { KeypairControlKey } from "./WebCryptoControlKey";

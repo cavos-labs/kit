@@ -11,7 +11,8 @@ import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
 import type { WalletRegistry } from "../../registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
-import { deriveAddressSeedSolana } from "../../identity";
+import { appNamespace } from "../../identity";
+import { resolveAddress } from "../../registry/resolveAddress";
 import { SolanaAdapter, compressedPubkey } from "./SolanaAdapter";
 import type { PendingRecovery } from "./SolanaAdapter";
 import type { InstructionData } from "./SolanaAdapter";
@@ -90,6 +91,8 @@ export interface RecoverSolanaOptions {
   environment?: "development" | "production";
   backendUrl?: string;
   registry?: WalletRegistry;
+  /** Provides the login token the registry lookup authenticates with. */
+  auth?: AuthProvider;
   /** RPC override (else the network default). */
   rpcUrl?: string;
   /** Cavos device-account program id override. */
@@ -133,12 +136,12 @@ export class CavosSolana {
   /** Pending recovery signer to include in first deploy. */
   private _pendingRecoverySigner: DevicePublicKey | null = null;
   /** Address seed for lazy deploy. */
-  private readonly addressSeed: Uint8Array;
+  private readonly namespace: Uint8Array;
 
   private constructor(
     readonly identity: Identity,
     readonly address: string,
-    addressSeed: Uint8Array,
+    namespace: Uint8Array,
     private statusValue: ConnectStatus,
     readonly connection: Connection,
     private readonly adapter: SolanaAdapter,
@@ -147,7 +150,7 @@ export class CavosSolana {
     private readonly feePayer?: Keypair,
     private readonly registry?: WalletRegistry,
   ) {
-    this.addressSeed = addressSeed;
+    this.namespace = namespace;
     this._isDeployed = statusValue !== "undeployed";
   }
 
@@ -187,13 +190,19 @@ export class CavosSolana {
     const devicePubkey = await signer.getPublicKey();
 
     const adapter = new SolanaAdapter({ programId: opts.programId, connection, signer });
-    const addressSeed = deriveAddressSeedSolana({ userId: identity.userId, appSalt: opts.appSalt });
+    const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
 
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
         : defaultRegistry);
 
     // Default to gasless sponsorship via the Cavos relayer when an appId is set,
@@ -210,11 +219,15 @@ export class CavosSolana {
     // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
     const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null;
 
-    // Deterministic account resolution. The account PDA is [ACCOUNT_SEED,
-    // addressSeed] where addressSeed = f(userId, appSalt) — it does NOT depend on
-    // any device key, so the address is fully derivable from the identity + app
-    // config.
-    const address = adapter.computeAddress(addressSeed);
+    // The registry names the wallet; the PDA is only computed for a user who
+    // does not have one yet. Its seeds include this device's pubkey, so the
+    // address it claims is one no other device could have taken.
+    const { address } = await resolveAddress({
+      key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "solana", network: opts.network },
+      registry: opts.appId ? registry : null,
+      initialSigner: devicePubkey,
+      compute: () => adapter.computeAddress(namespace, devicePubkey),
+    });
 
     // LAZY DEPLOY: Check deployment status but DO NOT deploy here.
     // Deployment happens on first execute() call.
@@ -236,7 +249,7 @@ export class CavosSolana {
     const wallet = new CavosSolana(
       identity,
       address,
-      addressSeed,
+      namespace,
       status,
       connection,
       adapter,
@@ -592,7 +605,7 @@ export class CavosSolana {
 
     // Initialize instruction
     const initIxs = this.adapter.buildInitialize(
-      this.addressSeed,
+      this.namespace,
       payer.toBase58(),
       this.devicePubkey,
     );
@@ -624,7 +637,7 @@ export class CavosSolana {
 
     // Initialize instruction
     const initIxs = this.adapter.buildInitialize(
-      this.addressSeed,
+      this.namespace,
       payer.toBase58(),
       this.devicePubkey,
     );
@@ -812,7 +825,13 @@ export class CavosSolana {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
         : defaultRegistry);
     const existing = await registry.lookup(opts.identity.userId);
     if (!existing) {
@@ -841,11 +860,10 @@ export class CavosSolana {
 
     // Hand control to the new device's signer for all future operations.
     const adapter = new SolanaAdapter({ programId: opts.programId, connection, signer });
-    const addressSeed = deriveAddressSeedSolana({ userId: opts.identity.userId, appSalt: opts.appSalt });
     return new CavosSolana(
       opts.identity,
       existing.address,
-      addressSeed,
+      appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment }),
       "ready",
       connection,
       adapter,
