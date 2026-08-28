@@ -1448,28 +1448,42 @@ export function CavosProvider({
   const rpName = branding.appName ?? modal?.appName ?? 'Cavos';
 
   // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
+  /**
+   * Turn on passkey approvals for the whole session, with one gesture.
+   *
+   * It used to enrol the wallet on screen and no other, so the chains the user
+   * was not looking at stayed without a passkey -- and switching chain to fix
+   * that meant another prompt, and another passkey. One credential is created
+   * here and registered everywhere: as an on-chain approver on the chains that
+   * verify assertions, and as the DEK factor on Stellar, which does not.
+   *
+   * Works before the first transaction too: an undeployed wallet keeps the
+   * approver pending and includes it in its deploy.
+   */
   const enrollPasskeyDefault = useCallback(async () => {
-    if (!wallet || !identity) throw new Error('Not logged in');
-    if (wallet.status !== 'ready') throw new Error('kit: no ready device to enroll a passkey on');
-    if (wallet.chain === 'stellar') {
-      // Classic Stellar uses a WebAuthn PRF secret (not an on-chain assertion) as
-      // the passkey factor that wraps the account DEK.
-      const prf = new PasskeyPrf({ rpName });
-      const { secret } = await prf.enroll({
-        userId: identity.userId,
-        userName: identity.email ?? identity.userId,
-        ...(identity.email ? { displayName: identity.email } : {}),
-      });
-      await wallet.enrollPasskey(secret ?? (await prf.getSecret()));
-      return;
-    }
-    const passkey = new PasskeySigner({ rpName });
-    await wallet.enrollPasskey(passkey, {
+    if (!session || !identity) throw new Error('Not logged in');
+    const enrolled = await new PasskeySigner({ rpName }).enroll({
       userId: identity.userId,
       userName: identity.email ?? identity.userId,
       ...(identity.email ? { displayName: identity.email } : {}),
     });
-  }, [wallet, identity, rpName]);
+
+    for (const chain of session.chains) {
+      const w = session.wallet(chain);
+      if (w.chain === 'stellar') continue;
+      await w.addApprover(enrolled.publicKey);
+    }
+
+    const stellar = session.chains.includes('stellar') ? session.wallet('stellar') : null;
+    if (!stellar || stellar.chain !== 'stellar') return;
+    // Stellar's factor is a PRF secret, not an assertion the chain can check.
+    // The creation above asked for it; authenticators that report PRF enabled
+    // without evaluating it need one assertion, pinned to the credential just
+    // created so the picker cannot offer a different passkey.
+    const secret =
+      enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
+    await stellar.enrollPasskey(secret);
+  }, [session, identity, rpName]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
