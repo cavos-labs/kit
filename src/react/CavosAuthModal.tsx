@@ -512,6 +512,7 @@ export function CavosAuthModal({
     recover,
     passkeySupported,
     deviceAuthorization,
+    authorizingDevice,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
     setupRecovery,
@@ -809,9 +810,15 @@ export function CavosAuthModal({
       // passkey enrolled on a phone is no use from a browser that cannot reach
       // it — so a passkey that fails to produce an assertion falls back here,
       // and a recovery already in flight is never interrupted.
+        // Only when an authorization was actually asked for. A device that is
+      // merely not a signer yet does not interrupt signing in — it is resolved
+      // when something needs it, the same way a wallet is not deployed until it
+      // is used.
       // One decision, made by the provider before anything ran, instead of this
       // screen guessing from flags that three racing processes were setting.
-      if (walletStatus.isSocialRecovering) {
+      if (!authorizingDevice && !walletStatus.isSocialRecovering) {
+        // Nothing asked for this. Leave the screen alone.
+      } else if (walletStatus.isSocialRecovering) {
         setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (deviceAuthorization.method === 'passkey') {
@@ -836,7 +843,7 @@ export function CavosAuthModal({
         }
       }
     }
-  }, [deviceAuthorization, resendDeviceApproval, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
+  }, [authorizingDevice, deviceAuthorization, resendDeviceApproval, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);

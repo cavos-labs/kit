@@ -277,6 +277,18 @@ export interface CavosContextValue {
    */
   deviceAuthorization: DeviceAuthorization;
   /**
+   * Authorize this device on the wallet, by whichever route
+   * `deviceAuthorization` chose. Called for you before any action that needs
+   * the account's authority; call it directly to do it ahead of time.
+   */
+  authorizeDevice: () => Promise<void>;
+  /**
+   * True while an authorization is being asked for. The modal shows the flow
+   * only then — signing in must not be interrupted by a device that is merely
+   * not a signer yet, the same way a wallet is not deployed until it is used.
+   */
+  authorizingDevice: boolean;
+  /**
    * Modal-friendly wrapper: enroll a synced passkey as an approver using the
    * signed-in user's identity + the app name. Requires a ready device.
    */
@@ -447,6 +459,7 @@ export function CavosProvider({
   const [authError, setAuthError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
+  const [authorizingDevice, setAuthorizingDevice] = useState(false);
   /** Latest known social-enrolment answer, for the enrolment effect to consult
    *  without waiting on a re-render. */
   const socialEnrolledRef = useRef(false);
@@ -621,6 +634,25 @@ export function CavosProvider({
       }),
     [walletStatus.hasPasskey, passkeySupported, walletStatus.recovery.methods, auth, identity],
   );
+
+  // Authorization is lazy, like deployment. Signing in on a new device does not
+  // interrupt anyone: reads work without being a signer, so the wallet shows
+  // its address and balance straight away. Only an action that needs the
+  // account's authority asks — at a moment the user is already acting, where
+  // the request explains itself.
+  const authorizeDevice = useCallback(async () => {
+    if (!wallet || wallet.status !== 'needs-device-approval') return;
+    // Stays set until the device is authorized or the user closes the modal —
+    // the flow itself belongs to the modal, which runs whichever route
+    // `deviceAuthorization` named.
+    setAuthorizingDevice(true);
+    openModal();
+  }, [wallet, openModal]);
+
+  // The wallet turning ready is what ends an authorization, whoever performed it.
+  useEffect(() => {
+    if (walletStatus.isReady) setAuthorizingDevice(false);
+  }, [walletStatus.isReady]);
 
   // Connect the configured chains for an identity (deploys if needed), then
   // publish the status for the default chain. `silent` reconnects keep the
@@ -1196,17 +1228,30 @@ export function CavosProvider({
         "kit: useCavos().execute(calls) is Starknet-only. On Solana/Stellar use the `wallet` handle: wallet.execute(amount, dest).",
       );
     }
+    // One rule: anything needing the account's authority authorizes the device
+    // first. Reads never do, which is why signing in is no longer interrupted.
+    if (wallet.status === 'needs-device-approval') {
+      await authorizeDevice();
+      throw new Error('kit: approve this device to continue — the request is on screen.');
+    }
     return wallet.execute(calls, opts);
-  }, [wallet]);
+  }, [wallet, authorizeDevice]);
 
   // Chain-agnostic off-chain message signing. Every chain's wallet exposes the
   // same `signMessage(message)` signature returning a uniform `MessageSignature`.
   const signMessage = useCallback(
     async (message: string | Uint8Array): Promise<MessageSignature> => {
       if (!wallet) throw new Error('Not logged in');
+      // Same rule as execute. A signature from a key the account does not
+      // recognise is one nobody will accept, so producing it would only look
+      // like success.
+      if (wallet.status === 'needs-device-approval') {
+        await authorizeDevice();
+        throw new Error('kit: approve this device to continue — the request is on screen.');
+      }
       return wallet.signMessage(message);
     },
-    [wallet],
+    [wallet, authorizeDevice],
   );
 
   const addSigner = useCallback(
@@ -1486,6 +1531,8 @@ export function CavosProvider({
     enrollPasskey,
     passkeySupported,
     deviceAuthorization,
+    authorizeDevice,
+    authorizingDevice,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
     resendDeviceApproval,
