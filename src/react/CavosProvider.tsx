@@ -20,6 +20,7 @@ import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import { recoverCandidatePublicKeys, webauthnDigest } from '../crypto/webauthn';
+import { agreedPublicKey } from '../crypto/passkeyKey';
 import type { DevicePublicKey } from '../signer/DeviceSigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
@@ -1480,6 +1481,14 @@ export function CavosProvider({
     // Somewhere to check the answer against. Without it a wrong candidate would
     // be written as the approver, and only the wrong passkey could ever
     // authorize a device on this chain.
+    const passkey = new PasskeySigner({ rpName });
+    const candidatesFrom = async () => {
+      const assertion = await passkey.assert(crypto.getRandomValues(new Uint8Array(32)));
+      const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
+      return recoverCandidatePublicKeys(assertion.r, assertion.s, digest).map((c) => c.publicKey);
+    };
+
+    // Somewhere to check the answer against, if there is one.
     const sources = await Promise.all(
       session.chains.map(async (c) => {
         const w = session.wallet(c);
@@ -1488,16 +1497,24 @@ export function CavosProvider({
       }),
     );
     const source = sources.find((w) => w !== null);
-    if (!source) return null;
 
-    const assertion = await new PasskeySigner({ rpName }).assert(
-      crypto.getRandomValues(new Uint8Array(32)),
-    );
-    const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
-    for (const candidate of recoverCandidatePublicKeys(assertion.r, assertion.s, digest)) {
-      if (await source.isApprover(candidate.publicKey)) return candidate.publicKey;
+    const candidates = await candidatesFrom();
+    if (source) {
+      for (const candidate of candidates) {
+        if (await source.isApprover(candidate)) return candidate;
+      }
+      throw new Error('kit: that passkey does not approve this wallet.');
     }
-    throw new Error('kit: that passkey does not approve this wallet.');
+
+    // No chain holds the approver yet -- the user enrolled while on Stellar,
+    // which keeps a secret rather than a key. A second signature settles it
+    // without deploying a chain nobody asked for: the real key is recoverable
+    // from both, the artefacts are not.
+    const agreed = agreedPublicKey(candidates, await candidatesFrom());
+    if (!agreed) {
+      throw new Error('kit: could not establish which passkey approves this wallet.');
+    }
+    return agreed;
   }, [session, deviceAuthorization, rpName]);
   approverForDeployRef.current = approverForDeploy;
 

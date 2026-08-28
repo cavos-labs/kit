@@ -7,9 +7,9 @@
  * without a passkey and nothing says so.
  *
  * So: wherever the account already exists, since that costs only the approver
- * call, plus exactly one that does not, when none do. That one gives later
- * chains something to check a recovered key against, which is what lets them
- * acquire the passkey at their own deploy instead of it being held anywhere.
+ * call, plus the chain the user is actually on, whose account their next
+ * transaction would create anyway. Never a chain they are not using -- one that
+ * comes later works the key out for itself.
  *
  * Stellar is never a target: its factor is a secret derived from the passkey,
  * not a public key a chain can hold.
@@ -33,6 +33,9 @@ export function passkeyEnrolmentTargets<T extends EnrolmentWallet>(
   );
   const deployed = approvers.filter((w) => w.status !== "undeployed");
   if (deployed.length > 0) return deployed;
-  const onScreen = approvers.filter((w) => w.chain === selectedChain);
-  return (onScreen.length > 0 ? onScreen : approvers).slice(0, 1);
+  // Only the chain the user is on. Falling back to "any of them" deployed
+  // Starknet for someone working on Stellar -- a whole account, paid for, on a
+  // chain they never asked about. A chain that comes later works the key out
+  // for itself; see the two-assertion path in the provider.
+  return approvers.filter((w) => w.chain === selectedChain).slice(0, 1);
 }

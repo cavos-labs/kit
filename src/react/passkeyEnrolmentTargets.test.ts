@@ -36,6 +36,14 @@ describe("enrolling a passkey", () => {
     expect(targets(fresh, "solana")).toEqual(["solana"]);
   });
 
+  it("deploys nothing when the user is on Stellar", () => {
+    // Stellar keeps a secret, not a key, so there is nothing to write there —
+    // and reaching for another chain would deploy a whole account on one the
+    // user never asked about. A chain that comes later settles the key with a
+    // second assertion instead.
+    expect(targets(fresh, "stellar")).toEqual([]);
+  });
+
   it("deploys the chain the user is actually on", () => {
     expect(targets(fresh, "starknet")).toEqual(["starknet"]);
   });
