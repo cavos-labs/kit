@@ -669,20 +669,7 @@ export class Cavos {
    */
   onAuthorizationNeeded?: () => Promise<void>;
 
-  /**
-   * Asked for the passkey that approves this wallet, while deploying it.
-   *
-   * A passkey is enrolled once, on whichever chain the user was using, and the
-   * others are deployed later -- each needing that same approver, or a new
-   * device could never be authorized there. Holding it in the meantime is the
-   * problem: an intent kept in the tab dies with a refresh, and one kept on
-   * disk is a copy that can go stale.
-   *
-   * So nothing is kept. The key is recovered from a fresh assertion when the
-   * account is created, which is a moment that already has the user's
-   * attention and a transaction to carry it.
-   */
-  approverForDeploy?: () => Promise<DevicePublicKey | null>;
+
 
   /**
    * Authorize this device, then let the caller carry on.
@@ -760,11 +747,9 @@ export class Cavos {
     // initialize call — only the pending factors and the user's own calls.
     const allCalls: ChainCall[] = [];
 
-    // 1. The passkey that approves this wallet, asked for now rather than
-    //    remembered since enrolment. See `approverForDeploy`.
-    const approver = this._pendingApprover ?? (await this.approverForDeploy?.()) ?? null;
-    if (approver) {
-      allCalls.push(this.adapter.buildAddApprover(this.address, approver));
+    // 1. Add pending approver if enrolled before first deploy
+    if (this._pendingApprover) {
+      allCalls.push(this.adapter.buildAddApprover(this.address, this._pendingApprover));
     }
 
     // 2. Add pending recovery signer if set up before first deploy

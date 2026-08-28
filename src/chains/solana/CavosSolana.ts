@@ -128,8 +128,6 @@ export class CavosSolana {
   private _pendingApprover: DevicePublicKey | null = null;
   /** Pending recovery signer to include in first deploy. */
   private _pendingRecoverySigner: DevicePublicKey | null = null;
-  /** See `Cavos.approverForDeploy`. */
-  approverForDeploy?: () => Promise<DevicePublicKey | null>;
   /** Address seed for lazy deploy. */
   private readonly namespace: Uint8Array;
 
@@ -741,12 +739,9 @@ export class CavosSolana {
       }
     }
 
-    // The passkey that approves this wallet, asked for now rather than
-    // remembered since it was enrolled on another chain. See
-    // `approverForDeploy` on the Starknet wallet for why nothing is kept.
-    const approver = this._pendingApprover ?? (await this.approverForDeploy?.()) ?? null;
-    if (approver) {
-      const ixs = await this.adapter.buildAddApprover(this.address, approver);
+    // Add pending factors that were enrolled before deploy
+    if (this._pendingApprover) {
+      const ixs = await this.adapter.buildAddApprover(this.address, this._pendingApprover);
       await this.send(ixs, opts);
       this._pendingApprover = null;
     }
