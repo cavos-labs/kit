@@ -750,7 +750,9 @@ export class Cavos {
    * `publicKey` in the result is the uncompressed hex `04‖x‖y` of the device key.
    */
   async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
-    if (this.status !== "ready") {
+    // Works while the account is still undeployed: the signature comes from the
+    // local device key, and proving control of that key needs no chain state.
+    if (this.status === "needs-device-approval") {
       throw new Error("kit: this device is not yet an authorized signer of the wallet");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;

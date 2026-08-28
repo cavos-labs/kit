@@ -30,6 +30,11 @@ import {
 import { chunkTo64 } from "./envelope";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
 import { resolveAddress } from "../../registry/resolveAddress";
+import {
+  savePendingControl,
+  loadPendingControl,
+  clearPendingControl,
+} from "./pendingControl";
 import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
 import type { StellarNetwork } from "./constants";
@@ -263,18 +268,22 @@ export class CavosStellar {
       return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    // The address was already the user's — either the registry had it, or this
-    // device generated a key and LOST the claim race. Either way this device
-    // does not hold the control key for it, so the key it just generated is
-    // worthless and must not be persisted under someone else's address.
+    // The address was already the user's, so the key this device may have just
+    // generated lost the race and is worthless under someone else's address.
     if (existing) {
       if (fresh) wipeSeed(fresh.seed);
-      return build("needs-device-approval");
+      // But THIS device may be the one that claimed it a moment ago and simply
+      // has not created the account yet — a reload, a remount, a second connect.
+      // Its seed is still here, so it is the owner, not a stranger.
+      const pending = await loadPendingControl(address, opts.deviceKey);
+      if (!pending) return build("needs-device-approval");
+      return build("undeployed", await persistControlKey(address, { seed: pending }));
     }
 
     // This device named the address. Persist its control key now so off-chain
-    // signing (signMessage, signXdr) works before the first execute; the
-    // on-chain envelope is written when the account is created.
+    // signing (signMessage, signXdr) works before the first execute, and keep
+    // the sealed seed until creation writes the envelope on-chain.
+    await savePendingControl(address, fresh!.seed, opts.deviceKey);
     const unlocked = await persistControlKey(address, fresh!);
     const wallet = build("undeployed", unlocked);
     wallet.isNewAccount = false; // Will be set to true after first deploy
@@ -428,6 +437,9 @@ export class CavosStellar {
         keyId: this.address,
       });
     }
+
+    // The envelope is on-chain now; the local claim copy has done its job.
+    await clearPendingControl(this.address);
 
     // Wipe the control seed from memory
     wipeSeed(controlSeed);
