@@ -602,6 +602,20 @@ export function CavosProvider({
   // current screen instead of resetting to the deploying state (used right
   // after a passkey approval).
   const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet & CavosSession> => {
+    // A wall clock on the whole thing. `fetch` has no timeout of its own, so a
+    // stalled request — a phone that changed network, a tab that was
+    // backgrounded, an RPC that accepted the connection and went quiet — leaves
+    // an await that never settles. No error handler helps with that: there is no
+    // error. The spinner simply stays up forever, which is what it did.
+    const CONNECT_TIMEOUT_MS = 45_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Connecting timed out. Check your connection and try again.')),
+        CONNECT_TIMEOUT_MS,
+      );
+    });
+
     // Everything below runs inside a try: the deploying flag is set at the top
     // and cleared at the bottom, so a throw in between leaves it true for the
     // life of the page. Every failure then looks the same — a spinner that
@@ -610,6 +624,8 @@ export function CavosProvider({
     try {
       const cfg = configRef.current;
       if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
+      // Anything awaited below races the deadline above.
+      const race = <T,>(work: Promise<T>): Promise<T> => Promise.race([work, deadline]);
 
       // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
       // otherwise fall back to single `chain` for back-compat
@@ -617,7 +633,7 @@ export function CavosProvider({
         ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
         : { chain: cfg.chain ?? 'starknet' as Chain };
 
-      const s = await Cavos.connect({
+      const s = await race(Cavos.connect({
         ...connectOpts,
         network: cfg.network,
         identity: id,
@@ -633,7 +649,7 @@ export function CavosProvider({
         ...(resolveSocialRecoveryPolicy(cfg)
           ? { legacyDeviceApproval: false }
           : {}),
-      });
+      }));
       setSession(s);
       setSelectedChain(s.defaultChain);
       setIdentity(id);
@@ -647,7 +663,9 @@ export function CavosProvider({
       const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
       let hasPasskey = false;
       if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
-        try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
+        // Also raced: this reads the chain, so it can stall like anything else,
+        // and a hang here would strand the connect just as completely.
+        try { hasPasskey = await race(w.hasPasskey()); } catch { /* leave false → email flow */ }
       }
 
       setWalletStatus({
@@ -670,6 +688,8 @@ export function CavosProvider({
       setWalletStatus((status) => ({ ...status, isDeploying: false }));
       setAuthError(error instanceof Error ? error.message : 'Could not connect your wallet.');
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }, [modal]);
 
