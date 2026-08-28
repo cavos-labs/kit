@@ -1342,18 +1342,29 @@ export function CavosAuthModal({
             </div>
             <div>
               <h2 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
+                {/* This screen means two different things. Signing in is one;
+                    restoring a wallet onto a device that is not a signer yet is
+                    the other, and naming the identity provider there is simply
+                    false — nothing is being connected, the enclave is deciding
+                    whether this device may have the wallet back. */}
                 {isDone
-                  ? providerFace.name
-                    ? `Connected with ${providerFace.name}`
-                    : "You're all set"
-                  : providerFace.name
-                    ? `Connecting with ${providerFace.name}`
-                    : 'Setting up your account'}
+                  ? walletStatus.isSocialRecovering
+                    ? 'Wallet restored'
+                    : providerFace.name
+                      ? `Connected with ${providerFace.name}`
+                      : "You're all set"
+                  : walletStatus.isSocialRecovering
+                    ? 'Restoring your wallet'
+                    : providerFace.name
+                      ? `Connecting with ${providerFace.name}`
+                      : 'Setting up your account'}
               </h2>
               <p style={{ margin: '6px 0 0', fontSize: '13px', color: subTextColor }}>
                 {isDone
                   ? "You're good to go"
-                  : deploySlow
+                  : walletStatus.isSocialRecovering
+                    ? 'Proving to the enclave that this device is yours'
+                    : deploySlow
                     ? 'This is taking longer than usual — the network may be slow.'
                     : 'This only takes a moment…'}
               </p>

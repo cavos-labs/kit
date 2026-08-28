@@ -21,6 +21,7 @@ import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
+import { decideSocialRecovery } from './socialRecoveryDecision';
 import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
@@ -747,16 +748,12 @@ export function CavosProvider({
       !config.appId
     ) return;
 
-    // An undeployed wallet is neither case: it is brand new and this device
-    // already controls it, so there is nothing to recover, and there is no
-    // account on-chain yet to enrol an authority against. Enrolment happens
-    // once the first execute deploys it and the status turns 'ready'.
-    //
-    // This has to come BEFORE the credential is taken. `consume` is one-shot,
-    // so returning after it burns the only credential the session will ever
-    // have — and since every new wallet starts undeployed, that meant the
-    // enrolment which should follow the first execute could never run.
-    if (wallet.status === 'undeployed') return;
+    // What to do, and whether the one-shot credential may be taken at all. The
+    // ordering lives in `decideSocialRecovery` because getting it wrong is
+    // silent: taking the credential for a wallet we then skip burns it, and the
+    // enrolment that should follow the first execute never runs.
+    const decision = decideSocialRecovery(wallet.status, socialEnrolledRef.current);
+    if (!decision.takesCredential) return;
 
     let credential: SocialRecoveryCredential;
     try {
@@ -764,11 +761,7 @@ export function CavosProvider({
     } catch {
       return;
     }
-    const action = wallet.status === 'ready' ? 'enroll' : 'recover';
-    // A wallet that is already enrolled has nothing to enrol. Without this the
-    // enclave ran on every fresh login purely to answer 409, and the UI flashed
-    // "securing recovery" each time it did.
-    if (action === 'enroll' && socialEnrolledRef.current) return;
+    const action = decision.action;
     const attemptKey =
       `${wallet.chain}:${wallet.address}:${action}:${credential.tokenFingerprint}`;
     if (socialAttemptRef.current.has(attemptKey)) return;
