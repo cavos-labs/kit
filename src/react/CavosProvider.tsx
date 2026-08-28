@@ -602,64 +602,75 @@ export function CavosProvider({
   // current screen instead of resetting to the deploying state (used right
   // after a passkey approval).
   const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet & CavosSession> => {
-    const cfg = configRef.current;
-    if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
+    // Everything below runs inside a try: the deploying flag is set at the top
+    // and cleared at the bottom, so a throw in between leaves it true for the
+    // life of the page. Every failure then looks the same — a spinner that
+    // never resolves, on a device with no console to ask — which is how a
+    // registry 401 and a chain that will not connect became indistinguishable.
+    try {
+      const cfg = configRef.current;
+      if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
 
-    // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
-    // otherwise fall back to single `chain` for back-compat
-    const connectOpts = cfg.chains
-      ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
-      : { chain: cfg.chain ?? 'starknet' as Chain };
+      // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
+      // otherwise fall back to single `chain` for back-compat
+      const connectOpts = cfg.chains
+        ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
+        : { chain: cfg.chain ?? 'starknet' as Chain };
 
-    const s = await Cavos.connect({
-      ...connectOpts,
-      network: cfg.network,
-      identity: id,
-      // The registry authenticates the end user with this login's token.
-      auth,
-      appSalt: cfg.appSalt,
-      ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
-      ...(cfg.appId ? { appId: cfg.appId } : {}),
-      ...(cfg.environment ? { environment: cfg.environment } : {}),
-      ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
-      ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
-      ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
-      ...(resolveSocialRecoveryPolicy(cfg)
-        ? { legacyDeviceApproval: false }
-        : {}),
-    });
-    setSession(s);
-    setSelectedChain(s.defaultChain);
-    setIdentity(id);
+      const s = await Cavos.connect({
+        ...connectOpts,
+        network: cfg.network,
+        identity: id,
+        // The registry authenticates the end user with this login's token.
+        auth,
+        appSalt: cfg.appSalt,
+        ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
+        ...(cfg.appId ? { appId: cfg.appId } : {}),
+        ...(cfg.environment ? { environment: cfg.environment } : {}),
+        ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
+        ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+        ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
+        ...(resolveSocialRecoveryPolicy(cfg)
+          ? { legacyDeviceApproval: false }
+          : {}),
+      });
+      setSession(s);
+      setSelectedChain(s.defaultChain);
+      setIdentity(id);
 
-    // Get the default wallet for status updates
-    const w = s.wallet(s.defaultChain);
+      // Get the default wallet for status updates
+      const w = s.wallet(s.defaultChain);
 
-    // Starknet and Solana both support the email device-approval flow (both carry
-    // a pendingRequestId when a returning-new-device request was filed). Stellar
-    // has its own passkey-PRF device model with no email flow today.
-    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
-    let hasPasskey = false;
-    if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
-      try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
+      // Starknet and Solana both support the email device-approval flow (both carry
+      // a pendingRequestId when a returning-new-device request was filed). Stellar
+      // has its own passkey-PRF device model with no email flow today.
+      const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+      let hasPasskey = false;
+      if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
+        try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
+      }
+
+      setWalletStatus({
+        isDeploying: false,
+        isReady: w.status === 'ready',
+        isUndeployed: w.status === 'undeployed',
+        needsDeviceApproval: w.status === 'needs-device-approval',
+        awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
+        pendingRequestId,
+        hasPasskey,
+        isNewAccount: w.isNewAccount,
+        isSocialRecovering: false,
+        socialRecoveryReadyAt: null,
+        // Unknown until the lookup above answers for this wallet.
+        recovery: { protected: false, methods: [] },
+      });
+      modal?.onSuccess?.(w.address);
+      return s;
+    } catch (error) {
+      setWalletStatus((status) => ({ ...status, isDeploying: false }));
+      setAuthError(error instanceof Error ? error.message : 'Could not connect your wallet.');
+      throw error;
     }
-
-    setWalletStatus({
-      isDeploying: false,
-      isReady: w.status === 'ready',
-      isUndeployed: w.status === 'undeployed',
-      needsDeviceApproval: w.status === 'needs-device-approval',
-      awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
-      pendingRequestId,
-      hasPasskey,
-      isNewAccount: w.isNewAccount,
-      isSocialRecovering: false,
-      socialRecoveryReadyAt: null,
-      // Unknown until the lookup above answers for this wallet.
-      recovery: { protected: false, methods: [] },
-    });
-    modal?.onSuccess?.(w.address);
-    return s;
   }, [modal]);
 
   const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
@@ -779,6 +790,14 @@ export function CavosProvider({
     try {
       credential = auth.consumeSocialRecoveryCredential();
     } catch {
+      // The credential is deliberately never persisted — it is the proof the
+      // enclave checks, and it belongs in memory only. So it does not survive a
+      // reload, and a device that reloads before recovering has no way to prove
+      // itself. Signing in again mints a fresh one, which is the whole fix, but
+      // only if the user is told rather than left on a spinner.
+      if (decision.action === 'recover') {
+        setAuthError('Sign in again to restore this device — the proof this needs is only valid for one session.');
+      }
       return;
     }
     const action = decision.action;
