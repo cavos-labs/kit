@@ -1072,10 +1072,19 @@ export class Cavos {
     pubkey: DevicePublicKey,
     opts?: ExecuteOptions,
   ): Promise<{ transactionHash?: string }> {
-    // For undeployed accounts, store the pending approver for first deploy
+    // An account that does not exist yet is created here, rather than the
+    // approver being remembered until something else creates it.
+    //
+    // Remembering was the bug: the note lived in the tab and a refresh wiped
+    // it, so the account deployed without the passkey and nothing said so. And
+    // there is nothing to defer for -- enrolling a passkey is an action the
+    // user just asked for, so it deploys the account like any other first
+    // action. `_pendingApprover` carries it into that same sponsored
+    // transaction.
     if (this.statusValue === "undeployed") {
       this._pendingApprover = pubkey;
-      return {}; // No tx yet — will be included in first deploy
+      const { transactionHash } = await this._deployAndExecute([], opts);
+      return { transactionHash };
     }
 
     if (this.statusValue !== "ready") {

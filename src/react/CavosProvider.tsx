@@ -24,6 +24,7 @@ import type { DevicePublicKey } from '../signer/DeviceSigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { decideSocialRecovery } from './socialRecoveryDecision';
+import { passkeyEnrolmentTargets } from './passkeyEnrolmentTargets';
 import {
   resolveDeviceAuthorization,
   type DeviceApproval,
@@ -1532,22 +1533,27 @@ export function CavosProvider({
       ...(identity.email ? { displayName: identity.email } : {}),
     });
 
-    for (const chain of session.chains) {
-      const w = session.wallet(chain);
-      if (w.chain === 'stellar') continue;
+    // Register it where the account exists, and on exactly one that does not,
+    // so there is somewhere to check a recovered key against later. Deploying
+    // every configured chain here would buy gas on chains the user may never
+    // touch; each of those picks the passkey up when it is created.
+    for (const w of passkeyEnrolmentTargets(
+      session.chains.map((c) => session.wallet(c)),
+      selectedChain,
+    )) {
       await w.addApprover(enrolled.publicKey);
     }
 
+    // Stellar's factor is a secret derived from the passkey, not a key any
+    // chain can hold, so an account that does not exist yet has nothing to
+    // write it to -- and needs nothing kept, because its create derives it
+    // again from this same passkey.
     const stellar = session.chains.includes('stellar') ? session.wallet('stellar') : null;
-    if (!stellar || stellar.chain !== 'stellar') return;
-    // Stellar's factor is a PRF secret, not an assertion the chain can check.
-    // The creation above asked for it; authenticators that report PRF enabled
-    // without evaluating it need one assertion, pinned to the credential just
-    // created so the picker cannot offer a different passkey.
+    if (!stellar || stellar.chain !== 'stellar' || stellar.status === 'undeployed') return;
     const secret =
       enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
     await stellar.enrollPasskey(secret);
-  }, [session, identity, rpName]);
+  }, [session, identity, rpName, selectedChain]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
