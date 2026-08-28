@@ -30,13 +30,16 @@ export interface CavosAuthOptions {
  * uses for on-chain RSA verification). Here we only need the stable `sub` claim
  * from it — the RSA/JWKS/nonce machinery react relies on is dead weight for the
  * device model, because the device key (not the JWT) authorizes on-chain calls.
- * The fresh provider token is retained only in memory. Its SHA-256 fingerprint
- * reserves exactly one enclave recovery session while the token
- * itself is sent only through the attested encrypted channel.
+ * The provider token is kept in `sessionStorage` so a reconnect can still
+ * authenticate to the wallet registry. The separate social-recovery credential
+ * is NOT: it stays in memory, its SHA-256 fingerprint reserves exactly one
+ * enclave session, and the token itself travels only through the attested
+ * encrypted channel.
  */
 export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
   private readonly identityStorageKey: string;
+  private readonly authTokenKey: string;
   /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
   private pendingNonce: string | null = null;
   private last: Identity | null = null;
@@ -44,12 +47,26 @@ export class CavosAuth implements AuthProvider {
    * Never persisted to localStorage and never sent to the Cavos control plane
    * outside the attested encrypted channel. */
   private recoveryCredential: SocialRecoveryCredential | null = null;
-  /** The raw provider token from this session's login (memory only). */
-  private authToken: string | null = null;
+  /**
+   * The raw provider token from this session's login.
+   *
+   * Held in `sessionStorage`, not memory alone. The wallet registry
+   * authenticates with it, and `resolveAddress` fails closed rather than mint a
+   * second wallet for a user who already has one — so a token that does not
+   * survive a reload takes every reconnect down with it, and a device with no
+   * cached address can never connect at all.
+   *
+   * `sessionStorage` and not `localStorage`: it dies with the tab, is not shared
+   * across tabs, and never reaches another origin. The token is already inside
+   * this page's JavaScript either way; what changes is that it now outlives a
+   * navigation, which is exactly what the reconnect needs.
+   */
+  private authTokenValue: string | null = null;
 
   constructor(private readonly opts: CavosAuthOptions = {}) {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
+    this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
   }
 
   /**
@@ -75,9 +92,13 @@ export class CavosAuth implements AuthProvider {
   clearStoredIdentity(): void {
     this.last = null;
     this.recoveryCredential = null;
-    this.authToken = null;
+    this.setAuthToken(null);
     if (typeof window !== "undefined") {
-      window.localStorage.removeItem(this.identityStorageKey);
+      try {
+        window.localStorage.removeItem(this.identityStorageKey);
+      } catch {
+        /* nothing was stored if storage is unavailable */
+      }
     }
   }
 
@@ -228,7 +249,7 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
-    this.authToken = token;
+    this.setAuthToken(token);
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
       ? createSocialRecoveryCredential(token)
       : null;
@@ -249,7 +270,24 @@ export class CavosAuth implements AuthProvider {
    * just logged in and therefore has one.
    */
   getAuthToken(): string | null {
-    return this.authToken;
+    if (this.authTokenValue) return this.authTokenValue;
+    try {
+      this.authTokenValue = window.sessionStorage.getItem(this.authTokenKey);
+    } catch {
+      // No session storage (private mode, blocked): memory only, as before.
+    }
+    return this.authTokenValue;
+  }
+
+  private setAuthToken(token: string | null): void {
+    this.authTokenValue = token;
+    if (typeof window === "undefined") return;
+    try {
+      if (token) window.sessionStorage.setItem(this.authTokenKey, token);
+      else window.sessionStorage.removeItem(this.authTokenKey);
+    } catch {
+      /* memory-only fallback; a reconnect will 401 as it did before */
+    }
   }
 
   /** Generate (and remember) the nonce the Cavos backend expects on requests. */
@@ -273,7 +311,13 @@ export class CavosAuth implements AuthProvider {
   private remember(id: Identity): Identity {
     this.last = id;
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+      try {
+        window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+      } catch {
+        // Private mode and blocked site data throw here. This store only saves
+        // a returning user from signing in again; an unwritable one must not
+        // take down the login that just succeeded.
+      }
     }
     return id;
   }
