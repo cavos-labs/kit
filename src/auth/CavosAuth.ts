@@ -335,8 +335,10 @@ function currentCleanCallbackUrl(): string | null {
  * to the user. The issuer is the authoritative answer and is always there.
  */
 function providerFromClaims(claims: any, fallback: string): string {
+  // Firebase's own value passes through untouched ("google.com", "password"):
+  // it is already public API and callers switch on it.
   const signIn: string | undefined = claims?.firebase?.sign_in_provider;
-  if (signIn) return signIn.replace(/\.com$/, "");
+  if (signIn) return signIn;
   switch (claims?.iss) {
     case "https://accounts.google.com":
       return "google";

@@ -34,13 +34,15 @@ describe("provider from the credential", () => {
     expect(id.provider).toBe("email");
   });
 
-  it("prefers Firebase's own sign-in provider, without the domain suffix", async () => {
+  it("passes Firebase's own sign-in provider through unchanged", async () => {
+    // Already public API — callers switch on "google.com", so normalising it
+    // here would be a silent breaking change. Display code normalises instead.
     const id = await identityFrom({
       iss: "https://securetoken.google.com/x",
       sub: "u1",
       firebase: { sign_in_provider: "google.com" },
     });
-    expect(id.provider).toBe("google");
+    expect(id.provider).toBe("google.com");
   });
 
   it("falls back rather than inventing a provider it cannot know", async () => {

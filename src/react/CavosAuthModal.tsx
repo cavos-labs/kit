@@ -1261,7 +1261,9 @@ export function CavosAuthModal({
     // once it lands.
     const activeProvider = user?.provider ?? pendingProvider ?? recentProvider;
     const providerFace = (() => {
-      switch (activeProvider) {
+      // Both vocabularies reach here: the issuer-derived "google" and Firebase's
+      // "google.com". Normalise for display only — the field itself is API.
+      switch (activeProvider?.replace(/\.com$/, '')) {
         case 'google':
           return { name: 'Google', icon: <GoogleIcon /> };
         case 'apple':
