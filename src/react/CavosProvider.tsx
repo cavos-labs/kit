@@ -35,8 +35,10 @@ import {
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
 import {
-  enrollHardwareIsolatedRecovery,
+  agreeRecoveryAuthority,
+  writeRecoveryAuthority,
   recoverHardwareIsolatedDevice,
+  type AgreedRecoveryAuthority,
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
@@ -491,6 +493,13 @@ export function CavosProvider({
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
+  /**
+   * Authorities agreed with the enclave but not yet on-chain, per wallet. The
+   * two halves of enrolment are separated in time on purpose: the enclave half
+   * needs a login proof that expires in five minutes, the chain half needs an
+   * account that does not exist until the user's first transaction.
+   */
+  const agreedAuthorityRef = useRef(new Map<string, AgreedRecoveryAuthority>());
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
 
@@ -868,16 +877,24 @@ export function CavosProvider({
   }, [session, selectedChain]);
 
   /**
-   * Enrol every wallet that is deployed and has no recovery authority yet.
+   * Set up recovery on every wallet in the session, in two halves.
    *
-   * Every chain, not the visible one. A session holds a wallet per chain and
-   * only one is on screen -- `chains[0]` after a login, whatever the user was
-   * last using. Enrolling just that one left the others deployed and
-   * unrecoverable, and nothing said so until a second device tried to restore
-   * one and was told the wallet has no recovery set up.
+   * Agreeing the authority with the enclave needs the login proof, which is
+   * minted by the sign-in and rejected once it is five minutes old. Writing it
+   * on-chain needs the account, which under lazy deploy does not exist until
+   * the user's first transaction -- ten minutes later, or tomorrow. Doing both
+   * at once meant neither happened for anyone who did not transact immediately.
    *
-   * Recovery stays with the active wallet below: it belongs to the action the
-   * user is taking. This is background hardening and shows only in the result.
+   * So: agree at login, write when there is an account. The written half is
+   * device-signed and needs no proof, and an authority already agreed is
+   * returned again rather than replaced, so a browser that dies in between
+   * loses nothing.
+   *
+   * Every chain, not the visible one. Only one wallet is on screen --
+   * `chains[0]` after a login -- and enrolling just that one left the others
+   * deployed and unrecoverable, silently, until a second device tried to
+   * restore one. Recovery itself stays with the active wallet below: it belongs
+   * to the action the user is taking.
    */
   useEffect(() => {
     if (
@@ -889,32 +906,17 @@ export function CavosProvider({
       !config.appId
     ) return;
 
-    const pending = session.chains
+    const targets = session.chains
       .map((c) => session.wallet(c))
-      .filter(
-        (w) =>
-          decideSocialRecovery(
-            w.status,
-            socialEnrolledRef.current.has(`${w.chain}:${w.address}`),
-          ).action === 'enroll',
-      );
-    if (pending.length === 0) return;
-
-    let credential: SocialRecoveryCredential;
-    try {
-      credential = auth.consumeSocialRecoveryCredential();
-    } catch {
-      // The proof is deliberately never persisted -- it is what the enclave
-      // verifies -- so a reloaded page does not have one and the next sign-in
-      // enrols instead. Worth saying out loud, though: silence here is how a
-      // wallet came to be deployed with no recovery at all.
-      console.warn(
-        '[CavosProvider] recovery not enrolled yet on ' +
-          pending.map((w) => w.chain).join(', ') +
-          ': this session has no fresh login proof. It will enrol on the next sign-in.',
-      );
-      return;
-    }
+      .map((w) => ({
+        wallet: w,
+        action: decideSocialRecovery(
+          w.status,
+          socialEnrolledRef.current.has(`${w.chain}:${w.address}`),
+        ).action,
+      }))
+      .filter((t) => t.action === 'pre-enroll' || t.action === 'enroll');
+    if (targets.length === 0) return;
 
     const client = new SocialRecoveryClient({
       baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
@@ -922,21 +924,57 @@ export function CavosProvider({
       environment: config.environment,
       attestation: socialRecoveryPolicy,
     });
+
+    // Writing an authority already agreed needs no login proof, so those go
+    // ahead whatever this session has. Only agreeing a new one needs it.
+    const key = (w: CavosWallet) => `${w.chain}:${w.address}`;
+    const needsCredential = targets.some((t) => !agreedAuthorityRef.current.has(key(t.wallet)));
+    let credential: SocialRecoveryCredential | null = null;
+    if (needsCredential) {
+      try {
+        credential = auth.consumeSocialRecoveryCredential();
+      } catch {
+        // Deliberately never persisted -- it is what the enclave verifies -- so
+        // a reloaded page has none and the next sign-in agrees the authority
+        // instead. Say so: silence here is how a wallet came to be deployed
+        // with no recovery at all.
+        console.warn(
+          '[CavosProvider] no fresh login proof this session; recovery will be set up on the next sign-in.',
+        );
+      }
+    }
+
     let cancelled = false;
 
     void Promise.all(
-      pending.map(async (w) => {
-        const attemptKey = `${w.chain}:${w.address}:enroll:${credential.tokenFingerprint}`;
+      targets.map(async ({ wallet: w, action }) => {
+        const attemptKey = `${key(w)}:${action}:${credential?.tokenFingerprint ?? 'agreed'}`;
         if (socialAttemptRef.current.has(attemptKey)) return;
         socialAttemptRef.current.add(attemptKey);
         try {
-          await enrollHardwareIsolatedRecovery({
+          // Agree the authority with the enclave while the login proof is
+          // fresh. It expires in five minutes and, under lazy deploy, the
+          // account it protects does not exist until the user's first
+          // transaction -- so waiting for the account meant a user who signed
+          // in and transacted ten minutes later was never enrolled at all.
+          let authority = agreedAuthorityRef.current.get(key(w));
+          if (!authority) {
+            if (!credential) return;
+            authority = await agreeRecoveryAuthority({ client, wallet: w, credential });
+            if (cancelled) return;
+            agreedAuthorityRef.current.set(key(w), authority);
+          }
+          // The chain half is device-signed and needs no proof, so it can wait
+          // for the account however long that takes.
+          if (action !== 'enroll') return;
+          await writeRecoveryAuthority({
             client,
             wallet: w,
-            credential,
+            authority,
             delaySeconds: socialRecovery.delaySeconds,
           });
-          socialEnrolledRef.current.add(`${w.chain}:${w.address}`);
+          agreedAuthorityRef.current.delete(key(w));
+          socialEnrolledRef.current.add(key(w));
           if (cancelled) return;
           setWalletStatus((status) => ({
             ...status,
@@ -948,11 +986,11 @@ export function CavosProvider({
             },
           }));
         } catch (error) {
-          // Enrolment is hardening and must never break a working wallet. A 409
-          // means a previous login already did it.
+          // Hardening must never break a working wallet. A 409 means an earlier
+          // login already did it.
           const message = error instanceof Error ? error.message : String(error);
           if (!message.includes('already_enrolled')) {
-            console.error(`[CavosProvider] enrolment failed on ${w.chain}:`, error);
+            console.error(`[CavosProvider] recovery setup failed on ${w.chain}:`, error);
           }
         }
       }),

@@ -2,13 +2,19 @@ import { describe, expect, it } from "@jest/globals";
 import { decideSocialRecovery } from "./socialRecoveryDecision";
 
 describe("when social recovery runs", () => {
-  it("leaves an undeployed wallet alone", () => {
-    // This device made it, so there is nothing to restore — and there is no
-    // account on-chain yet to enrol an authority against.
+  it("agrees the authority for an undeployed wallet without touching the chain", () => {
+    // There is no account to write an authority to yet, but the enclave half
+    // needs no account — only the login, which is happening now and will not
+    // be repeated. The first execute carries it on-chain.
     expect(decideSocialRecovery("undeployed", false)).toEqual({
-      action: "skip",
-      takesCredential: false,
+      action: "pre-enroll",
+      takesCredential: true,
     });
+  });
+
+  it("does not restore a device onto a wallet that has no account yet", () => {
+    // This device made it, so there is nothing to restore.
+    expect(decideSocialRecovery("undeployed", false).action).not.toBe("recover");
   });
 
   it("does not spend the credential on a wallet it skips", () => {
@@ -17,6 +23,7 @@ describe("when social recovery runs", () => {
     // the first execute with nothing, and it never happens — silently, with the
     // only symptom a second device failing weeks later.
     expect(decideSocialRecovery("undeployed", true).takesCredential).toBe(false);
+    expect(decideSocialRecovery("undeployed", true).action).toBe("skip");
     expect(decideSocialRecovery("ready", true).takesCredential).toBe(false);
   });
 
