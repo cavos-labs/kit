@@ -197,6 +197,17 @@ export class CavosAuth implements AuthProvider {
    * one enclave session, so retaining it after recovery only permits accidental
    * replay attempts during the wallet's post-recovery reconnect.
    */
+  /**
+   * Whether a login proof is available without taking it.
+   *
+   * The UI has to choose how a device gets authorized before anything runs, and
+   * that choice depends on whether the enclave can be used at all. Asking with
+   * `consume` would spend the proof to find out.
+   */
+  hasSocialRecoveryCredential(): boolean {
+    return this.recoveryCredential !== null;
+  }
+
   consumeSocialRecoveryCredential(): SocialRecoveryCredential {
     const credential = this.getSocialRecoveryCredential();
     this.recoveryCredential = null;

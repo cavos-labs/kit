@@ -19,7 +19,6 @@ import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
-import { HttpRecoveryClient } from "../../recovery/HttpRecoveryClient";
 import type { PasskeyApprover, PasskeyEnrollParams } from "../../signer/PasskeyProvider";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
@@ -57,11 +56,6 @@ export interface ConnectSolanaOptions {
    * the default path when `appId` is provided.
    */
   feePayer?: Keypair;
-  /**
-   * Keep the legacy owner-device/email approval request enabled. Set false when
-   * hardware-isolated social recovery owns the new-device flow.
-   */
-  legacyDeviceApproval?: boolean;
 }
 
 /**
@@ -243,11 +237,6 @@ export class CavosSolana {
         ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection, environment: opts.environment })
         : undefined);
 
-    // Recovery client drives the email device-approval flow (same as Starknet):
-    // when a returning user signs in on a new device, we ask the backend to email
-    // the owner an approval link. Chain-agnostic — Solana's secp256r1 device key
-    // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
-    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment, authToken: () => opts.auth?.getAuthToken?.() ?? null }) : null;
 
     // The registry names the wallet; the PDA is only computed for a user who
     // does not have one yet. Its seeds include this device's pubkey, so the
@@ -300,27 +289,12 @@ export class CavosSolana {
       }
     }
 
-    // Deployed account, but THIS device isn't an authorized signer yet — request approval
-    if (status === "needs-device-approval" && recovery && opts.legacyDeviceApproval !== false) {
-      const dedup = lastDeviceRequest.get(identity.userId);
-      const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
-      try {
-        if (fresh) {
-          wallet.pendingRequestId = dedup!.requestId;
-        } else {
-          const { requestId } = await recovery.requestDeviceAddition({
-            userId: identity.userId,
-            accountAddress: address,
-            newSigner: devicePubkey,
-            ...(identity.email ? { email: identity.email } : {}),
-          });
-          wallet.pendingRequestId = requestId;
-          lastDeviceRequest.set(identity.userId, { requestId, requestedAt: Date.now() });
-        }
-      } catch (e) {
-        console.warn("[Cavos/solana] requestDeviceAddition failed:", e);
-      }
-    }
+    // Connect no longer mails an approval on sight. It used to fire here the
+    // moment it saw an unauthorized device, before anything had considered
+    // whether a passkey or the enclave could authorize it instantly — so the
+    // user got an approval spinner racing a recovery, and a screen showing
+    // both. `requestDeviceAddition` is now called only when the UI has chosen
+    // email as the way in. See `resolveDeviceAuthorization`.
     return wallet;
   }
 
@@ -927,12 +901,6 @@ export class CavosSolana {
 
 const defaultRegistry = new InMemoryWalletRegistry();
 
-// De-dup window for the email device-approval request — collapses a page refresh
-// / reconnect burst so the owner doesn't get one email per attempt. The backend
-// already dedups by request id within its 24h TTL; this client-side guard avoids
-// minting fresh request ids on every reconnect. Mirrors Starknet (Cavos.ts).
-const DEVICE_REQUEST_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
-const lastDeviceRequest = new Map<string, { requestId: string; requestedAt: number }>();
 
 async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
   if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {

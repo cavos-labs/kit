@@ -22,6 +22,7 @@ import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { decideSocialRecovery } from './socialRecoveryDecision';
+import { resolveDeviceAuthorization, type DeviceAuthorization } from './deviceAuthorization';
 import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
@@ -269,6 +270,12 @@ export interface CavosContextValue {
   ) => Promise<{ publicKey: { x: bigint; y: bigint }; transactionHash?: string }>;
   /** Whether this device can use a platform passkey (Face ID / Touch ID / PIN). */
   passkeySupported: boolean;
+  /**
+   * The single way this device should be authorized, when it is not a signer
+   * yet. One decision taken before anything runs, so the UI shows one action
+   * instead of racing every mechanism at once.
+   */
+  deviceAuthorization: DeviceAuthorization;
   /**
    * Modal-friendly wrapper: enroll a synced passkey as an approver using the
    * signed-in user's identity + the app name. Requires a ready device.
@@ -585,17 +592,35 @@ export function CavosProvider({
     const cfg = configRef.current;
     // Email device-approval works on both Starknet and Solana (same secp256r1
     // device key; backend is chain-agnostic). Other chains have no email flow.
-    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana') || !wallet.pendingRequestId) return;
+    // Also the FIRST request, not only a resend: connect no longer mails one on
+    // sight, so this is where the email path actually begins — once the UI has
+    // chosen it.
+    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana')) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
     const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
-    await recovery.requestDeviceAddition({
+    const { requestId } = await recovery.requestDeviceAddition({
       userId: identity.userId,
       accountAddress: wallet.address,
       newSigner: wallet.publicKey,
       ...(identity.email ? { email: identity.email } : {}),
     });
-  }, [identity, wallet]);
+    setWalletStatus((status) => ({ ...status, awaitingApproval: true, pendingRequestId: requestId }));
+  }, [identity, wallet, auth]);
+
+  // One decision, taken before anything runs. Passkey first (instant, needs
+  // nothing else), then the enclave, then email — which needs a second device
+  // and the user's attention twice, so it is the floor rather than the default
+  // it used to be.
+  const deviceAuthorization = useMemo(
+    () =>
+      resolveDeviceAuthorization({
+        passkey: walletStatus.hasPasskey && passkeySupported,
+        socialEnrolled: walletStatus.recovery.methods.includes('social'),
+        socialCredential: auth.hasSocialRecoveryCredential(),
+      }),
+    [walletStatus.hasPasskey, passkeySupported, walletStatus.recovery.methods, auth, identity],
+  );
 
   // Connect the configured chains for an identity (deploys if needed), then
   // publish the status for the default chain. `silent` reconnects keep the
@@ -646,9 +671,6 @@ export function CavosProvider({
         ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
         ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
-        ...(resolveSocialRecoveryPolicy(cfg)
-          ? { legacyDeviceApproval: false }
-          : {}),
       }));
       setSession(s);
       setSelectedChain(s.defaultChain);
@@ -810,14 +832,11 @@ export function CavosProvider({
     try {
       credential = auth.consumeSocialRecoveryCredential();
     } catch {
-      // The credential is deliberately never persisted — it is the proof the
-      // enclave checks, and it belongs in memory only. So it does not survive a
-      // reload, and a device that reloads before recovering has no way to prove
-      // itself. Signing in again mints a fresh one, which is the whole fix, but
-      // only if the user is told rather than left on a spinner.
-      if (decision.action === 'recover') {
-        setAuthError('Sign in again to restore this device — the proof this needs is only valid for one session.');
-      }
+      // No error here. The proof is deliberately never persisted — it is what
+      // the enclave verifies — so a reloaded device simply does not have one,
+      // and `resolveDeviceAuthorization` already reports that as
+      // `social-needs-login`: a sign-in button, not a failure notice pinned to
+      // somebody else's screen.
       return;
     }
     const action = decision.action;
@@ -1466,6 +1485,7 @@ export function CavosProvider({
     listDevices,
     enrollPasskey,
     passkeySupported,
+    deviceAuthorization,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
     resendDeviceApproval,

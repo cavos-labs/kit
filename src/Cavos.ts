@@ -17,7 +17,6 @@ import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 import { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
 import type { RecoveryClient } from "./recovery/RecoveryClient";
-import { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
 import { BackupSigner, deriveBackupKey } from "./recovery/BackupSigner";
 import { appNamespace } from "./identity";
 import { resolveAddress } from "./registry/resolveAddress";
@@ -164,11 +163,6 @@ export interface ConnectOptions {
    * signer yet.
    */
   recovery?: RecoveryClient;
-  /**
-   * Keep the legacy owner-device/email approval request enabled. Set false when
-   * hardware-isolated social recovery owns the new-device flow.
-   */
-  legacyDeviceApproval?: boolean;
   rpcUrl?: string;
   /**
    * Per-chain RPC overrides. With more than one configured chain a single
@@ -220,7 +214,6 @@ interface StarknetConnectOptions {
   backendUrl?: string;
   registry?: WalletRegistry;
   recovery?: RecoveryClient;
-  legacyDeviceApproval?: boolean;
   paymasterApiKey: string;
   paymasterUrl?: string;
   rpcUrl?: string;
@@ -474,9 +467,6 @@ export class Cavos {
         ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
         ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
-        ...(opts.legacyDeviceApproval !== undefined
-          ? { legacyDeviceApproval: opts.legacyDeviceApproval }
-          : {}),
       });
     }
     if (chain === "stellar") {
@@ -512,7 +502,6 @@ export class Cavos {
       backendUrl: opts.backendUrl,
       registry: opts.registry,
       recovery: opts.recovery,
-      legacyDeviceApproval: opts.legacyDeviceApproval,
       paymasterApiKey: opts.paymasterApiKey,
       paymasterUrl: opts.paymasterUrl,
       rpcUrl: rpcFor('starknet', opts),
@@ -569,8 +558,6 @@ export class Cavos {
             authToken: () => opts.auth?.getAuthToken?.() ?? null,
           })
         : defaultRegistry);
-    const recovery =
-      opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment, authToken: () => opts.auth?.getAuthToken?.() ?? null }) : null);
 
     const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
     const addressParams = { namespace, initialSigner: devicePubkey };
@@ -620,27 +607,12 @@ export class Cavos {
     // isNewAccount is set after first deploy in execute(), not here
     cavos.isNewAccount = false;
 
-    // Deployed account, but THIS device isn't an authorized signer yet — request approval
-    if (status === "needs-device-approval" && recovery && opts.legacyDeviceApproval !== false) {
-      const dedup = lastDeviceRequest.get(identity.userId);
-      const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
-      try {
-        if (fresh) {
-          cavos.pendingRequestId = dedup!.requestId;
-        } else {
-          const { requestId } = await recovery.requestDeviceAddition({
-            userId: identity.userId,
-            accountAddress: address,
-            newSigner: devicePubkey,
-            ...(identity.email ? { email: identity.email } : {}),
-          });
-          cavos.pendingRequestId = requestId;
-          lastDeviceRequest.set(identity.userId, { requestId, requestedAt: Date.now() });
-        }
-      } catch (e) {
-        console.warn("[Cavos] requestDeviceAddition failed:", e);
-      }
-    }
+    // Connect no longer mails an approval on sight. It used to fire here the
+    // moment it saw an unauthorized device, before anything had considered
+    // whether a passkey or the enclave could authorize it instantly — so the
+    // user got an approval spinner racing a recovery, and a screen showing
+    // both. `requestDeviceAddition` is now called only when the UI has chosen
+    // email as the way in. See `resolveDeviceAuthorization`.
     return cavos;
   }
 
@@ -1319,8 +1291,6 @@ const defaultRegistry = new InMemoryWalletRegistry();
  * last requestId instead of emailing the owner again. Runtime-agnostic — works
  * without DOM/localStorage so the same code runs on native.
  */
-const DEVICE_REQUEST_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
-const lastDeviceRequest = new Map<string, { requestId: string; requestedAt: number }>();
 
 /** Whether an account contract is already deployed at `address`. */
 async function isDeployed(provider: RpcProvider, address: string): Promise<boolean> {
