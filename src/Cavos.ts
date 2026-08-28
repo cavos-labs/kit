@@ -1094,9 +1094,16 @@ export class Cavos {
   }
 
   /**
-   * Re-read (from chain) whether THIS device is now an authorized signer.
-   * Cheap and side-effect free — used to poll for readiness after a passkey /
-   * device approval submits, before the new signer is indexed.
+   * Re-read (from chain) whether THIS device is now an authorized signer, and
+   * record it. Used to poll for readiness after a passkey / device approval
+   * submits, before the new signer is indexed.
+   *
+   * A deployed account whose signer is this device is precisely what "ready"
+   * means, so finding it out has to move the status. Polling used to answer
+   * true and leave the wallet still saying `needs-device-approval`, so the
+   * execute waiting to be authorized was never told it now could be: it sat out
+   * its full 90s timeout after the enclave had already put the signer
+   * on-chain, and then failed claiming the device was not authorized.
    *
    * For undeployed accounts, returns false (not yet on-chain).
    */
@@ -1104,7 +1111,9 @@ export class Cavos {
     if (this.statusValue === "undeployed") {
       return false;
     }
-    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    const authorized = await this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    if (authorized) this.setStatus("ready");
+    return authorized;
   }
 
   /**

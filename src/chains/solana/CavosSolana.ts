@@ -523,7 +523,11 @@ export class CavosSolana {
     if (this.statusValue === "undeployed") {
       return false;
     }
-    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    const authorized = await this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    // See Cavos.isReady: an answer nobody records leaves the execute waiting on
+    // this authorization to time out after it has already been granted.
+    if (authorized) this.setStatus("ready");
+    return authorized;
   }
 
   /**

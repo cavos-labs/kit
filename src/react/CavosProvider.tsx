@@ -1263,12 +1263,8 @@ export function CavosProvider({
         "kit: useCavos().execute(calls) is Starknet-only. On Solana/Stellar use the `wallet` handle: wallet.execute(amount, dest).",
       );
     }
-    // One rule: anything needing the account's authority authorizes the device
-    // first. Reads never do, which is why signing in is no longer interrupted.
-    if (wallet.status === 'needs-device-approval') {
-      // Nothing to do here any more: the wallet authorizes and then performs
-      // the action, so aborting would break the single flow it now provides.
-    }
+    // The wallet authorizes the device itself when the call needs it, and then
+    // performs the call -- one flow, so there is nothing to check first.
     return wallet.execute(calls, opts);
   }, [wallet]);
 
@@ -1486,6 +1482,11 @@ export function CavosProvider({
       }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Could not authorize this device.');
+      // And let it reach whoever asked. Swallowing it left the caller to infer
+      // the failure from a status that had not moved, so an execute reported
+      // "this device was not authorized" over any real reason -- a timeout, a
+      // refused recovery, a declined passkey.
+      throw error;
     } finally {
       setAuthorizingDevice(false);
     }
