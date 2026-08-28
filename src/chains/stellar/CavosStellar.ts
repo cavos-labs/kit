@@ -689,10 +689,16 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
-    // For undeployed accounts, store the pending passkey PRF for first create
+    // An account that does not exist yet is created here, with the wrap in its
+    // envelope, rather than the secret being held until something else creates
+    // it. Holding it was the bug -- a refresh wiped it and the account was
+    // created without the passkey, silently -- and there is nothing to defer
+    // for: creating a classic account is sponsored and costs the user nothing.
     if (this.statusValue === "undeployed") {
       this._pendingPasskeyPrf = prfOutput;
-      return ""; // No tx yet — will be included in first create
+      await this._createAccount();
+      this.setStatus("ready");
+      return this.address;
     }
 
     const { control, dek } = this.requireUnlocked();

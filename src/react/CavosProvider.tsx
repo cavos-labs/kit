@@ -1565,8 +1565,13 @@ export function CavosProvider({
     // chain can hold, so an account that does not exist yet has nothing to
     // write it to -- and needs nothing kept, because its create derives it
     // again from this same passkey.
+    // Stellar records the passkey as a wrap in its envelope, so an account that
+    // does not exist yet is created here when it is the chain the user is on --
+    // the same rule the approver chains follow. One they are not on is left
+    // alone and derives the secret again at its own create.
     const stellar = session.chains.includes('stellar') ? session.wallet('stellar') : null;
-    if (!stellar || stellar.chain !== 'stellar' || stellar.status === 'undeployed') return;
+    if (!stellar || stellar.chain !== 'stellar') return;
+    if (stellar.status === 'undeployed' && selectedChain !== 'stellar') return;
     const secret =
       enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
     await stellar.enrollPasskey(secret);
