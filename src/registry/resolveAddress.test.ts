@@ -70,6 +70,23 @@ describe("resolveAddress", () => {
     ).rejects.toThrow("network down");
   });
 
+  it("reports a lost race as existing, so callers discard what they computed", async () => {
+    // Stellar generates its control key inside `compute`. If a conflict were
+    // reported as `existing: false`, that losing key would be persisted under
+    // the winner's address and the device would think it owned the wallet.
+    const registry = registryOf({
+      register: jest.fn(async () => ({ address: "0xwinner", conflict: true })),
+    });
+    const { address, existing } = await resolveAddress({
+      key,
+      registry,
+      initialSigner: device,
+      compute: () => "0xmine",
+    });
+    expect(existing).toBe(true);
+    expect(address).toBe("0xwinner");
+  });
+
   it("computes locally when there is no registry (no appId)", async () => {
     const result = await resolveAddress({
       key,

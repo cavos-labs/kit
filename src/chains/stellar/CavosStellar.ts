@@ -220,7 +220,8 @@ export class CavosStellar {
         })
       : null;
 
-    let fresh: { address: string; seed: Uint8Array } | null = null;
+    type ControlSeed = { address: string; seed: Uint8Array };
+    let generated: ControlSeed | null = null;
     const { address, existing } = await resolveAddress({
       key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "stellar", network: opts.network },
       registry,
@@ -228,10 +229,12 @@ export class CavosStellar {
       // an initial signer for the chains that record device keys.
       initialSigner: { x: 0n, y: 0n },
       compute: () => {
-        fresh = newControlKey();
-        return fresh.address;
+        generated = newControlKey();
+        return generated.address;
       },
     });
+    // TS cannot see that `compute` ran, so re-read it through its own type.
+    const fresh = generated as ControlSeed | null;
 
     const build = (
       status: StellarConnectStatus,
@@ -260,10 +263,12 @@ export class CavosStellar {
       return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    // The row exists but the account was never created, and this device is not
-    // the one that named it: it cannot hold the control key, so it must be
-    // approved by a device that does.
-    if (existing && !fresh) {
+    // The address was already the user's — either the registry had it, or this
+    // device generated a key and LOST the claim race. Either way this device
+    // does not hold the control key for it, so the key it just generated is
+    // worthless and must not be persisted under someone else's address.
+    if (existing) {
+      if (fresh) wipeSeed(fresh.seed);
       return build("needs-device-approval");
     }
 
