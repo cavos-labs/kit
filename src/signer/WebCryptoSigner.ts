@@ -54,9 +54,28 @@ export class WebCryptoSigner implements DeviceSigner {
     return new WebCryptoSigner(rec.privateKey, { x: rec.x, y: rec.y }, opts.keyId);
   }
 
-  /** Load the device key, creating one on first use. */
-  static async loadOrCreate(opts: WebCryptoSignerOptions): Promise<WebCryptoSigner> {
-    return (await WebCryptoSigner.load(opts)) ?? (await WebCryptoSigner.create(opts));
+  /**
+   * Load the device key, creating one on first use.
+   *
+   * Serialized per key id, because callers race. A multi-chain connect brings up
+   * every chain in parallel and each asks for the same key: on a first login
+   * none exists, so all of them created one and the last write won. Each chain
+   * had already derived its address from the key it made — and on Starknet the
+   * address IS the key — so the account was deployed with a key the browser
+   * then threw away, and the device that created the wallet could not sign for
+   * it. Nothing reported that; the wallet simply looked like someone else's.
+   */
+  static loadOrCreate(opts: WebCryptoSignerOptions): Promise<WebCryptoSigner> {
+    const pending = inFlight.get(opts.keyId);
+    if (pending) return pending;
+
+    const work = (async () => {
+      const existing = await WebCryptoSigner.load(opts);
+      return existing ?? (await WebCryptoSigner.create(opts));
+    })().finally(() => inFlight.delete(opts.keyId));
+
+    inFlight.set(opts.keyId, work);
+    return work;
   }
 
   async getPublicKey(): Promise<DevicePublicKey> {
@@ -107,6 +126,9 @@ function assertSecureContext(): void {
 }
 
 // --- minimal IndexedDB wrapper ---
+
+/** One create per key id at a time; see `loadOrCreate`. */
+const inFlight = new Map<string, Promise<WebCryptoSigner>>();
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
