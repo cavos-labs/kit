@@ -327,7 +327,7 @@ export class CavosStellar {
    * not. The refusal lives here, where the action is, because integrators call
    * `wallet.execute` directly — a wrapper in the React provider never sees it.
    */
-  onAuthorizationNeeded?: () => void;
+  onAuthorizationNeeded?: () => Promise<void>;
 
   /** Native XLM balance of the account, in stroops. */
   async balance(): Promise<bigint> {
@@ -385,6 +385,13 @@ export class CavosStellar {
     // Handle lazy deploy: first execute on undeployed account
     if (this.statusValue === "undeployed") {
       return this._createAndExecute(amount, destination, opts);
+    }
+
+    // Authorization is part of the send, not a precondition that aborts it —
+    // the same shape as the first execute creating the account and paying in
+    // one go.
+    if (this.statusValue === "needs-device-approval" && this.onAuthorizationNeeded) {
+      await this.onAuthorizationNeeded();
     }
 
     const control = this.requireControl();
@@ -1039,8 +1046,7 @@ export class CavosStellar {
    */
   private requireControl(): ControlKey {
     if (!this.control) {
-      this.onAuthorizationNeeded?.();
-      throw new Error("kit/stellar: approve this device to continue — the request is on screen.");
+      throw new Error("kit/stellar: this device is not an authorized signer of the wallet");
     }
     return this.control;
   }
@@ -1051,8 +1057,7 @@ export class CavosStellar {
    */
   private requireReadyControl(): ControlKey {
     if (this.statusValue !== "ready" || !this.control) {
-      this.onAuthorizationNeeded?.();
-      throw new Error("kit/stellar: approve this device to continue — the request is on screen.");
+      throw new Error("kit/stellar: this device is not an authorized signer of the wallet");
     }
     return this.control;
   }

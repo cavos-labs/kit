@@ -194,12 +194,24 @@ export class CavosSolana {
    * authorize never appeared and the user got a bare "not an authorized
    * signer", which is a statement of fact and no help at all.
    */
-  onAuthorizationNeeded?: () => void;
+  onAuthorizationNeeded?: () => Promise<void>;
 
-  /** Ask for authorization, then refuse the action that needed it. */
-  private refuseUnauthorized(prefix: string): never {
-    this.onAuthorizationNeeded?.();
-    throw new Error(`${prefix}: approve this device to continue — the request is on screen.`);
+  /**
+   * Authorize this device, then let the caller carry on.
+   *
+   * Authorization is part of the action that needed it, not a precondition that
+   * aborts it — the same shape as the first execute deploying the account and
+   * running the call in one go. Refusing and asking the user to press send
+   * again is two flows for one intention.
+   */
+  private async ensureAuthorized(prefix: string): Promise<void> {
+    if (!this.onAuthorizationNeeded) {
+      throw new Error(`${prefix}: this device is not an authorized signer of the wallet`);
+    }
+    await this.onAuthorizationNeeded();
+    if (this.statusValue !== "ready") {
+      throw new Error(`${prefix}: this device was not authorized`);
+    }
   }
 
   get publicKey(): DevicePublicKey {
@@ -573,7 +585,7 @@ export class CavosSolana {
     }
 
     if (this.statusValue !== "ready") {
-      this.refuseUnauthorized("kit/solana");
+      await this.ensureAuthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
     return this.send(ixs, opts);
@@ -604,7 +616,7 @@ export class CavosSolana {
     }
 
     if (this.statusValue !== "ready") {
-      this.refuseUnauthorized("kit/solana");
+      await this.ensureAuthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecute(this.address, instructions);
     return this.send(ixs, opts);
@@ -743,7 +755,7 @@ export class CavosSolana {
     // Works while the account is still undeployed: the signature comes from the
     // local device key, and proving control of that key needs no chain state.
     if (this.status === "needs-device-approval") {
-      this.refuseUnauthorized("kit/solana");
+      await this.ensureAuthorized("kit/solana");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
@@ -768,7 +780,7 @@ export class CavosSolana {
    */
   async signTransaction(amount: bigint, destination: string): Promise<SolanaSignedTransaction> {
     if (this.status !== "ready") {
-      this.refuseUnauthorized("kit/solana");
+      await this.ensureAuthorized("kit/solana");
     }
     const message = await this.adapter.buildTransferMessage(this.address, destination, amount);
     const { signature, pubkey } = await this.adapter.signRaw(message);

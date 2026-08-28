@@ -844,9 +844,7 @@ export function CavosProvider({
     // from — including `wallet.execute` straight from the app, which no wrapper
     // here would ever see. This is how that refusal reaches the UI.
     for (const c of session.chains) {
-      session.wallet(c).onAuthorizationNeeded = () => {
-        void authorizeDeviceRef.current();
-      };
+      session.wallet(c).onAuthorizationNeeded = () => authorizeDeviceRef.current();
     }
 
     return () => {
@@ -1249,8 +1247,8 @@ export function CavosProvider({
     // One rule: anything needing the account's authority authorizes the device
     // first. Reads never do, which is why signing in is no longer interrupted.
     if (wallet.status === 'needs-device-approval') {
-      await authorizeDeviceRef.current();
-      throw new Error('kit: approve this device to continue — the request has been sent.');
+      // Nothing to do here any more: the wallet authorizes and then performs
+      // the action, so aborting would break the single flow it now provides.
     }
     return wallet.execute(calls, opts);
   }, [wallet]);
@@ -1264,8 +1262,7 @@ export function CavosProvider({
       // recognise is one nobody will accept, so producing it would only look
       // like success.
       if (wallet.status === 'needs-device-approval') {
-        await authorizeDevice();
-        throw new Error('kit: approve this device to continue — the request is on screen.');
+        await authorizeDeviceRef.current();
       }
       return wallet.signMessage(message);
     },
@@ -1403,6 +1400,25 @@ export function CavosProvider({
   // its address and balance straight away. Only an action that needs the
   // account's authority asks — at a moment the user is already acting, where
   // the request explains itself.
+  /** Resolve once the wallet accepts this device, or give up saying so. */
+  const waitUntilAuthorized = useCallback(
+    (w: CavosWallet, timeoutMs = 90_000) =>
+      new Promise<void>((resolve, reject) => {
+        if (w.status === 'ready') return resolve();
+        const timer = setTimeout(() => {
+          off();
+          reject(new Error('Authorizing this device took too long. Try again.'));
+        }, timeoutMs);
+        const off = w.onStatusChange(() => {
+          if (w.status !== 'ready') return;
+          clearTimeout(timer);
+          off();
+          resolve();
+        });
+      }),
+    [],
+  );
+
   const authorizeDevice = useCallback(async () => {
     if (!wallet || wallet.status !== 'needs-device-approval') return;
     setAuthorizingDevice(true);
@@ -1416,8 +1432,10 @@ export function CavosProvider({
           await approveDeviceWithPasskey();
           break;
         case 'enclave':
-          // Already in flight: the effect below runs it as soon as a wallet
-          // needing authorization meets a live login proof.
+          // The effect below starts it as soon as a wallet needing
+          // authorization meets a live login proof; this waits for the outcome,
+          // so the action that asked can carry straight on.
+          await waitUntilAuthorized(wallet);
           break;
         case 'enclave-needs-login':
           setAuthError('Sign in again to restore this device.');
@@ -1428,7 +1446,7 @@ export function CavosProvider({
     } finally {
       setAuthorizingDevice(false);
     }
-  }, [wallet, deviceAuthorization, approveDeviceWithPasskey]);
+  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, waitUntilAuthorized]);
 
   authorizeDeviceRef.current = authorizeDevice;
 

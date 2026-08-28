@@ -658,12 +658,24 @@ export class Cavos {
    * authorize never appeared and the user got a bare "not an authorized
    * signer", which is a statement of fact and no help at all.
    */
-  onAuthorizationNeeded?: () => void;
+  onAuthorizationNeeded?: () => Promise<void>;
 
-  /** Ask for authorization, then refuse the action that needed it. */
-  private refuseUnauthorized(prefix: string): never {
-    this.onAuthorizationNeeded?.();
-    throw new Error(`${prefix}: approve this device to continue — the request is on screen.`);
+  /**
+   * Authorize this device, then let the caller carry on.
+   *
+   * Authorization is part of the action that needed it, not a precondition that
+   * aborts it — the same shape as the first execute deploying the account and
+   * running the call in one go. Refusing and asking the user to press send
+   * again is two flows for one intention.
+   */
+  private async ensureAuthorized(prefix: string): Promise<void> {
+    if (!this.onAuthorizationNeeded) {
+      throw new Error(`${prefix}: this device is not an authorized signer of the wallet`);
+    }
+    await this.onAuthorizationNeeded();
+    if (this.statusValue !== "ready") {
+      throw new Error(`${prefix}: this device was not authorized`);
+    }
   }
 
   /** This device's public key (e.g. to request addition to an existing wallet). */
@@ -685,7 +697,7 @@ export class Cavos {
     }
 
     if (this.statusValue !== "ready") {
-      this.refuseUnauthorized("kit");
+      await this.ensureAuthorized("kit");
     }
 
     // `sponsored` defaults to true → paymaster pays the gas. Pass `sponsored:
@@ -797,7 +809,7 @@ export class Cavos {
     // Works while the account is still undeployed: the signature comes from the
     // local device key, and proving control of that key needs no chain state.
     if (this.status === "needs-device-approval") {
-      this.refuseUnauthorized("kit");
+      await this.ensureAuthorized("kit");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
@@ -823,7 +835,7 @@ export class Cavos {
    */
   async signTransaction(calls: ChainCall[]): Promise<StarknetSignedTransaction> {
     if (this.status !== "ready") {
-      this.refuseUnauthorized("kit");
+      await this.ensureAuthorized("kit");
     }
     // Estimate fee to obtain nonce + resource bounds, then build + sign the
     // invocation without invoking `invokeFunction` (no submission).
