@@ -954,6 +954,11 @@ export function CavosProvider({
    * to the action the user is taking.
    */
   useEffect(() => {
+    // The app picked one method. `socialRecovery.enabled` says the environment
+    // has an enclave, not that this app uses it -- reading it alone meant an
+    // app on passkeys still had recovery authorities written into its accounts,
+    // and had its one login credential spent doing it.
+    if (deviceAuthorization === 'passkey') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -1061,6 +1066,7 @@ export function CavosProvider({
     config.appId,
     config.authBackendUrl,
     config.environment,
+    deviceAuthorization,
     socialRecovery,
     socialRecoveryPolicy,
     session,
@@ -1077,6 +1083,9 @@ export function CavosProvider({
    * is encrypted to the independently-attested enclave by the SDK.
    */
   useEffect(() => {
+    // Same rule as the sweep above: on passkeys the enclave is not this app's
+    // to use, and a device is authorized by the gesture instead.
+    if (deviceAuthorization === 'passkey') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -1243,6 +1252,7 @@ export function CavosProvider({
     config.network,
     socialRecoveryPolicy,
     connect,
+    deviceAuthorization,
     identity,
     socialRecovery,
     wallet,

@@ -27,3 +27,28 @@ describe("asking at login", () => {
     expect(asksAtLogin({ approval: "enclave", socialCredential: false })).toBe(false);
   });
 });
+
+/**
+ * The environment having an enclave is not the same as this app using one.
+ *
+ * The recovery effects read the environment's flag alone, so an app that had
+ * chosen passkeys still wrote enclave recovery authorities into its accounts —
+ * and spent its one login credential doing it. Two methods running at once is
+ * exactly what "the developer picks one" was meant to end.
+ */
+describe("which recovery machinery runs", () => {
+  const enclaveRuns = (input: Parameters<typeof resolveDeviceAuthorization>[0]) =>
+    resolveDeviceAuthorization(input) !== "passkey";
+
+  it("does not run the enclave for an app on passkeys", () => {
+    expect(enclaveRuns({ approval: "passkey", socialCredential: true })).toBe(false);
+  });
+
+  it("runs it for an app on the enclave", () => {
+    expect(enclaveRuns({ approval: "enclave", socialCredential: true })).toBe(true);
+  });
+
+  it("still runs it when the login proof is missing, so it can ask for one", () => {
+    expect(enclaveRuns({ approval: "enclave", socialCredential: false })).toBe(true);
+  });
+});
