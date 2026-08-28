@@ -895,11 +895,22 @@ export function CavosProvider({
     try {
       credential = auth.consumeSocialRecoveryCredential();
     } catch {
-      // No error here. The proof is deliberately never persisted — it is what
-      // the enclave verifies — so a reloaded device simply does not have one,
-      // and `resolveDeviceAuthorization` already reports that as
-      // `social-needs-login`: a sign-in button, not a failure notice pinned to
-      // somebody else's screen.
+      // The proof is deliberately never persisted — it is what the enclave
+      // verifies — so a reloaded device does not have one. That is not an error
+      // to pin on the user's screen: `resolveDeviceAuthorization` reports it as
+      // `enclave-needs-login`, and the next sign-in enrols the wallet, by then
+      // deployed.
+      //
+      // It is worth saying out loud, though. Silence here is how a wallet came
+      // to be deployed with no recovery at all: the credential expires with the
+      // page, the enrolment waits for a first transaction that happens later,
+      // and one reload in between meant nobody ever heard about it.
+      if (decision.action === 'enroll') {
+        console.warn(
+          '[CavosProvider] recovery not enrolled yet: this session has no fresh login proof. ' +
+            'It will enrol on the next sign-in.',
+        );
+      }
       return;
     }
     const action = decision.action;
@@ -1476,9 +1487,25 @@ export function CavosProvider({
           await waitUntilAuthorized(wallet);
           break;
         }
-        case 'enclave-needs-login':
-          setAuthError('Sign in again to restore this device.');
-          break;
+        case 'enclave-needs-login': {
+          // Not a dead end. The enclave verifies a login and requires a recent
+          // one, so signing in again is the only way to authorize this device
+          // -- and telling the user that and stopping just leaves them to find
+          // the button, press send a second time, and meet the same wall if
+          // anything reloaded in between.
+          //
+          // Go there. On return the wallet is still unauthorized and the
+          // credential is fresh, which is exactly the state the recovery effect
+          // acts on, so the device is authorized on arrival.
+          if (isExternalAuth) {
+            throw new Error(
+              'kit: this device is not authorized yet, and authorizing it needs a fresh ' +
+                'provider token. Sign the user in again and pass the new identity.',
+            );
+          }
+          await login(identity?.provider === 'apple' ? 'apple' : 'google');
+          throw new Error('kit: signing in again to authorize this device.');
+        }
       }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Could not authorize this device.');
@@ -1490,7 +1517,15 @@ export function CavosProvider({
     } finally {
       setAuthorizingDevice(false);
     }
-  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, waitUntilAuthorized]);
+  }, [
+    wallet,
+    deviceAuthorization,
+    approveDeviceWithPasskey,
+    waitUntilAuthorized,
+    login,
+    identity,
+    isExternalAuth,
+  ]);
 
   authorizeDeviceRef.current = authorizeDevice;
 
