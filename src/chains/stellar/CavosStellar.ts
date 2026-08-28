@@ -408,26 +408,55 @@ export class CavosStellar {
       envelope.recoveryWrap = wrapDEK(dek, deriveRecoveryKEK(this._pendingRecoveryCode));
     }
 
+    // The account can already exist without ever having been ours to create:
+    // funding a testnet address with friendbot creates it, and the demo tells
+    // people to do exactly that before their first send. Creating it again is
+    // `op_already_exists` and takes the whole transaction down with it.
+    //
+    // What still has to happen either way is the envelope. Without those `cv:`
+    // entries the control key exists only on this device, and no other device —
+    // and no recovery — can ever reach the wallet again.
+    const alreadyExists = await this.adapter.isDeployed(this.address);
+
     if (this.relayer) {
       // Gasless + sponsored: the relayer is source + fee payer + reserve sponsor.
       const relayerSource = await this.relayer.getSource();
-      const tx = await this.adapter.buildSponsoredCreateTx({
-        relayer: relayerSource,
-        controlAddress,
-        envelope,
-      });
-      tx.sign(controlKeypair);
-      await this.relayer.submit("create", tx.toXDR());
+      if (alreadyExists) {
+        const tx = await this.adapter.buildSponsoredDataTx({
+          relayer: relayerSource,
+          account: this.address,
+          entries: toDataEntries(envelope),
+        });
+        tx.sign(controlKeypair);
+        await this.relayer.submit("sponsored-data", tx.toXDR());
+      } else {
+        const tx = await this.adapter.buildSponsoredCreateTx({
+          relayer: relayerSource,
+          controlAddress,
+          envelope,
+        });
+        tx.sign(controlKeypair);
+        await this.relayer.submit("create", tx.toXDR());
+      }
     } else {
       const funder = this.sourceKeypair!;
-      const tx = await this.adapter.buildCreateTx({
-        funder: funder.publicKey(),
-        controlAddress,
-        envelope,
-        startingBalance: this.startingBalance,
-      });
-      tx.sign(controlKeypair, funder);
-      await this.adapter.submit(tx);
+      if (alreadyExists) {
+        const tx = await this.adapter.buildDataTx({
+          account: this.address,
+          entries: toDataEntries(envelope),
+        });
+        tx.sign(controlKeypair);
+        await this.adapter.submit(tx);
+      } else {
+        const tx = await this.adapter.buildCreateTx({
+          funder: funder.publicKey(),
+          controlAddress,
+          envelope,
+          startingBalance: this.startingBalance,
+        });
+        tx.sign(controlKeypair, funder);
+        await this.adapter.submit(tx);
+      }
     }
 
     // If we didn't have a pre-generated control key, import now
