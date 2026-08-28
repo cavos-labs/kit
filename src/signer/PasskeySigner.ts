@@ -6,6 +6,7 @@ import {
   spkiToPublicKey,
   type PasskeyAssertion,
 } from "../crypto/webauthn";
+import { PRF_SALT } from "./prfSalt";
 import type {
   EnrolledPasskey,
   PasskeyApprover,
@@ -61,7 +62,17 @@ export class PasskeySigner implements PasskeyApprover {
     }
   }
 
-  /** Create a new synced passkey and return its P-256 public key. */
+  /**
+   * Create a new synced passkey and return its P-256 public key.
+   *
+   * The PRF extension is requested here even though nothing on Starknet or
+   * Solana uses it: Stellar's DEK factor is a PRF secret, and asking for it
+   * separately meant a second `credentials.create()` -- a second prompt, and a
+   * second passkey in the user's account for one wallet. One credential now
+   * serves both roles. Authenticators that ignore PRF, or report it enabled
+   * without evaluating it, simply return no secret and the caller asks for it
+   * with an assertion.
+   */
   async enroll(params: PasskeyEnrollParams): Promise<EnrolledPasskey> {
     const challenge = crypto.getRandomValues(new Uint8Array(32));
     const cred = (await navigator.credentials.create({
@@ -80,13 +91,20 @@ export class PasskeySigner implements PasskeyApprover {
           userVerification: "preferred",
         },
         attestation: "none",
+        extensions: { prf: { eval: { first: buf(PRF_SALT) } } } as AuthenticationExtensionsClientInputs,
       },
     })) as PublicKeyCredential | null;
     if (!cred) throw new Error("kit/passkey: enrollment cancelled");
 
     const response = cred.response as AuthenticatorAttestationResponse;
     const spki = new Uint8Array(response.getPublicKey()!);
-    return { publicKey: spkiToPublicKey(spki), credentialId: new Uint8Array(cred.rawId) };
+    const prf = (cred.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer } } })
+      .prf?.results?.first;
+    return {
+      publicKey: spkiToPublicKey(spki),
+      credentialId: new Uint8Array(cred.rawId),
+      ...(prf ? { secret: new Uint8Array(prf) } : {}),
+    };
   }
 
   /**

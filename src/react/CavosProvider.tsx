@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from 'react';
 import { Cavos } from '../Cavos';
-import type { Chain, NetworkEnv, CavosWallet } from '../Cavos';
+import type { Chain, NetworkEnv, CavosWallet, CavosSession } from '../Cavos';
 import { CavosSolana } from '../chains/solana/CavosSolana';
 import type { SolanaNetwork } from '../chains/solana/constants';
 import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
@@ -21,6 +21,13 @@ import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
+import { decideSocialRecovery } from './socialRecoveryDecision';
+import { assertDeviceApprovalScope } from './deviceApprovalScope';
+import {
+  resolveDeviceAuthorization,
+  type DeviceApproval,
+  type DeviceAuthorizationMethod,
+} from './deviceAuthorization';
 import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
@@ -29,8 +36,10 @@ import {
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
 import {
-  enrollHardwareIsolatedRecovery,
+  agreeRecoveryAuthority,
+  writeRecoveryAuthority,
   recoverHardwareIsolatedDevice,
+  type AgreedRecoveryAuthority,
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
@@ -47,8 +56,24 @@ export interface CavosConfig {
   appId?: string;
   /** Cavos console environment. Defaults to production when omitted. */
   environment?: 'development' | 'production';
-  /** Target chain. Defaults to 'starknet'. */
+  /**
+   * Target chain (single-chain mode). Defaults to 'starknet'.
+   * @deprecated Use `chains` and `defaultChain` for multi-chain sessions.
+   * When `chains` is provided, this is ignored. If only `chain` is provided,
+   * it's treated as `chains: [chain], defaultChain: chain`.
+   */
   chain?: Chain;
+  /**
+   * Chains to configure for this session. Connect derives addresses for all
+   * configured chains but NEVER deploys on connect. Deployment happens lazily
+   * on the first `execute` call for each chain.
+   */
+  chains?: Chain[];
+  /**
+   * Default chain for the session. Must be in `chains`. When using the
+   * single-chain `chain` option, `defaultChain` defaults to that chain.
+   */
+  defaultChain?: Chain;
   /** Environment: 'testnet' (sepolia/devnet) or 'mainnet'. */
   network: NetworkEnv;
   /** Per-app salt so the same user has distinct wallets per app. */
@@ -57,8 +82,21 @@ export interface CavosConfig {
   paymasterApiKey?: string;
   /** Override the Cavos auth backend (self-hosted / staging). */
   authBackendUrl?: string;
-  /** Override the chain RPC. */
+  /**
+   * How a device that is not a signer yet gets authorized: by the attested
+   * enclave, or by a passkey on the device. This is the app's choice — an app
+   * runs one or the other, and inferring it at runtime gave different users
+   * different flows. Defaults to the enclave when `socialRecovery` is on.
+   */
+  deviceApproval?: DeviceApproval;
+  /** Override the chain RPC. Unambiguous only with a single configured chain. */
   rpcUrl?: string;
+  /**
+   * Per-chain RPC overrides, e.g. `{ solana: '…', starknet: '…' }`. Required
+   * instead of `rpcUrl` once `chains` has more than one entry: one node cannot
+   * serve them all, and the mismatched one answers "Method not found".
+   */
+  rpcUrls?: Partial<Record<Chain, string>>;
   /** Explicit OAuth callback. Optional on web; required by the native provider. */
   redirectUri?: string;
   /** Passkey relying-party id. Optional on web; required by the native provider. */
@@ -117,6 +155,11 @@ export interface WalletStatus {
   isDeploying: boolean;
   /** True once deployed and this device is an authorized signer. */
   isReady: boolean;
+  /**
+   * True if the account has not been deployed on-chain yet. First execute
+   * will trigger deployment + the user operation atomically.
+   */
+  isUndeployed: boolean;
   /** True if this device still needs approval to operate the wallet. */
   needsDeviceApproval: boolean;
   /** True while waiting for the owner to approve this device from another device. */
@@ -165,14 +208,26 @@ export interface CavosContextValue {
   closeModal: () => void;
   isAuthenticated: boolean;
   user: UserInfo | null;
-  /** The active chain ('starknet' | 'solana' | 'stellar'). */
+  /** The currently selected chain ('starknet' | 'solana' | 'stellar'). */
   chain: Chain;
+  /** All configured chains for this session. */
+  configuredChains: Chain[];
   /**
-   * The connected wallet, discriminated by `wallet.chain`. Narrow on
-   * `wallet.chain` before chain-native calls (e.g. Solana `wallet.execute(amount,
-   * dest)`). Null until connected.
+   * Switch the selected chain. Must be one of the configured chains. Does not
+   * re-deploy or re-authenticate — just changes which wallet is active.
+   */
+  setChain: (chain: Chain) => void;
+  /**
+   * The connected wallet for the selected chain, discriminated by `wallet.chain`.
+   * Narrow on `wallet.chain` before chain-native calls (e.g. Solana
+   * `wallet.execute(amount, dest)`). Null until connected.
    */
   wallet: CavosWallet | null;
+  /**
+   * The session containing wallets for all configured chains. Use this to access
+   * wallets for chains other than the selected one: `session.wallet("solana")`.
+   */
+  session: (CavosWallet & CavosSession) | null;
   address: string | null;
   walletStatus: WalletStatus;
   isLoading: boolean;
@@ -229,6 +284,24 @@ export interface CavosContextValue {
   ) => Promise<{ publicKey: { x: bigint; y: bigint }; transactionHash?: string }>;
   /** Whether this device can use a platform passkey (Face ID / Touch ID / PIN). */
   passkeySupported: boolean;
+  /**
+   * The single way this device should be authorized, when it is not a signer
+   * yet. One decision taken before anything runs, so the UI shows one action
+   * instead of racing every mechanism at once.
+   */
+  deviceAuthorization: DeviceAuthorizationMethod;
+  /**
+   * Authorize this device on the wallet, by whichever route
+   * `deviceAuthorization` chose. Called for you before any action that needs
+   * the account's authority; call it directly to do it ahead of time.
+   */
+  authorizeDevice: () => Promise<void>;
+  /**
+   * True while an authorization is being asked for. The modal shows the flow
+   * only then — signing in must not be interrupted by a device that is merely
+   * not a signer yet, the same way a wallet is not deployed until it is used.
+   */
+  authorizingDevice: boolean;
   /**
    * Modal-friendly wrapper: enroll a synced passkey as an approver using the
    * signed-in user's identity + the app name. Requires a ready device.
@@ -296,6 +369,7 @@ export interface CavosProviderProps {
 const INITIAL_STATUS: WalletStatus = {
   isDeploying: false,
   isReady: false,
+  isUndeployed: false,
   needsDeviceApproval: false,
   awaitingApproval: false,
   pendingRequestId: null,
@@ -376,21 +450,70 @@ export function CavosProvider({
   const [auth] = useState(
     () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
   );
-  const [wallet, setWallet] = useState<CavosWallet | null>(null);
+  const [session, setSession] = useState<(CavosWallet & CavosSession) | null>(null);
+  const [selectedChain, setSelectedChain] = useState<Chain>(
+    config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet',
+  );
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [walletStatus, setWalletStatus] = useState<WalletStatus>(INITIAL_STATUS);
+
+  // The selected chain is seeded from the config once, so an app that changes
+  // which chains it configures -- switching to passkey approval makes the
+  // session single-chain -- was left pointing at a chain no longer in it. The
+  // lookup then threw and fell back to the default wallet, so the app showed
+  // one chain and acted on another.
+  useEffect(() => {
+    const configured = config.chains ?? (config.chain ? [config.chain] : ['starknet']);
+    if (!configured.includes(selectedChain)) setSelectedChain(configured[0]!);
+  }, [config.chains, config.chain, selectedChain]);
+
+  // Derive the active wallet from the session and selected chain
+  const wallet = useMemo<CavosWallet | null>(() => {
+    if (!session) return null;
+    try {
+      return session.wallet(selectedChain);
+    } catch {
+      // If the selected chain is not in the session, fall back to the default
+      return session;
+    }
+  }, [session, selectedChain]);
   // Keep children behind the loading state until we have checked for a
   // persisted identity and silently reconnected this browser's device signer.
   const [isLoading, setIsLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
+  const [authorizingDevice, setAuthorizingDevice] = useState(false);
+  /** Set when an authorization attempt fails, so a wait can end on it. */
+  const authorizationErrorRef = useRef<string | null>(null);
+  // Held in a ref so the wallets can be wired once, rather than re-subscribed
+  // every time the callback identity changes.
+  const authorizeDeviceRef = useRef<() => Promise<void>>(async () => {});
+  // Same reason as the one above: the wallets hold the callback, so it has to
+  // stay reachable without re-wiring them on every render.
+  const passkeyFactorRef = useRef<() => Promise<Uint8Array | null>>(async () => null);
   /** Latest known social-enrolment answer, for the enrolment effect to consult
    *  without waiting on a re-render. */
-  const socialEnrolledRef = useRef(false);
+  /**
+   * Which wallets already hold a recovery authority, keyed by chain and
+   * address.
+   *
+   * This was one boolean for the whole session. Enrolling on one chain set it,
+   * and every other chain was then skipped as "already enrolled" — so a user
+   * who enrolled Stellar got a Starknet wallet with no authority at all, and
+   * found out only when a second device could not recover it.
+   */
+  const socialEnrolledRef = useRef(new Set<string>());
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
+  /**
+   * Authorities agreed with the enclave but not yet on-chain, per wallet. The
+   * two halves of enrolment are separated in time on purpose: the enclave half
+   * needs a login proof that expires in five minutes, the chain half needs an
+   * account that does not exist until the user's first transaction.
+   */
+  const agreedAuthorityRef = useRef(new Map<string, AgreedRecoveryAuthority>());
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
 
@@ -492,7 +615,8 @@ export function CavosProvider({
         })(),
       ]);
       if (cancelled) return;
-      socialEnrolledRef.current = social;
+      if (social) socialEnrolledRef.current.add(`${wallet.chain}:${wallet.address}`);
+      else socialEnrolledRef.current.delete(`${wallet.chain}:${wallet.address}`);
       const methods: ('passkey' | 'social')[] = [];
       // Passkey first: it is the immediate route, where the enclave path waits
       // out a timelock.
@@ -530,71 +654,209 @@ export function CavosProvider({
     const cfg = configRef.current;
     // Email device-approval works on both Starknet and Solana (same secp256r1
     // device key; backend is chain-agnostic). Other chains have no email flow.
-    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana') || !wallet.pendingRequestId) return;
+    // Also the FIRST request, not only a resend: connect no longer mails one on
+    // sight, so this is where the email path actually begins — once the UI has
+    // chosen it.
+    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana')) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
-    await recovery.requestDeviceAddition({
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
+    const { requestId } = await recovery.requestDeviceAddition({
       userId: identity.userId,
       accountAddress: wallet.address,
       newSigner: wallet.publicKey,
       ...(identity.email ? { email: identity.email } : {}),
     });
-  }, [identity, wallet]);
+    setWalletStatus((status) => ({ ...status, awaitingApproval: true, pendingRequestId: requestId }));
+  }, [identity, wallet, auth]);
 
-  // Connect the configured chain for an identity (deploys if needed), then
-  // publish its status. `silent` reconnects keep the current screen instead of
-  // resetting to the deploying state (used right after a passkey approval).
-  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet> => {
-    const cfg = configRef.current;
-    if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
-    const w = await Cavos.connect({
-      chain: cfg.chain ?? 'starknet',
-      network: cfg.network,
-      identity: id,
-      appSalt: cfg.appSalt,
-      ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
-      ...(cfg.appId ? { appId: cfg.appId } : {}),
-      ...(cfg.environment ? { environment: cfg.environment } : {}),
-      ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
-      ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
-      ...(resolveSocialRecoveryPolicy(cfg)
-        ? { legacyDeviceApproval: false }
-        : {}),
+  // One decision, taken before anything runs. Passkey first (instant, needs
+  // nothing else), then the enclave, then email — which needs a second device
+  // and the user's attention twice, so it is the floor rather than the default
+  // it used to be.
+  const deviceAuthorization = useMemo(
+    () => {
+      assertDeviceApprovalScope(
+        (config.deviceApproval
+          ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
+        config.chains ?? (config.chain ? [config.chain] : ['starknet']),
+      );
+      return resolveDeviceAuthorization({
+        // The app's choice, not a runtime discovery. `socialRecovery` already
+        // says an app runs the enclave; everything else authorizes by passkey.
+        approval: (config.deviceApproval
+          ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
+        socialCredential: auth.hasSocialRecoveryCredential(),
+      });
+    },
+    [
+      config.deviceApproval,
+      config.socialRecovery,
+      config.socialRecoveryAttestation,
+      config.chains,
+      config.chain,
+      auth,
+      identity,
+    ],
+  );
+
+
+  /**
+   * On passkeys, authorize this device at login rather than at the first
+   * action.
+   *
+   * Authorization was moved to the action deliberately: the enclave takes
+   * seconds, can fail, and asking for it during sign-in broke onboarding for a
+   * wallet the user could otherwise already see. A passkey has none of that --
+   * it is local, instant, and the gesture is the one the user already
+   * associates with proving it is them. Waiting to ask buys nothing and leaves
+   * the session in a state that cannot sign.
+   *
+   * So the rule follows the method, not the moment. Declining still costs
+   * nothing: the wallet stays usable for reads and the first action asks again.
+   */
+  const loginApprovalRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (deviceAuthorization !== 'passkey' || !wallet) return;
+    if (wallet.status !== 'needs-device-approval') return;
+    const key = `${wallet.chain}:${wallet.address}`;
+    if (loginApprovalRef.current.has(key)) return;
+    loginApprovalRef.current.add(key);
+    void authorizeDeviceRef.current();
+  }, [deviceAuthorization, wallet, wallet?.status]);
+
+  // The wallet turning ready is what ends an authorization, whoever performed it.
+  useEffect(() => {
+    if (walletStatus.isReady) setAuthorizingDevice(false);
+  }, [walletStatus.isReady]);
+
+  // Connect the configured chains for an identity (deploys if needed), then
+  // publish the status for the default chain. `silent` reconnects keep the
+  // current screen instead of resetting to the deploying state (used right
+  // after a passkey approval).
+  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet & CavosSession> => {
+    // A wall clock on the whole thing. `fetch` has no timeout of its own, so a
+    // stalled request — a phone that changed network, a tab that was
+    // backgrounded, an RPC that accepted the connection and went quiet — leaves
+    // an await that never settles. No error handler helps with that: there is no
+    // error. The spinner simply stays up forever, which is what it did.
+    const CONNECT_TIMEOUT_MS = 45_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Connecting timed out. Check your connection and try again.')),
+        CONNECT_TIMEOUT_MS,
+      );
     });
-    setWallet(w);
-    setIdentity(id);
 
-    // Starknet and Solana both support the email device-approval flow (both carry
-    // a pendingRequestId when a returning-new-device request was filed). Stellar
-    // has its own passkey-PRF device model with no email flow today.
-    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
-    let hasPasskey = false;
-    if (w.status === 'needs-device-approval') {
-      try { hasPasskey = await w.hasPasskey(); } catch { /* leave false → email flow */ }
+    // Everything below runs inside a try: the deploying flag is set at the top
+    // and cleared at the bottom, so a throw in between leaves it true for the
+    // life of the page. Every failure then looks the same — a spinner that
+    // never resolves, on a device with no console to ask — which is how a
+    // registry 401 and a chain that will not connect became indistinguishable.
+    try {
+      const cfg = configRef.current;
+      if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
+      // Anything awaited below races the deadline above.
+      const race = <T,>(work: Promise<T>): Promise<T> => Promise.race([work, deadline]);
+
+      // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
+      // otherwise fall back to single `chain` for back-compat
+      const connectOpts = cfg.chains
+        ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
+        : { chain: cfg.chain ?? 'starknet' as Chain };
+
+      const s = await race(Cavos.connect({
+        ...connectOpts,
+        network: cfg.network,
+        identity: id,
+        // The registry authenticates the end user with this login's token.
+        auth,
+        appSalt: cfg.appSalt,
+        ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
+        ...(cfg.appId ? { appId: cfg.appId } : {}),
+        ...(cfg.environment ? { environment: cfg.environment } : {}),
+        ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
+        ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+        ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
+      }));
+      setSession(s);
+      setSelectedChain(s.defaultChain);
+      setIdentity(id);
+
+      // Get the default wallet for status updates
+      const w = s.wallet(s.defaultChain);
+
+      // Starknet and Solana both support the email device-approval flow (both carry
+      // a pendingRequestId when a returning-new-device request was filed). Stellar
+      // has its own passkey-PRF device model with no email flow today.
+      const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+      let hasPasskey = false;
+      if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
+        // Also raced: this reads the chain, so it can stall like anything else,
+        // and a hang here would strand the connect just as completely.
+        try { hasPasskey = await race(w.hasPasskey()); } catch { /* leave false → email flow */ }
+      }
+
+      setWalletStatus({
+        isDeploying: false,
+        isReady: w.status === 'ready',
+        isUndeployed: w.status === 'undeployed',
+        needsDeviceApproval: w.status === 'needs-device-approval',
+        awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
+        pendingRequestId,
+        hasPasskey,
+        isNewAccount: w.isNewAccount,
+        isSocialRecovering: false,
+        socialRecoveryReadyAt: null,
+        // Unknown until the lookup above answers for this wallet.
+        recovery: { protected: false, methods: [] },
+      });
+      modal?.onSuccess?.(w.address);
+      return s;
+    } catch (error) {
+      setWalletStatus((status) => ({ ...status, isDeploying: false }));
+      setAuthError(error instanceof Error ? error.message : 'Could not connect your wallet.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-
-    setWalletStatus({
-      isDeploying: false,
-      isReady: w.status === 'ready',
-      needsDeviceApproval: w.status === 'needs-device-approval',
-      awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
-      pendingRequestId,
-      hasPasskey,
-      isNewAccount: w.isNewAccount,
-      isSocialRecovering: false,
-      socialRecoveryReadyAt: null,
-      // Unknown until the lookup above answers for this wallet.
-      recovery: { protected: false, methods: [] },
-    });
-    modal?.onSuccess?.(w.address);
-    return w;
   }, [modal]);
 
   const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
     const id = await auth.handleCallback(authData, redirectUri);
     await connect(id);
   }, [auth, connect]);
+
+  // Switch the selected chain without re-authenticating
+  const setChain = useCallback(async (chain: Chain) => {
+    if (!session) {
+      throw new Error('kit/react: cannot setChain before connecting');
+    }
+    if (!session.chains.includes(chain)) {
+      throw new Error(`kit/react: chain "${chain}" is not configured in this session. Configured chains: [${session.chains.join(', ')}]`);
+    }
+    setSelectedChain(chain);
+
+    // Update wallet status for the new chain
+    const w = session.wallet(chain);
+    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+    let hasPasskey = false;
+    if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
+      try { hasPasskey = await w.hasPasskey(); } catch { /* leave false */ }
+    }
+
+    setWalletStatus((status) => ({
+      ...status,
+      isReady: w.status === 'ready',
+      isUndeployed: w.status === 'undeployed',
+      needsDeviceApproval: w.status === 'needs-device-approval',
+      awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
+      pendingRequestId,
+      hasPasskey,
+      isNewAccount: w.isNewAccount,
+    }));
+  }, [session]);
 
   // On mount: exchange the one-time OAuth code after removing it from the
   // address bar immediately. Legacy auth_data is accepted only for callbacks
@@ -633,12 +895,197 @@ export function CavosProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+
+  // The first execute deploys the account and flips the wallet to ready by
+  // mutating it, which re-renders nothing. Without this the provider kept
+  // reporting the wallet as undeployed after a successful send, and the effect
+  // below — which enrols recovery once a wallet is ready — never re-ran.
+  useEffect(() => {
+    if (!session) return;
+    const resync = () => {
+      const w = session.wallet(selectedChain);
+      setWalletStatus((status) => ({
+        ...status,
+        isReady: w.status === 'ready',
+        isUndeployed: w.status === 'undeployed',
+        needsDeviceApproval: w.status === 'needs-device-approval',
+        isNewAccount: w.isNewAccount,
+      }));
+    };
+    const unsubscribes = session.chains.map((c) => session.wallet(c).onStatusChange(resync));
+
+    // The wallets refuse an unauthorized device wherever the action is called
+    // from — including `wallet.execute` straight from the app, which no wrapper
+    // here would ever see. This is how that refusal reaches the UI.
+    for (const c of session.chains) {
+      const w = session.wallet(c);
+      w.onAuthorizationNeeded = () => authorizeDeviceRef.current();
+      if (w.chain === 'stellar') w.passkeyFactorForCreate = () => passkeyFactorRef.current();
+    }
+
+    return () => {
+      unsubscribes.forEach((off) => off());
+      for (const c of session.chains) {
+        const w = session.wallet(c);
+        w.onAuthorizationNeeded = undefined;
+        if (w.chain === 'stellar') w.passkeyFactorForCreate = undefined;
+      }
+    };
+  }, [session, selectedChain]);
+
   /**
-   * A fresh provider credential is available only immediately after login. Use
-   * that window to enrol a ready wallet or recover this exact new device. The
-   * credential is encrypted to the independently-attested enclave by the SDK.
+   * Set up recovery on every wallet in the session, in two halves.
+   *
+   * Agreeing the authority with the enclave needs the login proof, which is
+   * minted by the sign-in and rejected once it is five minutes old. Writing it
+   * on-chain needs the account, which under lazy deploy does not exist until
+   * the user's first transaction -- ten minutes later, or tomorrow. Doing both
+   * at once meant neither happened for anyone who did not transact immediately.
+   *
+   * So: agree at login, write when there is an account. The written half is
+   * device-signed and needs no proof, and an authority already agreed is
+   * returned again rather than replaced, so a browser that dies in between
+   * loses nothing.
+   *
+   * Every chain, not the visible one. Only one wallet is on screen --
+   * `chains[0]` after a login -- and enrolling just that one left the others
+   * deployed and unrecoverable, silently, until a second device tried to
+   * restore one. Recovery itself stays with the active wallet below: it belongs
+   * to the action the user is taking.
    */
   useEffect(() => {
+    // The app picked one method. `socialRecovery.enabled` says the environment
+    // has an enclave, not that this app uses it -- reading it alone meant an
+    // app on passkeys still had recovery authorities written into its accounts,
+    // and had its one login credential spent doing it.
+    if (deviceAuthorization === 'passkey') return;
+    if (
+      !socialRecovery?.enabled ||
+      !socialRecovery.provider ||
+      !socialRecoveryPolicy ||
+      !session ||
+      !identity ||
+      !config.appId
+    ) return;
+
+    const targets = session.chains
+      .map((c) => session.wallet(c))
+      .map((w) => ({
+        wallet: w,
+        action: decideSocialRecovery(
+          w.status,
+          socialEnrolledRef.current.has(`${w.chain}:${w.address}`),
+        ).action,
+      }))
+      .filter((t) => t.action === 'pre-enroll' || t.action === 'enroll');
+    if (targets.length === 0) return;
+
+    const client = new SocialRecoveryClient({
+      baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
+      appId: config.appId,
+      environment: config.environment,
+      attestation: socialRecoveryPolicy,
+    });
+
+    // Writing an authority already agreed needs no login proof, so those go
+    // ahead whatever this session has. Only agreeing a new one needs it.
+    const key = (w: CavosWallet) => `${w.chain}:${w.address}`;
+    const needsCredential = targets.some((t) => !agreedAuthorityRef.current.has(key(t.wallet)));
+    let credential: SocialRecoveryCredential | null = null;
+    if (needsCredential) {
+      try {
+        credential = auth.consumeSocialRecoveryCredential();
+      } catch {
+        // Deliberately never persisted -- it is what the enclave verifies -- so
+        // a reloaded page has none and the next sign-in agrees the authority
+        // instead. Say so: silence here is how a wallet came to be deployed
+        // with no recovery at all.
+        console.warn(
+          '[CavosProvider] no fresh login proof this session; recovery will be set up on the next sign-in.',
+        );
+      }
+    }
+
+    let cancelled = false;
+
+    void Promise.all(
+      targets.map(async ({ wallet: w, action }) => {
+        const attemptKey = `${key(w)}:${action}:${credential?.tokenFingerprint ?? 'agreed'}`;
+        if (socialAttemptRef.current.has(attemptKey)) return;
+        socialAttemptRef.current.add(attemptKey);
+        try {
+          // Agree the authority with the enclave while the login proof is
+          // fresh. It expires in five minutes and, under lazy deploy, the
+          // account it protects does not exist until the user's first
+          // transaction -- so waiting for the account meant a user who signed
+          // in and transacted ten minutes later was never enrolled at all.
+          let authority = agreedAuthorityRef.current.get(key(w));
+          if (!authority) {
+            if (!credential) return;
+            authority = await agreeRecoveryAuthority({ client, wallet: w, credential });
+            if (cancelled) return;
+            agreedAuthorityRef.current.set(key(w), authority);
+          }
+          // The chain half is device-signed and needs no proof, so it can wait
+          // for the account however long that takes.
+          if (action !== 'enroll') return;
+          await writeRecoveryAuthority({
+            client,
+            wallet: w,
+            authority,
+            delaySeconds: socialRecovery.delaySeconds,
+          });
+          agreedAuthorityRef.current.delete(key(w));
+          socialEnrolledRef.current.add(key(w));
+          if (cancelled) return;
+          setWalletStatus((status) => ({
+            ...status,
+            recovery: {
+              protected: true,
+              methods: status.recovery.methods.includes('social')
+                ? status.recovery.methods
+                : [...status.recovery.methods, 'social'],
+            },
+          }));
+        } catch (error) {
+          // Hardening must never break a working wallet. A 409 means an earlier
+          // login already did it.
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes('already_enrolled')) {
+            console.error(`[CavosProvider] recovery setup failed on ${w.chain}:`, error);
+          }
+        }
+      }),
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    auth,
+    config.appId,
+    config.authBackendUrl,
+    config.environment,
+    deviceAuthorization,
+    socialRecovery,
+    socialRecoveryPolicy,
+    session,
+    identity,
+    // Wallets are mutated in place when the first execute deploys them, so the
+    // session reference alone never re-runs this.
+    walletStatus.isReady,
+    walletStatus.isUndeployed,
+  ]);
+
+  /**
+   * Restore this exact device on the active wallet, using the provider
+   * credential that is available only immediately after login. The credential
+   * is encrypted to the independently-attested enclave by the SDK.
+   */
+  useEffect(() => {
+    // Same rule as the sweep above: on passkeys the enclave is not this app's
+    // to use, and a device is authorized by the gesture instead.
+    if (deviceAuthorization === 'passkey') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -647,17 +1094,30 @@ export function CavosProvider({
       !config.appId
     ) return;
 
+    // What to do, and whether the one-shot credential may be taken at all. The
+    // ordering lives in `decideSocialRecovery` because getting it wrong is
+    // silent: taking the credential for a wallet we then skip burns it, and the
+    // enrolment that should follow the first execute never runs.
+    const decision = decideSocialRecovery(
+      wallet.status,
+      socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`),
+    );
+    // Enrolment belongs to the sweep above, which does every chain. This is
+    // recovery: restoring the device the user is holding.
+    if (decision.action !== 'recover') return;
+
     let credential: SocialRecoveryCredential;
     try {
       credential = auth.consumeSocialRecoveryCredential();
     } catch {
+      // No error here. The proof is deliberately never persisted — it is what
+      // the enclave verifies — so a reloaded device simply does not have one,
+      // and `resolveDeviceAuthorization` already reports that as
+      // `social-needs-login`: a sign-in button, not a failure notice pinned to
+      // somebody else's screen.
       return;
     }
-    const action = wallet.status === 'ready' ? 'enroll' : 'recover';
-    // A wallet that is already enrolled has nothing to enrol. Without this the
-    // enclave ran on every fresh login purely to answer 409, and the UI flashed
-    // "securing recovery" each time it did.
-    if (action === 'enroll' && socialEnrolledRef.current) return;
+    const action = decision.action;
     const attemptKey =
       `${wallet.chain}:${wallet.address}:${action}:${credential.tokenFingerprint}`;
     if (socialAttemptRef.current.has(attemptKey)) return;
@@ -682,57 +1142,6 @@ export function CavosProvider({
     let cancelled = false;
 
     (async () => {
-      if (action === 'enroll') {
-        // A newly-created wallet is already controlled by this device. TEE
-        // enrollment is a hardening step and must not downgrade the usable
-        // wallet back to a blocking "deploying" state while an on-demand
-        // enclave answers. Browsers may suspend timers in the
-        // background; the in-flight task resumes when the app is foregrounded.
-        setWalletStatus((status) => ({
-          ...status,
-          isDeploying: false,
-          isReady: true,
-          isSocialRecovering: true,
-        }));
-        try {
-          await enrollHardwareIsolatedRecovery({
-            client,
-            wallet,
-            credential,
-            delaySeconds: socialRecovery.delaySeconds,
-          });
-          socialEnrolledRef.current = true;
-          if (!cancelled) {
-            setWalletStatus((status) => ({
-              ...status,
-              recovery: {
-                protected: true,
-                methods: status.recovery.methods.includes('social')
-                  ? status.recovery.methods
-                  : [...status.recovery.methods, 'social'],
-              },
-            }));
-          }
-        } catch (error) {
-          // Enrollment is opt-in and must never make an already-working wallet
-          // unusable. A 409 means this wallet was enrolled on a prior login.
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes('already_enrolled')) {
-            console.error('[CavosProvider] social recovery enrollment failed:', error);
-          }
-        } finally {
-          if (!cancelled) {
-            setWalletStatus((status) => ({
-              ...status,
-              isDeploying: false,
-              isReady: true,
-              isSocialRecovering: false,
-            }));
-          }
-        }
-        return;
-      }
-
       setWalletStatus((status) => ({
         ...status,
         isDeploying: true,
@@ -817,7 +1226,11 @@ export function CavosProvider({
         if (!cancelled) await connect(identity, { silent: true });
       } catch (error) {
         if (!cancelled) {
-          setAuthError(error instanceof Error ? error.message : 'Social recovery failed.');
+          const message = error instanceof Error ? error.message : 'Social recovery failed.';
+          // Also ends any action waiting on this authorization, rather than
+          // leaving it to time out having already been refused.
+          authorizationErrorRef.current = message;
+          setAuthError(message);
           setWalletStatus((status) => ({
             ...status,
             isDeploying: false,
@@ -839,9 +1252,14 @@ export function CavosProvider({
     config.network,
     socialRecoveryPolicy,
     connect,
+    deviceAuthorization,
     identity,
     socialRecovery,
     wallet,
+    // The wallet object is mutated in place when the first execute deploys it,
+    // so depending on the reference alone never re-runs this. The status is the
+    // thing that actually changed, and enrolment is what has to follow it.
+    wallet?.status,
     externalSocialToken,
   ]);
 
@@ -941,7 +1359,7 @@ export function CavosProvider({
     if (!externalIdentity) {
       // Signed out (or still loading). Drop wallet state so a previous user's
       // address can never be read by whoever comes next.
-      setWallet(null);
+      setSession(null);
       setIdentity(null);
       setWalletStatus(INITIAL_STATUS);
       setAuthError(null);
@@ -952,7 +1370,7 @@ export function CavosProvider({
     setIsLoading(true);
     // Clear the outgoing user's wallet before connecting the incoming one, so
     // a slow connect cannot briefly expose the wrong account.
-    setWallet(null);
+    setSession(null);
     setWalletStatus(INITIAL_STATUS);
     (async () => {
       try {
@@ -1010,6 +1428,8 @@ export function CavosProvider({
         "kit: useCavos().execute(calls) is Starknet-only. On Solana/Stellar use the `wallet` handle: wallet.execute(amount, dest).",
       );
     }
+    // The wallet authorizes the device itself when the call needs it, and then
+    // performs the call -- one flow, so there is nothing to check first.
     return wallet.execute(calls, opts);
   }, [wallet]);
 
@@ -1018,6 +1438,12 @@ export function CavosProvider({
   const signMessage = useCallback(
     async (message: string | Uint8Array): Promise<MessageSignature> => {
       if (!wallet) throw new Error('Not logged in');
+      // Same rule as execute. A signature from a key the account does not
+      // recognise is one nobody will accept, so producing it would only look
+      // like success.
+      if (wallet.status === 'needs-device-approval') {
+        await authorizeDeviceRef.current();
+      }
       return wallet.signMessage(message);
     },
     [wallet],
@@ -1067,6 +1493,7 @@ export function CavosProvider({
       appId: cfg.appId,
       network: cfg.network,
       ...(cfg.environment ? { environment: cfg.environment } : {}),
+      authToken: () => auth.getAuthToken(),
     });
     const found = await registry.lookup(identity.userId);
     return found?.devices ?? [];
@@ -1087,29 +1514,57 @@ export function CavosProvider({
 
   const rpName = branding.appName ?? modal?.appName ?? 'Cavos';
 
+
+  /**
+   * Stellar's factor is the PRF secret, not a public key, so it cannot be read
+   * back off any chain -- and must not be stored anywhere. It is derived from
+   * the same passkey at the moment the account is created.
+   */
+  const passkeyFactorForCreate = useCallback(async (): Promise<Uint8Array | null> => {
+    if (deviceAuthorization !== 'passkey') return null;
+    return new PasskeyPrf({ rpName }).getSecret();
+  }, [deviceAuthorization, rpName]);
+  passkeyFactorRef.current = passkeyFactorForCreate;
+
   // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
+  /**
+   * Turn on passkey approvals for the whole session, with one gesture.
+   *
+   * It used to enrol the wallet on screen and no other, so the chains the user
+   * was not looking at stayed without a passkey -- and switching chain to fix
+   * that meant another prompt, and another passkey. One credential is created
+   * here and registered everywhere: as an on-chain approver on the chains that
+   * verify assertions, and as the DEK factor on Stellar, which does not.
+   *
+   * Works before the first transaction too: an undeployed wallet keeps the
+   * approver pending and includes it in its deploy.
+   */
   const enrollPasskeyDefault = useCallback(async () => {
-    if (!wallet || !identity) throw new Error('Not logged in');
-    if (wallet.status !== 'ready') throw new Error('kit: no ready device to enroll a passkey on');
-    if (wallet.chain === 'stellar') {
-      // Classic Stellar uses a WebAuthn PRF secret (not an on-chain assertion) as
-      // the passkey factor that wraps the account DEK.
-      const prf = new PasskeyPrf({ rpName });
-      const { secret } = await prf.enroll({
-        userId: identity.userId,
-        userName: identity.email ?? identity.userId,
-        ...(identity.email ? { displayName: identity.email } : {}),
-      });
-      await wallet.enrollPasskey(secret ?? (await prf.getSecret()));
-      return;
-    }
-    const passkey = new PasskeySigner({ rpName });
-    await wallet.enrollPasskey(passkey, {
+    if (!session || !identity) throw new Error('Not logged in');
+    const enrolled = await new PasskeySigner({ rpName }).enroll({
       userId: identity.userId,
       userName: identity.email ?? identity.userId,
       ...(identity.email ? { displayName: identity.email } : {}),
     });
-  }, [wallet, identity, rpName]);
+
+    // Register it where the account exists, and on exactly one that does not,
+    // so there is somewhere to check a recovered key against later. Deploying
+    // every configured chain here would buy gas on chains the user may never
+    // touch; each of those picks the passkey up when it is created.
+    // One chain, so there is nowhere to propagate to: register it here and the
+    // account is created if it does not exist yet.
+    const wallets = session.chains.map((c) => session.wallet(c));
+    for (const w of wallets) {
+      if (w.chain === 'stellar') continue;
+      await w.addApprover(enrolled.publicKey);
+    }
+
+    const stellar = wallets.find((w) => w.chain === 'stellar');
+    if (!stellar || stellar.chain !== 'stellar') return;
+    const secret =
+      enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
+    await stellar.enrollPasskey(secret);
+  }, [session, identity, rpName, selectedChain]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
@@ -1148,6 +1603,90 @@ export function CavosProvider({
     await connect(identity, { silent: true });
   }, [wallet, identity, rpName, connect]);
 
+  // Authorization is lazy, like deployment. Signing in on a new device does not
+  // interrupt anyone: reads work without being a signer, so the wallet shows
+  // its address and balance straight away. Only an action that needs the
+  // account's authority asks — at a moment the user is already acting, where
+  // the request explains itself.
+  /** Resolve once the wallet accepts this device, or give up saying so. */
+  const waitUntilAuthorized = useCallback(
+    (w: CavosWallet, timeoutMs = 90_000) =>
+      new Promise<void>((resolve, reject) => {
+        if (w.status === 'ready') return resolve();
+        authorizationErrorRef.current = null;
+        const timer = setTimeout(() => {
+          stop();
+          reject(new Error('Authorizing this device took too long. Try again.'));
+        }, timeoutMs);
+        // A wallet with no recovery authority is refused in a second — waiting
+        // out the full timeout to say so is a minute and a half of nothing.
+        const poll = setInterval(() => {
+          if (!authorizationErrorRef.current) return;
+          const message = authorizationErrorRef.current;
+          stop();
+          reject(new Error(message));
+        }, 250);
+        const off = w.onStatusChange(() => {
+          if (w.status !== 'ready') return;
+          stop();
+          resolve();
+        });
+        function stop() {
+          clearTimeout(timer);
+          clearInterval(poll);
+          off();
+        }
+      }),
+    [],
+  );
+
+  const authorizeDevice = useCallback(async () => {
+    if (!wallet || wallet.status !== 'needs-device-approval') return;
+    setAuthorizingDevice(true);
+    try {
+      // Do the thing, rather than open a screen asking to do the thing. Most of
+      // these need nothing from the user: the enclave runs on its own, and an
+      // approval email is a request, not a dialog. Only a passkey needs a
+      // gesture, and only a missing login proof needs the user at all.
+      switch (deviceAuthorization) {
+        case 'passkey':
+          await approveDeviceWithPasskey();
+          break;
+        case 'enclave': {
+          // Waiting is only worth it if there is something to wait for. A
+          // wallet with no authority on-chain cannot be recovered, and the
+          // attempt that proved it is deduplicated — so nothing would fail
+          // again and the wait would sit out its whole timeout in silence.
+          if (!socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`)) {
+            throw new Error(
+              'This wallet has no recovery set up, so this device cannot be restored. ' +
+                'Open it on the device that created it and it will be set up there.',
+            );
+          }
+          // The effect below starts it as soon as a wallet needing
+          // authorization meets a live login proof; this waits for the outcome,
+          // so the action that asked can carry straight on.
+          await waitUntilAuthorized(wallet);
+          break;
+        }
+        case 'enclave-needs-login':
+          setAuthError('Sign in again to restore this device.');
+          break;
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not authorize this device.');
+      // And let it reach whoever asked. Swallowing it left the caller to infer
+      // the failure from a status that had not moved, so an execute reported
+      // "this device was not authorized" over any real reason -- a timeout, a
+      // refused recovery, a declined passkey.
+      throw error;
+    } finally {
+      setAuthorizingDevice(false);
+    }
+  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, waitUntilAuthorized]);
+
+  authorizeDeviceRef.current = authorizeDevice;
+
   // Generate a recovery code and register its derived backup signer (gasless).
   // The code is returned so the UI can display it once — never persisted.
   const setupRecovery = useCallback(async (): Promise<string> => {
@@ -1164,10 +1703,9 @@ export function CavosProvider({
     setAuthError(null);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     try {
-      const chain = cfg.chain ?? 'starknet';
-      let w: CavosWallet;
+      const chain = cfg.chain ?? cfg.defaultChain ?? cfg.chains?.[0] ?? 'starknet';
       if (chain === 'solana') {
-        w = await CavosSolana.recover({
+        await CavosSolana.recover({
           code,
           identity,
           network: (cfg.network === 'mainnet' ? 'solana-mainnet' : 'solana-devnet') as SolanaNetwork,
@@ -1184,6 +1722,7 @@ export function CavosProvider({
           chain: 'stellar',
           network: cfg.network,
           identity,
+          auth,
           appSalt: cfg.appSalt,
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
@@ -1191,11 +1730,11 @@ export function CavosProvider({
         if (sw.chain === 'stellar' && sw.status === 'needs-device-approval') {
           await sw.approveThisDeviceWithRecovery(code);
         }
-        w = sw;
       } else {
-        w = await Cavos.recover({
+        await Cavos.recover({
           code,
           identity,
+          auth,
           network: cfg.network,
           appSalt: cfg.appSalt,
           paymasterApiKey: cfg.paymasterApiKey ?? '',
@@ -1204,16 +1743,16 @@ export function CavosProvider({
           ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         });
       }
-      setWallet(w);
-      setWalletStatus({ ...INITIAL_STATUS, isReady: true });
-      modal?.onSuccess?.(w.address);
+      // After recovery, reconnect to get a proper session with all chains
+      await connect(identity);
+      modal?.onSuccess?.(wallet?.address ?? '');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Recovery failed. Check your code and try again.';
       setAuthError(msg);
       setWalletStatus(INITIAL_STATUS);
       throw e;
     }
-  }, [identity, modal]);
+  }, [identity, modal, connect, wallet]);
 
   // Poll the pending device-addition request while awaiting the owner's approval
   // (Starknet email flow). Once approved, reconnect to flip to "ready".
@@ -1222,7 +1761,7 @@ export function CavosProvider({
     const cfg = configRef.current;
     if (!cfg.appId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
     const requestId = walletStatus.pendingRequestId;
     let cancelled = false;
     const tick = async () => {
@@ -1256,7 +1795,7 @@ export function CavosProvider({
 
   const logout = useCallback(() => {
     auth.clearStoredIdentity();
-    setWallet(null);
+    setSession(null);
     setIdentity(null);
     setWalletStatus(INITIAL_STATUS);
     setAuthError(null);
@@ -1272,12 +1811,15 @@ export function CavosProvider({
   const value: CavosContextValue = {
     openModal,
     closeModal,
-    isAuthenticated: !!wallet,
+    isAuthenticated: !!session,
     user: identity
       ? { userId: identity.userId, email: identity.email, name: identity.name, provider: identity.provider }
       : null,
-    chain: config.chain ?? 'starknet',
+    chain: selectedChain,
+    configuredChains: session?.chains ?? [config.chains?.[0] ?? config.defaultChain ?? config.chain ?? 'starknet'],
+    setChain,
     wallet,
+    session,
     address: wallet?.address ?? null,
     walletStatus,
     isLoading,
@@ -1295,6 +1837,9 @@ export function CavosProvider({
     listDevices,
     enrollPasskey,
     passkeySupported,
+    deviceAuthorization,
+    authorizeDevice,
+    authorizingDevice,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
     resendDeviceApproval,

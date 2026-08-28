@@ -55,13 +55,33 @@ export interface CoordinatedRecoveryResult {
  * Stellar is intentionally different: the enclave seals only the DEK, while
  * Starknet/Solana enforce the recovery authority and timelock on-chain.
  */
-export async function enrollHardwareIsolatedRecovery(params: {
+export interface AgreedRecoveryAuthority {
+  sessionId: string;
+  result: EnrollmentResult;
+}
+
+/**
+ * Agree a recovery authority with the enclave. Needs the login proof; touches
+ * no chain.
+ *
+ * This is the half that has to happen at login. The proof is minted by the
+ * sign-in and the enclave will not accept one older than five minutes, while
+ * the account it protects does not exist until the user's first transaction --
+ * which under lazy deploy is whenever they feel like it. Waiting for the
+ * account meant a user who signed in and transacted ten minutes later was never
+ * enrolled at all, and only found out when a second device could not be
+ * restored.
+ *
+ * Repeating it is safe: an authority already agreed and not yet on-chain is
+ * returned again rather than replaced, so a browser that dies between the two
+ * halves loses nothing.
+ */
+export async function agreeRecoveryAuthority(params: {
   client: SocialRecoveryClient;
   wallet: CavosWallet;
   credential: SocialRecoveryCredential;
-  delaySeconds: number;
-}): Promise<{ sessionId: string; transactionHash?: string }> {
-  const { client, wallet, credential, delaySeconds } = params;
+}): Promise<AgreedRecoveryAuthority> {
+  const { client, wallet, credential } = params;
   const enrollment = await client.enroll({
     walletAddress: wallet.address,
     credential,
@@ -69,11 +89,26 @@ export async function enrollHardwareIsolatedRecovery(params: {
   });
   const result = enrollment.result as EnrollmentResult;
   assertEnrollmentResult(result);
+  return { sessionId: enrollment.sessionId, result };
+}
+
+/**
+ * Write an agreed authority on-chain. Signed by the device; needs no login
+ * proof, so it can happen any time after the account exists.
+ */
+export async function writeRecoveryAuthority(params: {
+  client: SocialRecoveryClient;
+  wallet: CavosWallet;
+  authority: AgreedRecoveryAuthority;
+  delaySeconds: number;
+}): Promise<{ sessionId: string; transactionHash?: string }> {
+  const { client, wallet, delaySeconds } = params;
+  const { sessionId, result } = params.authority;
 
   if (wallet.chain === "stellar") {
     // There is no restricted recovery authority on Stellar classic. The server
     // activates this KMS-sealed DEK record atomically when the enclave completes.
-    return { sessionId: enrollment.sessionId };
+    return { sessionId };
   }
 
   let transactionHash: string;
@@ -91,8 +126,19 @@ export async function enrollHardwareIsolatedRecovery(params: {
       policyHash: exactBytes(result.policy_hash_hex, 32, "policy hash"),
     });
   }
-  await client.confirmEnrollment(enrollment.sessionId, transactionHash);
-  return { sessionId: enrollment.sessionId, transactionHash };
+  await client.confirmEnrollment(sessionId, transactionHash);
+  return { sessionId, transactionHash };
+}
+
+/** Both halves at once, for a wallet whose account already exists. */
+export async function enrollHardwareIsolatedRecovery(params: {
+  client: SocialRecoveryClient;
+  wallet: CavosWallet;
+  credential: SocialRecoveryCredential;
+  delaySeconds: number;
+}): Promise<{ sessionId: string; transactionHash?: string }> {
+  const authority = await agreeRecoveryAuthority(params);
+  return writeRecoveryAuthority({ ...params, authority });
 }
 
 /**

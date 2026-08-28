@@ -26,6 +26,8 @@ import {
 import type { PasskeyAssertion } from "../../crypto/webauthn";
 
 const COMPRESSED_PUBKEY_SIZE = 33;
+/** 8 discriminator + 32 address_seed + 1 bump + 8 nonce + 33 initial_signer. */
+const DEVICE_ACCOUNT_HEADER = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE;
 const SIGNATURE_SIZE = 64;
 const CURRENT_IX = 0xffff;
 
@@ -83,18 +85,20 @@ export class SolanaAdapter {
   }
 
   /**
-   * Deterministic account address: PDA of [ACCOUNT_SEED, addressSeed] — the
-   * device pubkey is NOT part of the seeds, so the address is recomputable
-   * from (userId, appSalt) alone. Anti-squatting is the integrator's
-   * responsibility (keep `appSalt` secret; deploy on first login).
+   * Account address: PDA of [ACCOUNT_SEED, namespace, initial_signer_x]. The
+   * first device pubkey is in the seeds, so `initialize` with a different key
+   * derives a different PDA and cannot claim this address.
    */
-  computeAddress(addressSeed: Uint8Array): string {
-    return this.pda(addressSeed).toBase58();
+  computeAddress(namespace: Uint8Array, initialSigner: DevicePublicKey): string {
+    return this.pda(namespace, initialSigner).toBase58();
   }
 
-  private pda(addressSeed: Uint8Array): PublicKey {
+  private pda(namespace: Uint8Array, initialSigner: DevicePublicKey): PublicKey {
+    // A PDA seed is capped at 32 bytes, so the 33-byte compressed key
+    // contributes its X coordinate — exactly what the program re-derives.
+    const compressed = compressedPubkey(initialSigner);
     const [pda] = PublicKey.findProgramAddressSync(
-      [Buffer.from(ACCOUNT_SEED), Buffer.from(addressSeed)],
+      [Buffer.from(ACCOUNT_SEED), Buffer.from(namespace), Buffer.from(compressed.slice(1, 33))],
       this.programId,
     );
     return pda;
@@ -110,19 +114,19 @@ export class SolanaAdapter {
 
   /**
    * `initialize` instruction: creates the account PDA and registers the first
-   * device signer. No attestation is required — anti-squatting is NOT enforced
-   * on-chain.
+   * device signer. The PDA seeds contain that signer, so this can only ever
+   * create the account the caller's own key names.
    */
   buildInitialize(
-    addressSeed: Uint8Array,
+    namespace: Uint8Array,
     payer: string,
     initialSigner: DevicePublicKey,
   ): TransactionInstruction[] {
     const initialCompressed = compressedPubkey(initialSigner);
-    const account = this.pda(addressSeed);
+    const account = this.pda(namespace, initialSigner);
     const data = Buffer.concat([
       anchorDiscriminator("initialize"),
-      Buffer.from(addressSeed), // [u8;32]
+      Buffer.from(namespace), // [u8;32] app_namespace
       Buffer.from(initialCompressed), // [u8;33]
     ]);
     const programIx = new TransactionInstruction({
@@ -429,10 +433,25 @@ export class SolanaAdapter {
     return approvers.some((a) => Buffer.from(a).toString("hex") === target);
   }
 
+  /**
+   * Whether the program has actually created this account.
+   *
+   * Not the same question as whether an address exists. An address the program
+   * has not created can still hold lamports -- an airdrop, a transfer -- and
+   * taking that for a deployed wallet made the device that created the wallet
+   * look like a stranger to it: the account "existed", so the kit went looking
+   * for its signers, found none, and asked the enclave to restore a device that
+   * was never missing.
+   */
+  async isDeviceAccount(account: string): Promise<boolean> {
+    const info = await this.requireConnection().getAccountInfo(new PublicKey(account));
+    return isDeviceAccountData(info?.data);
+  }
+
   /** Read the current passkey-approval nonce. */
   async passkeyNonce(account: string): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(new PublicKey(account));
-    if (!info) return 0n;
+    if (!isDeviceAccountData(info?.data)) return 0n;
     const d = info.data;
     const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
     const signerCount = d.readUInt32LE(signersLenOff);
@@ -608,7 +627,7 @@ export class SolanaAdapter {
 
   private async fetchNonce(account: PublicKey): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return 0n;
+    if (!isDeviceAccountData(info?.data)) return 0n;
     // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce(LE) + 33 initial_signer + ...
     // nonce is right after bump, so its offset is unaffected by initial_signer.
     return readU64le(info.data, 41);
@@ -616,7 +635,7 @@ export class SolanaAdapter {
 
   private async fetchSigners(account: PublicKey): Promise<Uint8Array[]> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return [];
+    if (!isDeviceAccountData(info?.data)) return [];
     const d = info.data;
     // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce + 33 initial_signer + 4 vec_len + signers
     const lenOffset = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // = 82
@@ -632,7 +651,7 @@ export class SolanaAdapter {
 
   private async fetchApprovers(account: PublicKey): Promise<Uint8Array[]> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return [];
+    if (!isDeviceAccountData(info?.data)) return [];
     const d = info.data;
     const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
     const signerCount = d.readUInt32LE(signersLenOff);
@@ -727,6 +746,21 @@ function i64le(n: bigint | number): Buffer {
   const b = Buffer.alloc(8);
   new DataView(b.buffer, b.byteOffset, 8).setBigInt64(0, BigInt(n), true);
   return b;
+}
+
+/**
+ * Whether this is one of our device accounts, rather than any account that
+ * happens to live at the address.
+ *
+ * An address the program has not created can still exist -- funded by an
+ * airdrop or a transfer, it is a system account holding lamports and no data.
+ * The readers took the account's existence as proof of the layout and read
+ * straight past the end of it, so connect died on `Trying to access beyond
+ * buffer length` and the whole session failed to come back, for a wallet whose
+ * only sin was having been sent some SOL.
+ */
+function isDeviceAccountData(data: Buffer | undefined): data is Buffer {
+  return !!data && data.length >= DEVICE_ACCOUNT_HEADER + 4;
 }
 
 function readU64le(buf: Buffer, offset: number): bigint {

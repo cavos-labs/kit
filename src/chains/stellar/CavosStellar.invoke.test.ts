@@ -1,9 +1,9 @@
 import { Address, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { CavosStellar } from "./CavosStellar";
 import { StellarAdapter } from "./StellarAdapter";
-import { deriveStellarMasterKeypair } from "./keys";
 import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
+import { KeypairControlKey } from "./WebCryptoControlKey";
 
 /**
  * Verifies `CavosStellar.invokeContract` — the Soroban path that lets a Cavos
@@ -50,7 +50,13 @@ describe("CavosStellar.invokeContract", () => {
     const otherBefore = otherRole.toXDR("base64");
 
     const adapter = new StellarAdapter({ network: "stellar-testnet" });
-    const fakeTx = { operations: [{ auth: [otherRole, ours] }], sign: jest.fn(), toXDR: () => "x" };
+    const fakeTx = {
+      operations: [{ auth: [otherRole, ours] }],
+      sign: jest.fn(),
+      toXDR: () => "x",
+      hash: () => Buffer.alloc(32),
+      addSignature: jest.fn(),
+    };
     (adapter as any).buildInvokeTx = jest.fn().mockResolvedValue(fakeTx);
     (adapter as any).latestLedger = jest.fn().mockResolvedValue(1000);
     (adapter as any).submitSoroban = jest.fn().mockResolvedValue("rpcHash");
@@ -63,9 +69,10 @@ describe("CavosStellar.invokeContract", () => {
       "stellar-testnet",
       adapter,
       LocalDeviceUnwrapKey.generate(),
-      acct,
+      new KeypairControlKey(acct),
       new Uint8Array(32),
       undefined,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({ contractId: CONTRACT_ID, method: "release_funds", args: [] });
@@ -83,7 +90,13 @@ describe("CavosStellar.invokeContract", () => {
   it("fee-bumps through the relayer when sponsored (default)", async () => {
     const acct = Keypair.random();
     const adapter = new StellarAdapter({ network: "stellar-testnet" });
-    const fakeTx = { operations: [{ auth: [] }], sign: jest.fn(), toXDR: () => "x" };
+    const fakeTx = {
+      operations: [{ auth: [] }],
+      sign: jest.fn(),
+      toXDR: () => "x",
+      hash: () => Buffer.alloc(32),
+      addSignature: jest.fn(),
+    };
     (adapter as any).buildInvokeTx = jest.fn().mockResolvedValue(fakeTx);
     (adapter as any).latestLedger = jest.fn().mockResolvedValue(1000);
     (adapter as any).wrapFeeBump = jest.fn().mockReturnValue({ toXDR: () => "bumpXdr" });
@@ -102,9 +115,10 @@ describe("CavosStellar.invokeContract", () => {
       "stellar-testnet",
       adapter,
       LocalDeviceUnwrapKey.generate(),
-      acct,
+      new KeypairControlKey(acct),
       new Uint8Array(32),
       relayer,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({ contractId: CONTRACT_ID, method: "fund_escrow" });
@@ -116,7 +130,13 @@ describe("CavosStellar.invokeContract", () => {
   it("submits directly via RPC when { sponsored: false }", async () => {
     const acct = Keypair.random();
     const adapter = new StellarAdapter({ network: "stellar-testnet" });
-    const fakeTx = { operations: [{ auth: [] }], sign: jest.fn(), toXDR: () => "x" };
+    const fakeTx = {
+      operations: [{ auth: [] }],
+      sign: jest.fn(),
+      toXDR: () => "x",
+      hash: () => Buffer.alloc(32),
+      addSignature: jest.fn(),
+    };
     (adapter as any).buildInvokeTx = jest.fn().mockResolvedValue(fakeTx);
     (adapter as any).latestLedger = jest.fn().mockResolvedValue(1000);
     (adapter as any).submitSoroban = jest.fn().mockResolvedValue("rpcHash");
@@ -129,7 +149,8 @@ describe("CavosStellar.invokeContract", () => {
     const Ctor = CavosStellar as unknown as new (...args: unknown[]) => CavosStellar;
     const wallet = new Ctor(
       identity, acct.publicKey(), "ready", "stellar-testnet", adapter,
-      LocalDeviceUnwrapKey.generate(), acct, new Uint8Array(32), relayer,
+      LocalDeviceUnwrapKey.generate(), new KeypairControlKey(acct), new Uint8Array(32), relayer,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({

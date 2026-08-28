@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Cavos Kit - device-native verifiable smart accounts for Starknet, Solana and Stellar.",
   "repository": {
     "type": "git",
@@ -65,6 +65,8 @@
   },
   "keywords": [
     "starknet",
+    "solana",
+    "stellar",
     "account-abstraction",
     "device-signer",
     "passkey",
@@ -77,9 +79,9 @@
   "author": "Cavos",
   "license": "MIT",
   "dependencies": {
+    "@expo/config-plugins": "^57.0.0",
     "@noble/curves": "^1.6.0",
     "@noble/hashes": "^1.5.0",
-    "@expo/config-plugins": "^57.0.0",
     "@phosphor-icons/react": "^2.1.10",
     "@solana/web3.js": "^1.98.4",
     "@stellar/stellar-sdk": "^16.0.1",
@@ -88,12 +90,12 @@
     "starknet": "^9.4.2"
   },
   "peerDependencies": {
+    "expo-linking": ">=7",
+    "expo-modules-core": ">=2",
+    "expo-web-browser": ">=14",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0",
     "react-native": ">=0.76",
-    "expo-modules-core": ">=2",
-    "expo-web-browser": ">=14",
-    "expo-linking": ">=7",
     "react-native-get-random-values": ">=1.11"
   },
   "peerDependenciesMeta": {
@@ -129,6 +131,7 @@
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.57.0",
+    "fake-indexeddb": "^6.2.5",
     "jest": "^29.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

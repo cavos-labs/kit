@@ -9,7 +9,7 @@ import {
   anchorDiscriminator,
 } from "./SolanaAdapter";
 import { SECP256R1_N, SECP256R1_PROGRAM_ID } from "./constants";
-import { deriveAddressSeedSolana } from "../../identity";
+import { appNamespace } from "../../identity";
 import type { DevicePublicKey } from "../../signer/DeviceSigner";
 import { bytesToBigInt } from "../../crypto/encoding";
 
@@ -44,25 +44,26 @@ describe("SolanaAdapter", () => {
     expect(s <= SECP256R1_N / 2n).toBe(true);
   });
 
-  it("derives a deterministic PDA off the program id and seed (Option D: device pubkey ignored)", () => {
-    const seed = deriveAddressSeedSolana({ userId: "user-123", appSalt: "app-xyz" });
-    expect(seed.length).toBe(32);
-    // The address is recomputable from the seed alone — two different devices
-    // for the same user resolve to the SAME address. This is what makes
-    // recovery self-custodial on Solana too.
+  it("derives the PDA from the namespace AND the first device pubkey", () => {
+    const namespace = appNamespace({ appId: "app-xyz" });
+    expect(namespace.length).toBe(32);
+
     const privA = p256.utils.randomPrivateKey();
     const privB = p256.utils.randomPrivateKey();
-    const addr = adapter.computeAddress(seed);
-    const addrAgain = adapter.computeAddress(seed);
-    // valid base58 pubkey + stable across calls
+    const deviceA = devicePubkey(privA);
+    const deviceB = devicePubkey(privB);
+    expect(deviceA.x).not.toBe(deviceB.x);
+
+    const addr = adapter.computeAddress(namespace, deviceA);
     expect(() => new PublicKey(addr)).not.toThrow();
-    expect(addrAgain).toBe(addr);
-    // Different seed → different address.
-    const seed2 = deriveAddressSeedSolana({ userId: "user-456", appSalt: "app-xyz" });
-    expect(adapter.computeAddress(seed2)).not.toBe(addr);
-    // Sanity: the two devices we generated are actually distinct keys (else the
-    // address-sensitivity claim would be trivially true for the wrong reason).
-    expect(devicePubkey(privA).x).not.toBe(devicePubkey(privB).x);
+    expect(adapter.computeAddress(namespace, deviceA)).toBe(addr);
+
+    // A different device is a different account — this is what makes squatting
+    // impossible: `initialize` with deviceB simply cannot reach deviceA's PDA.
+    expect(adapter.computeAddress(namespace, deviceB)).not.toBe(addr);
+
+    // A different app is a different account too.
+    expect(adapter.computeAddress(appNamespace({ appId: "other-app" }), deviceA)).not.toBe(addr);
   });
 
   it("builds a secp256r1 precompile ix the precompile program owns, verifiable by noble", () => {

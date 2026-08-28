@@ -35,18 +35,21 @@ function makeWallet(opts: { relayer?: SolanaRelayer; feePayer?: Keypair }): Cavo
   } as any;
   const connection = {} as any;
   // Private constructor: cast to access it without going through connect().
+  // Constructor signature: identity, address, addressSeed, statusValue, connection, adapter, devicePubkey, relayer?, feePayer?, registry?
   const Ctor = CavosSolana as any as new (
     ...args: any[]
   ) => CavosSolana;
   return new Ctor(
     { userId: "u1" },
     new PublicKey("11111111111111111111111111111112").toBase58(),
+    new Uint8Array(32), // addressSeed
     "ready",
     connection,
     stubAdapter,
     { x: 1n, y: 2n },
     opts.relayer,
     opts.feePayer,
+    undefined, // registry
   );
 }
 

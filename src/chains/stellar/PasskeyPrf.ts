@@ -1,5 +1,6 @@
 import { sha256 } from "@noble/hashes/sha256";
 import type { PasskeyEnrollParams, PasskeyPrfProvider } from "../../signer/PasskeyProvider";
+import { PRF_SALT } from "../../signer/prfSalt";
 
 /**
  * WebAuthn **PRF** factor for the classic-G envelope.
@@ -27,9 +28,7 @@ export interface PasskeyPrfOptions {
 
 export type PasskeyPrfEnrollParams = PasskeyEnrollParams;
 
-/** Fixed PRF input salt — scopes the derived secret to the classic-G DEK factor.
- *  Stable forever: changing it changes every existing user's passkey secret. */
-const PRF_SALT = sha256(new TextEncoder().encode("cavos-stellar-prf-v1"));
+
 
 export class PasskeyPrf implements PasskeyPrfProvider {
   private readonly rpId: string;
@@ -95,12 +94,17 @@ export class PasskeyPrf implements PasskeyPrfProvider {
    * `allowCredentials`), so it works from a brand-new browser — the OS shows the
    * synced passkey picker. Throws if the authenticator doesn't support PRF.
    */
-  async getSecret(): Promise<Uint8Array> {
+  async getSecret(credentialId?: Uint8Array): Promise<Uint8Array> {
     const cred = (await navigator.credentials.get({
       publicKey: {
         challenge: buf(crypto.getRandomValues(new Uint8Array(32))),
         rpId: this.rpId,
-        allowCredentials: [],
+        // Pinned to one credential when the caller knows which: enrolment has
+        // just created the passkey, and letting the picker offer a different
+        // one would derive a secret that unwraps nothing.
+        allowCredentials: credentialId
+          ? [{ type: "public-key" as const, id: buf(credentialId) }]
+          : [],
         userVerification: "required",
         extensions: { prf: { eval: { first: buf(PRF_SALT) } } } as AuthenticationExtensionsClientInputs,
       },

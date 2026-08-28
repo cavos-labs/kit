@@ -3,57 +3,57 @@ import { sha256 } from "@noble/hashes/sha256";
 import { utf8ToBytes } from "./crypto/encoding";
 
 /**
- * The address seed binds a wallet to a stable, backend-managed user identity.
- * The deterministic account address is derived from this seed + salt ONLY — never
- * from a device pubkey — so the same user resolves to the same wallet on any
- * device. Hosted registry records are bookkeeping and recovery metadata only;
- * they never override this derivation.
+ * The account address is named by the FIRST device signer: its pubkey goes into
+ * the constructor calldata (Starknet) or the PDA seeds (Solana), so nobody who
+ * lacks that key can land on the address. The app namespace below is the second
+ * half of the derivation — it keeps two apps from sharing an address when the
+ * same device key is used in both.
+ *
+ * The namespace is not a secret and is NOT the user's identity. "Same user ->
+ * same wallet" is a lookup in the Cavos registry (`/api/wallets`), not a
+ * derivation. A device that has never seen the registry cannot find the
+ * address; that is the point.
  */
-export interface IdentityInput {
-  /** Stable, backend-managed user identifier (e.g. from email / magic link). */
-  userId: string;
-  /** Per-app salt, so the same user has distinct wallets across apps. */
-  appSalt: string;
+export interface AppNamespaceInput {
+  /** Cavos App ID (public). */
+  appId: string;
+  /** Console environment id, or the kind ("production" / "development"). */
+  environmentId?: string;
 }
 
-/** Derive the felt `address_seed` passed to the contract constructor. */
-export function deriveAddressSeed({ userId, appSalt }: IdentityInput): bigint {
-  // Poseidon over the identity components; stable and collision-resistant.
-  const h = hash.computePoseidonHashOnElements([feltFromString(userId), feltFromString(appSalt)]);
-  return BigInt(h);
+/** 32-byte app namespace, shared by every chain. */
+export function appNamespace({ appId, environmentId }: AppNamespaceInput): Uint8Array {
+  return sha256(utf8ToBytes(`cavos:app:v2:${appId}:${environmentId ?? "production"}`));
 }
 
 /**
- * Solana variant: a 32-byte `address_seed` for the Cavos device-account PDA.
- * Uses the SAME identity input as Starknet (`userId + appSalt`) but hashes with
- * SHA-256 instead of Poseidon, since Solana has no native Poseidon and the PDA
- * seed is raw bytes. The same user therefore maps to a stable, app-scoped
- * address on each chain (different address spaces, one identity).
+ * A 32-byte namespace as a felt, for Starknet constructor calldata. Every
+ * 251-bit value is below the Starknet prime, so truncating to 251 bits is exact
+ * and needs no modular reduction.
  */
-export function deriveAddressSeedSolana({ userId, appSalt }: IdentityInput): Uint8Array {
-  return sha256(utf8ToBytes(`cavos:solana:v1:${userId}:${appSalt}`));
+export function namespaceToFelt(namespace: Uint8Array): bigint {
+  let v = 0n;
+  for (const b of namespace) v = (v << 8n) | BigInt(b);
+  return v >> 5n;
 }
 
-/**
- * Stellar variant: a 32-byte `address_seed` used as the Soroban account's seed
- * and folded (with the initial device signer) into the factory deploy salt.
- * Same identity input as the other chains, SHA-256 hashed, with a Stellar-scoped
- * domain so the same user maps to a distinct address per chain.
- */
-export function deriveAddressSeedStellar({ userId, appSalt }: IdentityInput): Uint8Array {
-  return sha256(utf8ToBytes(`cavos:stellar:v1:${userId}:${appSalt}`));
+/** The app namespace as a felt. */
+export function appNamespaceFelt(input: AppNamespaceInput): bigint {
+  return namespaceToFelt(appNamespace(input));
 }
 
-/** Map an arbitrary UTF-8 string into a felt via Poseidon over its byte chunks. */
-function feltFromString(s: string): bigint {
-  const bytes = utf8ToBytes(s);
-  const chunks: bigint[] = [];
-  for (let i = 0; i < bytes.length; i += 31) {
-    let w = 0n;
-    for (const b of bytes.subarray(i, i + 31)) w = (w << 8n) | BigInt(b);
-    chunks.push(w);
+/** Convert a bigint to a fixed-width big-endian byte array. */
+export function toBytesBE(value: bigint, length: number): Uint8Array {
+  const out = new Uint8Array(length);
+  let v = value;
+  for (let i = length - 1; i >= 0; i--) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
   }
-  if (chunks.length === 0) return 0n;
-  if (chunks.length === 1) return chunks[0];
-  return BigInt(hash.computePoseidonHashOnElements(chunks));
+  return out;
+}
+
+/** Poseidon hash of felts, as a bigint. Used for the Starknet deploy salt. */
+export function poseidon(felts: bigint[]): bigint {
+  return BigInt(hash.computePoseidonHashOnElements(felts.map((f) => "0x" + f.toString(16))));
 }

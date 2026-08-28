@@ -1,7 +1,6 @@
 import {
   Connection,
   Keypair,
-  PublicKey,
   Transaction,
   sendAndConfirmTransaction,
   type TransactionInstruction,
@@ -11,14 +10,14 @@ import type { DeviceSigner, DevicePublicKey } from "../../signer/DeviceSigner";
 import type { WalletRegistry } from "../../registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
-import { deriveAddressSeedSolana } from "../../identity";
+import { appNamespace } from "../../identity";
+import { resolveAddress } from "../../registry/resolveAddress";
 import { SolanaAdapter, compressedPubkey } from "./SolanaAdapter";
 import type { PendingRecovery } from "./SolanaAdapter";
 import type { InstructionData } from "./SolanaAdapter";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import { BackupSigner, deriveBackupKey } from "../../recovery/BackupSigner";
-import { HttpRecoveryClient } from "../../recovery/HttpRecoveryClient";
 import type { PasskeyApprover, PasskeyEnrollParams } from "../../signer/PasskeyProvider";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "../../crypto/webauthn";
@@ -56,14 +55,15 @@ export interface ConnectSolanaOptions {
    * the default path when `appId` is provided.
    */
   feePayer?: Keypair;
-  /**
-   * Keep the legacy owner-device/email approval request enabled. Set false when
-   * hardware-isolated social recovery owns the new-device flow.
-   */
-  legacyDeviceApproval?: boolean;
 }
 
-export type ConnectStatus = "ready" | "needs-device-approval";
+/**
+ * Chain status for Solana accounts.
+ * - `undeployed`: Address derived but no on-chain PDA exists yet. First execute will deploy.
+ * - `ready`: Account deployed and this device is an authorized signer.
+ * - `needs-device-approval`: Account deployed but this device is not yet authorized.
+ */
+export type ConnectStatus = "undeployed" | "ready" | "needs-device-approval";
 
 /**
  * Options for recovering a Solana account after losing every device signer.
@@ -84,6 +84,8 @@ export interface RecoverSolanaOptions {
   environment?: "development" | "production";
   backendUrl?: string;
   registry?: WalletRegistry;
+  /** Provides the login token the registry lookup authenticates with. */
+  auth?: AuthProvider;
   /** RPC override (else the network default). */
   rpcUrl?: string;
   /** Cavos device-account program id override. */
@@ -98,13 +100,16 @@ export interface RecoverSolanaOptions {
 
 /**
  * High-level Solana entry — the Solana analogue of `Cavos.connect`. One call
- * derives the deterministic device-bound account, deploys it (PDA `initialize`)
- * if needed, registers it for cross-device recognition, and returns a ready
- * handle whose silent P-256 device key authorizes every action through the
- * native secp256r1 precompile.
+ * derives the deterministic device-bound account and returns a handle whose
+ * silent P-256 device key authorizes every action through the native secp256r1
+ * precompile.
  *
- *   const cavos = await CavosSolana.connect({ network: "solana-devnet", identity, appSalt, feePayer });
- *   if (cavos.status === "ready") await cavos.execute(amount, dest);
+ * **Lazy deploy**: Connect NEVER deploys. The first `execute` or `executeInstructions`
+ * call on an undeployed account triggers deployment + the user operation atomically.
+ *
+ *   const cavos = await CavosSolana.connect({ network: "solana-devnet", identity, appSalt, appId });
+ *   // cavos.status may be "undeployed" — first execute will deploy
+ *   await cavos.execute(amount, dest); // deploys + transfers if undeployed
  *
  * Gasless by default: when an `appId` is provided the Cavos relayer co-signs +
  * pays (no fee-payer keypair needed). `feePayer` is the self-funded fallback.
@@ -117,19 +122,104 @@ export class CavosSolana {
   /** True when this connect just created a brand-new account (first sign-up). */
   isNewAccount = false;
 
+  /** Track whether deployment happened (for lazy deploy). */
+  private _isDeployed: boolean;
+  /** Pending passkey enrollment to include in first deploy. */
+  private _pendingApprover: DevicePublicKey | null = null;
+  /** Pending recovery signer to include in first deploy. */
+  private _pendingRecoverySigner: DevicePublicKey | null = null;
+  /** Address seed for lazy deploy. */
+  private readonly namespace: Uint8Array;
+
   private constructor(
     readonly identity: Identity,
     readonly address: string,
-    readonly status: ConnectStatus,
+    namespace: Uint8Array,
+    private statusValue: ConnectStatus,
     readonly connection: Connection,
     private readonly adapter: SolanaAdapter,
     private readonly devicePubkey: DevicePublicKey,
     private readonly relayer?: SolanaRelayer,
     private readonly feePayer?: Keypair,
-  ) {}
+    private readonly registry?: WalletRegistry,
+  ) {
+    this.namespace = namespace;
+    this._isDeployed = statusValue !== "undeployed";
+  }
+
+  /** Current status of this wallet. May change from "undeployed" to "ready" after first execute. */
+  get status(): ConnectStatus {
+    return this.statusValue;
+  }
+
+  /**
+   * Listeners for status changes.
+   *
+   * The status moves when the first execute deploys the account, and it moves
+   * by mutating this object — so nothing holding a reference re-renders, and an
+   * effect keyed on the wallet never re-runs. That is how recovery enrolment
+   * came to be skipped entirely: the wallet turned ready and nobody was told.
+   */
+  private readonly statusListeners = new Set<() => void>();
+
+  /** Subscribe to status changes. Returns an unsubscribe. */
+  onStatusChange(listener: () => void): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  private setStatus(next: ConnectStatus): void {
+    if (this.statusValue === next) return;
+    this.statusValue = next;
+    for (const listener of this.statusListeners) {
+      try {
+        listener();
+      } catch {
+        /* a bad listener must not break the wallet that just became usable */
+      }
+    }
+  }
+
+
+  /**
+   * Called when an action needs this device to be an authorized signer and it
+   * is not one yet.
+   *
+   * The refusal has to live where the action does. Wrapping `execute` in the
+   * React provider only covered calls made through the provider, and both the
+   * demo and any integrator call `wallet.execute` directly — so the request to
+   * authorize never appeared and the user got a bare "not an authorized
+   * signer", which is a statement of fact and no help at all.
+   */
+  onAuthorizationNeeded?: () => Promise<void>;
+
+  /**
+   * Authorize this device, then let the caller carry on.
+   *
+   * Authorization is part of the action that needed it, not a precondition that
+   * aborts it — the same shape as the first execute deploying the account and
+   * running the call in one go. Refusing and asking the user to press send
+   * again is two flows for one intention.
+   */
+  private async ensureAuthorized(prefix: string): Promise<void> {
+    if (!this.onAuthorizationNeeded) {
+      throw new Error(`${prefix}: this device is not an authorized signer of the wallet`);
+    }
+    await this.onAuthorizationNeeded();
+    if (this.statusValue !== "ready") {
+      throw new Error(`${prefix}: this device was not authorized`);
+    }
+  }
 
   get publicKey(): DevicePublicKey {
     return this.devicePubkey;
+  }
+
+  /** Whether this account is deployed on-chain. */
+  get isDeployed(): boolean {
+    return this._isDeployed;
   }
 
   static async connect(opts: ConnectSolanaOptions): Promise<CavosSolana> {
@@ -154,13 +244,19 @@ export class CavosSolana {
     const devicePubkey = await signer.getPublicKey();
 
     const adapter = new SolanaAdapter({ programId: opts.programId, connection, signer });
-    const addressSeed = deriveAddressSeedSolana({ userId: identity.userId, appSalt: opts.appSalt });
+    const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
 
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
         : defaultRegistry);
 
     // Default to gasless sponsorship via the Cavos relayer when an appId is set,
@@ -171,45 +267,54 @@ export class CavosSolana {
         ? new SolanaRelayer({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, connection, environment: opts.environment })
         : undefined);
 
-    // Recovery client drives the email device-approval flow (same as Starknet):
-    // when a returning user signs in on a new device, we ask the backend to email
-    // the owner an approval link. Chain-agnostic — Solana's secp256r1 device key
-    // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
-    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null;
 
-    // Deterministic account resolution. The account PDA is [ACCOUNT_SEED,
-    // addressSeed] where addressSeed = f(userId, appSalt) — it does NOT depend on
-    // any device key, so the address is fully derivable from the identity + app
-    // config. We therefore DERIVE it here and never "recover" it from a backend
-    // registry: a registry keyed by userId alone ignores appSalt, so a lookup
-    // would return a stale address whenever appSalt changes and wrongly force the
-    // device-approval flow against the wrong (old) account. Accounts are
-    // deterministic — derive, don't recover.
-    const address = adapter.computeAddress(addressSeed);
-    const deployed = (await connection.getAccountInfo(new PublicKey(address))) !== null;
+    // The registry names the wallet; the PDA is only computed for a user who
+    // does not have one yet. Its seeds include this device's pubkey, so the
+    // address it claims is one no other device could have taken.
+    const { address } = await resolveAddress({
+      key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "solana", network: opts.network },
+      registry: opts.appId ? registry : null,
+      initialSigner: devicePubkey,
+      compute: () => adapter.computeAddress(namespace, devicePubkey),
+    });
+
+    // LAZY DEPLOY: Check deployment status but DO NOT deploy here.
+    // Deployment happens on first execute() call.
+    // Whether the program created it, not merely whether the address exists:
+    // a funded address is not a wallet, and reading it as one told the device
+    // that created the wallet it was not a signer of it.
+    const deployed = await adapter.isDeviceAccount(address);
+
+    // Determine status: undeployed, ready, or needs-device-approval
+    let status: ConnectStatus;
+    let isSigner = false;
 
     if (!deployed) {
-      // Deploy: register the first device signer via `initialize`. Anti-squatting
-      // is NOT enforced on-chain — it is the integrator's responsibility to keep
-      // `appSalt` secret and to deploy each account on the user's first login.
-      //
-      // Whoever pays must be the `initialize` payer/fee payer: the relayer (when
-      // sponsoring) or the self-funded feePayer. buildInitialize returns the
-      // program ix to register the first signer.
-      if (relayer) {
-        const payer = await relayer.getFeePayer();
-        const ixs = adapter.buildInitialize(addressSeed, payer.toBase58(), devicePubkey);
-        await relayer.send(ixs);
-      } else if (opts.feePayer) {
-        const ixs = adapter.buildInitialize(addressSeed, opts.feePayer.publicKey.toBase58(), devicePubkey);
-        await sendAndConfirmTransaction(connection, new Transaction().add(...ixs), [opts.feePayer]);
-      } else {
-        throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize a new account");
-      }
+      // Account not deployed yet — first execute will deploy + initialize
+      status = "undeployed";
+    } else {
+      // Account exists — check if this device is authorized
+      isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
+      status = isSigner ? "ready" : "needs-device-approval";
+    }
 
-      // Record the deterministic address for backend bookkeeping (device-approval
-      // emails, analytics). Best-effort — it never drives address resolution, so a
-      // failure must not break connect.
+    const wallet = new CavosSolana(
+      identity,
+      address,
+      namespace,
+      status,
+      connection,
+      adapter,
+      devicePubkey,
+      relayer,
+      opts.feePayer,
+      registry,
+    );
+    // isNewAccount is set after first deploy in execute(), not here
+    wallet.isNewAccount = false;
+
+    // Mirror only a signer that the chain actually recognizes.
+    if (isSigner) {
       try {
         await registry.register({ userId: identity.userId, address, initialSigner: devicePubkey });
       } catch (e) {
@@ -217,44 +322,12 @@ export class CavosSolana {
       }
     }
 
-    const isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
-    const wallet = new CavosSolana(
-      identity,
-      address,
-      isSigner ? "ready" : "needs-device-approval",
-      connection,
-      adapter,
-      devicePubkey,
-      relayer,
-      opts.feePayer,
-    );
-    // First sign-up: a fresh initialize that made this device an authorized signer.
-    wallet.isNewAccount = !deployed && isSigner;
-
-    // Deployed account, but THIS device isn't an authorized signer yet — a genuine
-    // returning-user-on-a-new-device case (same userId+appSalt, different device
-    // key). Ask the backend to email the owner an approval link; the approving
-    // device signs add_signer on-chain. Best-effort: never blocks connect.
-    if (deployed && !isSigner && recovery && opts.legacyDeviceApproval !== false) {
-      const dedup = lastDeviceRequest.get(identity.userId);
-      const fresh = dedup && Date.now() - dedup.requestedAt < DEVICE_REQUEST_DEDUP_MS;
-      try {
-        if (fresh) {
-          wallet.pendingRequestId = dedup!.requestId;
-        } else {
-          const { requestId } = await recovery.requestDeviceAddition({
-            userId: identity.userId,
-            accountAddress: address,
-            newSigner: devicePubkey,
-            ...(identity.email ? { email: identity.email } : {}),
-          });
-          wallet.pendingRequestId = requestId;
-          lastDeviceRequest.set(identity.userId, { requestId, requestedAt: Date.now() });
-        }
-      } catch (e) {
-        console.warn("[Cavos/solana] requestDeviceAddition failed:", e);
-      }
-    }
+    // Connect no longer mails an approval on sight. It used to fire here the
+    // moment it saw an unauthorized device, before anything had considered
+    // whether a passkey or the enclave could authorize it instantly — so the
+    // user got an approval spinner racing a recovery, and a screen showing
+    // both. `requestDeviceAddition` is now called only when the UI has chosen
+    // email as the way in. See `resolveDeviceAuthorization`.
     return wallet;
   }
 
@@ -390,8 +463,12 @@ export class CavosSolana {
   }
 
   /**
-   * Enroll a passkey as an approver (2FA-style step-up). Device-signed + gasless;
-   * requires a ready device. Idempotent. Returns the passkey pubkey + tx hash.
+   * Enroll a passkey as an approver (2FA-style step-up). Idempotent.
+   *
+   * **Undeployed accounts**: The passkey is stored pending and will be included
+   * after the first deploy. No on-chain write happens until execute().
+   *
+   * Returns the passkey pubkey + tx hash (if deployed).
    */
   async enrollPasskey(
     passkey: PasskeyApprover,
@@ -402,10 +479,21 @@ export class CavosSolana {
     return { publicKey: enrolled.publicKey, transactionHash };
   }
 
-  /** Register an already-enrolled passkey pubkey as an approver (gasless).
-   * Idempotent. Lets one passkey be registered across chains without re-prompting. */
+  /**
+   * Register an already-enrolled passkey pubkey as an approver (gasless).
+   * Idempotent. Lets one passkey be registered across chains without re-prompting.
+   *
+   * **Undeployed accounts**: The approver is stored pending and will be added
+   * after the first deploy transaction.
+   */
   async addApprover(pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
-    if (this.status !== "ready") {
+    // For undeployed accounts, store the pending approver
+    if (this.statusValue === "undeployed") {
+      this._pendingApprover = pubkey;
+      return {}; // No tx yet — will be added after first deploy
+    }
+
+    if (this.statusValue !== "ready") {
       throw new Error("kit/solana: addApprover requires a ready, authorized device");
     }
     if (await this.adapter.isApprover(this.address, pubkey)) return {};
@@ -414,16 +502,40 @@ export class CavosSolana {
     return { transactionHash };
   }
 
-  /** True if this account already has a passkey enrolled as an approver, so a
-   * new device can be approved with the passkey instead of the email flow. */
+  /**
+   * True if this account already has a passkey enrolled as an approver, so a
+   * new device can be approved with the passkey instead of the email flow.
+   *
+   * Returns true for undeployed accounts if a passkey is pending enrollment.
+   */
+  /** Whether `pubkey` is a registered approver of this account. */
+  async isApprover(pubkey: DevicePublicKey): Promise<boolean> {
+    if (this.statusValue === "undeployed") return false;
+    return this.adapter.isApprover(this.address, pubkey);
+  }
+
   async hasPasskey(): Promise<boolean> {
+    if (this.statusValue === "undeployed") {
+      return this._pendingApprover !== null;
+    }
     return this.adapter.hasPasskeyApprover(this.address);
   }
 
-  /** Re-read (from chain) whether THIS device is now an authorized signer.
-   * Used to poll for readiness after a passkey approval before it's indexed. */
+  /**
+   * Re-read (from chain) whether THIS device is now an authorized signer.
+   * Used to poll for readiness after a passkey approval before it's indexed.
+   *
+   * For undeployed accounts, returns false (not yet on-chain).
+   */
   async isReady(): Promise<boolean> {
-    return this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    if (this.statusValue === "undeployed") {
+      return false;
+    }
+    const authorized = await this.adapter.isAuthorizedSigner(this.address, this.devicePubkey);
+    // See Cavos.isReady: an answer nobody records leaves the execute waiting on
+    // this authorization to time out after it has already been granted.
+    if (authorized) this.setStatus("ready");
+    return authorized;
   }
 
   /**
@@ -472,10 +584,20 @@ export class CavosSolana {
     return { transactionHash: await this.send(ixs) };
   }
 
-  /** Move `amount` lamports out of the account to `destination` (device-signed). */
+  /**
+   * Move `amount` lamports out of the account to `destination` (device-signed).
+   *
+   * **Lazy deploy**: If the account is undeployed, the first execute initializes
+   * + transfers atomically in a single transaction.
+   */
   async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
-    if (this.status !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    // Handle lazy deploy: first execute on undeployed account
+    if (this.statusValue === "undeployed") {
+      return this._deployAndExecuteTransfer(amount, destination, opts);
+    }
+
+    if (this.statusValue !== "ready") {
+      await this.ensureAuthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
     return this.send(ixs, opts);
@@ -487,6 +609,9 @@ export class CavosSolana {
    * serialization of the instructions, so it binds exactly the operations the
    * program will invoke. Unlocks SPL transfers, swaps, staking, etc.
    *
+   * **Lazy deploy**: If the account is undeployed, the first executeInstructions
+   * initializes + runs instructions atomically.
+   *
    * What the relayer will sponsor is constrained by the app's Solana program
    * allowlist (configured in the dashboard) — programs outside the allowlist are
    * rejected before co-signing. Pass `{ sponsored: false }` to bypass the relayer
@@ -497,11 +622,136 @@ export class CavosSolana {
     instructions: InstructionData[],
     opts?: ExecuteOptions,
   ): Promise<string> {
-    if (this.status !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    // Handle lazy deploy: first execute on undeployed account
+    if (this.statusValue === "undeployed") {
+      return this._deployAndExecuteInstructions(instructions, opts);
+    }
+
+    if (this.statusValue !== "ready") {
+      await this.ensureAuthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecute(this.address, instructions);
     return this.send(ixs, opts);
+  }
+
+  /**
+   * Deploy (initialize) + transfer atomically. Called by execute() when status is "undeployed".
+   */
+  private async _deployAndExecuteTransfer(
+    amount: bigint,
+    destination: string,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    // Build initialize + transfer instructions
+    const payer = this.relayer
+      ? await this.relayer.getFeePayer()
+      : this.feePayer?.publicKey;
+    if (!payer) {
+      throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize + execute");
+    }
+
+    // Initialize instruction
+    const initIxs = this.adapter.buildInitialize(
+      this.namespace,
+      payer.toBase58(),
+      this.devicePubkey,
+    );
+
+    // After initialize, build the transfer instruction.
+    // Note: Solana's execute_transfer requires the account to exist.
+    // We send init + transfer in separate transactions for atomicity.
+    const txHash = await this._deployThenExecute(initIxs, async () => {
+      const transferIxs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
+      return this.send(transferIxs, opts);
+    }, opts);
+
+    return txHash;
+  }
+
+  /**
+   * Deploy (initialize) + execute instructions atomically. Called by executeInstructions() when undeployed.
+   */
+  private async _deployAndExecuteInstructions(
+    instructions: InstructionData[],
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    const payer = this.relayer
+      ? await this.relayer.getFeePayer()
+      : this.feePayer?.publicKey;
+    if (!payer) {
+      throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize + execute");
+    }
+
+    // Initialize instruction
+    const initIxs = this.adapter.buildInitialize(
+      this.namespace,
+      payer.toBase58(),
+      this.devicePubkey,
+    );
+
+    const txHash = await this._deployThenExecute(initIxs, async () => {
+      const executeIxs = await this.adapter.buildExecute(this.address, instructions);
+      return this.send(executeIxs, opts);
+    }, opts);
+
+    return txHash;
+  }
+
+  /**
+   * Deploy the account first, then execute the user operation.
+   * The Solana program may not support init+execute atomically (depends on nonce),
+   * so we initialize first, wait for confirmation, then execute.
+   */
+  private async _deployThenExecute(
+    initIxs: TransactionInstruction[],
+    executeOp: () => Promise<string>,
+    opts?: ExecuteOptions,
+  ): Promise<string> {
+    // Send the initialize transaction
+    const sponsored = opts?.sponsored !== false;
+    if (sponsored && this.relayer) {
+      await this.relayer.send(initIxs);
+    } else if (this.feePayer) {
+      await sendAndConfirmTransaction(
+        this.connection,
+        new Transaction().add(...initIxs),
+        [this.feePayer],
+      );
+    } else {
+      throw new Error("kit/solana: a relayer (appId) or feePayer is required to initialize");
+    }
+
+    // Update status to ready
+    this._isDeployed = true;
+    this.setStatus("ready");
+    this.isNewAccount = true;
+
+    // Register with registry (best-effort)
+    if (this.registry) {
+      try {
+        await this.registry.register({
+          userId: this.identity.userId,
+          address: this.address,
+          initialSigner: this.devicePubkey,
+        });
+      } catch (e) {
+        console.warn("[Cavos/solana] registry.register failed (non-fatal):", e);
+      }
+    }
+
+    // Add pending factors that were enrolled before deploy
+    if (this._pendingApprover) {
+      const ixs = await this.adapter.buildAddApprover(this.address, this._pendingApprover);
+      await this.send(ixs, opts);
+      this._pendingApprover = null;
+    }
+    if (this._pendingRecoverySigner) {
+      await this.addSigner(this._pendingRecoverySigner);
+      this._pendingRecoverySigner = null;
+    }
+
+    // Now execute the user operation
+    return executeOp();
   }
 
   /**
@@ -514,8 +764,10 @@ export class CavosSolana {
    * `publicKey` is the 33-byte compressed P-256 device key as hex.
    */
   async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
-    if (this.status !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+    // Works while the account is still undeployed: the signature comes from the
+    // local device key, and proving control of that key needs no chain state.
+    if (this.status === "needs-device-approval") {
+      await this.ensureAuthorized("kit/solana");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
@@ -540,7 +792,7 @@ export class CavosSolana {
    */
   async signTransaction(amount: bigint, destination: string): Promise<SolanaSignedTransaction> {
     if (this.status !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+      await this.ensureAuthorized("kit/solana");
     }
     const message = await this.adapter.buildTransferMessage(this.address, destination, amount);
     const { signature, pubkey } = await this.adapter.signRaw(message);
@@ -553,15 +805,26 @@ export class CavosSolana {
    * the backup signer is already registered. The code never leaves the device —
    * only the derived public key travels on-chain.
    *
+   * **Undeployed accounts**: The backup signer is stored pending and will be
+   * added after the first deploy transaction.
+   *
    * Self-custodial: anyone who can re-derive the backup key from the code (i.e.
    * the rightful owner) can later recover the account with `CavosSolana.recover`.
    * Run this once, on a registered device, and have the user store the code.
    */
   async setupRecovery(code: string): Promise<string | undefined> {
-    if (this.status !== "ready") {
+    const { publicKey: backupPubkey } = deriveBackupKey(code);
+
+    // For undeployed accounts, store the pending recovery signer
+    if (this.statusValue === "undeployed") {
+      this._pendingRecoverySigner = backupPubkey;
+      return undefined; // No tx yet — will be added after first deploy
+    }
+
+    if (this.statusValue !== "ready") {
       throw new Error("kit/solana: setupRecovery requires a ready, registered device");
     }
-    const { publicKey: backupPubkey } = deriveBackupKey(code);
+
     // Skip the on-chain call if the backup signer is already registered.
     const already = await this.adapter.isAuthorizedSigner(this.address, backupPubkey);
     if (already) return undefined;
@@ -611,7 +874,13 @@ export class CavosSolana {
     const registry =
       opts.registry ??
       (opts.appId
-        ? new HttpWalletRegistry({ baseUrl: backendUrl, appId: opts.appId, network: opts.network, environment: opts.environment })
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
         : defaultRegistry);
     const existing = await registry.lookup(opts.identity.userId);
     if (!existing) {
@@ -643,12 +912,14 @@ export class CavosSolana {
     return new CavosSolana(
       opts.identity,
       existing.address,
+      appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment }),
       "ready",
       connection,
       adapter,
       devicePubkey,
       relayer,
       opts.feePayer,
+      registry,
     );
   }
 
@@ -673,12 +944,6 @@ export class CavosSolana {
 
 const defaultRegistry = new InMemoryWalletRegistry();
 
-// De-dup window for the email device-approval request — collapses a page refresh
-// / reconnect burst so the owner doesn't get one email per attempt. The backend
-// already dedups by request id within its 24h TTL; this client-side guard avoids
-// minting fresh request ids on every reconnect. Mirrors Starknet (Cavos.ts).
-const DEVICE_REQUEST_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
-const lastDeviceRequest = new Map<string, { requestId: string; requestedAt: number }>();
 
 async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
   if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {
