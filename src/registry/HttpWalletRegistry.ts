@@ -1,5 +1,5 @@
 import type { DevicePublicKey } from "../signer/DeviceSigner";
-import type { WalletRegistry, RegisteredWallet } from "./WalletRegistry";
+import type { WalletRegistry, RegisteredWallet, RegisterResult } from "./WalletRegistry";
 
 export interface HttpWalletRegistryOptions {
   /** Cavos backend base URL (e.g. https://cavos.xyz). */
@@ -10,6 +10,12 @@ export interface HttpWalletRegistryOptions {
   environment?: "development" | "production";
   /** Network the wallet lives on (e.g. "sepolia"). */
   network: string;
+  /**
+   * The provider id_token from login (Google / Apple / Cavos). The registry
+   * decides who owns an address, so it authenticates the end user, not just the
+   * public app id. Read fresh on each call; these tokens expire.
+   */
+  authToken: () => string | null;
 }
 
 /** Serialize a bigint pubkey component for transport (hex string). */
@@ -23,10 +29,10 @@ function fromHex(s: string): bigint {
 }
 
 /**
- * WalletRegistry backed by the Cavos backend (`/api/wallets`). This is the
- * persistent, cross-device source of truth for `user_id -> wallet`. The backend
- * stores authorized device signers in `wallet_devices`; the registry maps a
- * backend `userId` (the OAuth `sub`) onto that wallet row.
+ * WalletRegistry backed by the Cavos backend (`/api/wallets`) — the persistent,
+ * cross-device source of truth for `user_id -> wallet`. The backend stores
+ * authorized device signers in `wallet_devices`; the registry maps a backend
+ * `userId` (the OAuth `sub`) onto that single wallet row.
  */
 export class HttpWalletRegistry implements WalletRegistry {
   constructor(private readonly opts: HttpWalletRegistryOptions) {}
@@ -38,7 +44,7 @@ export class HttpWalletRegistry implements WalletRegistry {
     url.searchParams.set("network", this.opts.network);
     if (this.opts.environment) url.searchParams.set("environment", this.opts.environment);
 
-    const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
+    const res = await fetch(url, { headers: this.headers() });
     if (!res.ok) throw new Error(`registry lookup failed: ${res.status}`);
     const data = await res.json();
     if (!data.found || !data.address) return null;
@@ -57,10 +63,10 @@ export class HttpWalletRegistry implements WalletRegistry {
     userId: string;
     address: string;
     initialSigner: DevicePublicKey;
-  }): Promise<void> {
+  }): Promise<RegisterResult> {
     const res = await fetch(new URL("/api/wallets", this.opts.baseUrl), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify({
         app_id: this.opts.appId,
         ...(this.opts.environment ? { environment: this.opts.environment } : {}),
@@ -71,10 +77,26 @@ export class HttpWalletRegistry implements WalletRegistry {
         devices: [{ x: toHex(params.initialSigner.x), y: toHex(params.initialSigner.y) }],
       }),
     });
+    // 409: another device claimed this identity's row first. Its address is the
+    // real one — adopt it rather than insisting on the one we computed.
+    if (res.status === 409) {
+      const data = await res.json().catch(() => ({}));
+      if (!data.address) throw new Error("registry register conflicted without an address");
+      return { address: data.address, conflict: true };
+    }
     if (!res.ok) {
       const t = await res.text().catch(() => "");
       throw new Error(`registry register failed: ${res.status} ${t}`);
     }
+    return { address: params.address, conflict: false };
+  }
+
+  private headers(): Record<string, string> {
+    const token = this.opts.authToken();
+    return {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
   }
 
   async addDevice?(params: {

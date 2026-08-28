@@ -30,13 +30,16 @@ export interface CavosAuthOptions {
  * uses for on-chain RSA verification). Here we only need the stable `sub` claim
  * from it — the RSA/JWKS/nonce machinery react relies on is dead weight for the
  * device model, because the device key (not the JWT) authorizes on-chain calls.
- * The fresh provider token is retained only in memory. Its SHA-256 fingerprint
- * reserves exactly one enclave recovery session while the token
- * itself is sent only through the attested encrypted channel.
+ * The provider token is kept in `sessionStorage` so a reconnect can still
+ * authenticate to the wallet registry. The separate social-recovery credential
+ * is NOT: it stays in memory, its SHA-256 fingerprint reserves exactly one
+ * enclave session, and the token itself travels only through the attested
+ * encrypted channel.
  */
 export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
   private readonly identityStorageKey: string;
+  private readonly authTokenKey: string;
   /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
   private pendingNonce: string | null = null;
   private last: Identity | null = null;
@@ -44,10 +47,26 @@ export class CavosAuth implements AuthProvider {
    * Never persisted to localStorage and never sent to the Cavos control plane
    * outside the attested encrypted channel. */
   private recoveryCredential: SocialRecoveryCredential | null = null;
+  /**
+   * The raw provider token from this session's login.
+   *
+   * Held in `sessionStorage`, not memory alone. The wallet registry
+   * authenticates with it, and `resolveAddress` fails closed rather than mint a
+   * second wallet for a user who already has one — so a token that does not
+   * survive a reload takes every reconnect down with it, and a device with no
+   * cached address can never connect at all.
+   *
+   * `sessionStorage` and not `localStorage`: it dies with the tab, is not shared
+   * across tabs, and never reaches another origin. The token is already inside
+   * this page's JavaScript either way; what changes is that it now outlives a
+   * navigation, which is exactly what the reconnect needs.
+   */
+  private authTokenValue: string | null = null;
 
   constructor(private readonly opts: CavosAuthOptions = {}) {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
+    this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
   }
 
   /**
@@ -73,8 +92,13 @@ export class CavosAuth implements AuthProvider {
   clearStoredIdentity(): void {
     this.last = null;
     this.recoveryCredential = null;
+    this.setAuthToken(null);
     if (typeof window !== "undefined") {
-      window.localStorage.removeItem(this.identityStorageKey);
+      try {
+        window.localStorage.removeItem(this.identityStorageKey);
+      } catch {
+        /* nothing was stored if storage is unavailable */
+      }
     }
   }
 
@@ -173,10 +197,27 @@ export class CavosAuth implements AuthProvider {
    * one enclave session, so retaining it after recovery only permits accidental
    * replay attempts during the wallet's post-recovery reconnect.
    */
+  /**
+   * Whether a login proof is available without taking it.
+   *
+   * The UI has to choose how a device gets authorized before anything runs, and
+   * that choice depends on whether the enclave can be used at all. Asking with
+   * `consume` would spend the proof to find out.
+   */
+  hasSocialRecoveryCredential(): boolean {
+    return this.recoveryCredential !== null;
+  }
+
   consumeSocialRecoveryCredential(): SocialRecoveryCredential {
-    const credential = this.getSocialRecoveryCredential();
-    this.recoveryCredential = null;
-    return credential;
+    // Kept for the session rather than dropped on first use. A session holds a
+    // wallet on every configured chain and each needs its own enrolment, so
+    // spending the credential on the first one left the rest unprotected —
+    // with no error, because there was simply nothing left to try with.
+    //
+    // Replay is the control plane's to refuse, and it does: one session per
+    // credential per wallet. It cannot be reused against a wallet it has
+    // already enrolled.
+    return this.getSocialRecoveryCredential();
   }
 
   /**
@@ -225,6 +266,7 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
+    this.setAuthToken(token);
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
       ? createSocialRecoveryCredential(token)
       : null;
@@ -234,8 +276,35 @@ export class CavosAuth implements AuthProvider {
       // Standard OIDC `name` — present on Google's id_token, absent on the
       // Cavos-signed Firebase JWT (email/OTP/magic-link) and Apple's token.
       name: claims.name,
-      provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
+      provider: providerFromClaims(claims, provider),
     });
+  }
+
+  /**
+   * The provider id_token from this session's login, for the wallet registry.
+   * Null on a page reload that restored the identity from localStorage but not
+   * the token — the address cache covers that device; a brand-new device has
+   * just logged in and therefore has one.
+   */
+  getAuthToken(): string | null {
+    if (this.authTokenValue) return this.authTokenValue;
+    try {
+      this.authTokenValue = window.sessionStorage.getItem(this.authTokenKey);
+    } catch {
+      // No session storage (private mode, blocked): memory only, as before.
+    }
+    return this.authTokenValue;
+  }
+
+  private setAuthToken(token: string | null): void {
+    this.authTokenValue = token;
+    if (typeof window === "undefined") return;
+    try {
+      if (token) window.sessionStorage.setItem(this.authTokenKey, token);
+      else window.sessionStorage.removeItem(this.authTokenKey);
+    } catch {
+      /* memory-only fallback; a reconnect will 401 as it did before */
+    }
   }
 
   /** Generate (and remember) the nonce the Cavos backend expects on requests. */
@@ -259,7 +328,13 @@ export class CavosAuth implements AuthProvider {
   private remember(id: Identity): Identity {
     this.last = id;
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+      try {
+        window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+      } catch {
+        // Private mode and blocked site data throw here. This store only saves
+        // a returning user from signing in again; an unwritable one must not
+        // take down the login that just succeeded.
+      }
     }
     return id;
   }
@@ -312,6 +387,31 @@ function currentCleanCallbackUrl(): string | null {
 }
 
 /** Decode a JWT payload (no verification — the backend already validated it). */
+/**
+ * Which provider actually signed this token.
+ *
+ * A raw Google or Apple id_token carries neither `provider` nor Firebase's
+ * `sign_in_provider`, so the OAuth path used to fall through to the literal
+ * "oauth" — true, and useless to anything that wants to name the provider back
+ * to the user. The issuer is the authoritative answer and is always there.
+ */
+function providerFromClaims(claims: any, fallback: string): string {
+  // Firebase's own value passes through untouched ("google.com", "password"):
+  // it is already public API and callers switch on it.
+  const signIn: string | undefined = claims?.firebase?.sign_in_provider;
+  if (signIn) return signIn;
+  switch (claims?.iss) {
+    case "https://accounts.google.com":
+      return "google";
+    case "https://appleid.apple.com":
+      return "apple";
+    case "https://cavos.app/firebase":
+      return "email";
+    default:
+      return claims?.provider ?? fallback;
+  }
+}
+
 function parseJwt(jwt: string): any {
   const part = jwt.split(".")[1];
   if (!part) throw new Error("kit/auth: malformed JWT");

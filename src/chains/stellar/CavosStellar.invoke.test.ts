@@ -1,7 +1,6 @@
 import { Address, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { CavosStellar } from "./CavosStellar";
 import { StellarAdapter } from "./StellarAdapter";
-import { deriveStellarMasterKeypair } from "./keys";
 import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
 import { KeypairControlKey } from "./WebCryptoControlKey";
@@ -73,6 +72,7 @@ describe("CavosStellar.invokeContract", () => {
       new KeypairControlKey(acct),
       new Uint8Array(32),
       undefined,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({ contractId: CONTRACT_ID, method: "release_funds", args: [] });
@@ -118,6 +118,7 @@ describe("CavosStellar.invokeContract", () => {
       new KeypairControlKey(acct),
       new Uint8Array(32),
       relayer,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({ contractId: CONTRACT_ID, method: "fund_escrow" });
@@ -149,6 +150,7 @@ describe("CavosStellar.invokeContract", () => {
     const wallet = new Ctor(
       identity, acct.publicKey(), "ready", "stellar-testnet", adapter,
       LocalDeviceUnwrapKey.generate(), new KeypairControlKey(acct), new Uint8Array(32), relayer,
+      { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 
     const hash = await wallet.invokeContract({

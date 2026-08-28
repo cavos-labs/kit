@@ -12,6 +12,12 @@ export interface HttpRecoveryClientOptions {
   appId: string;
   /** Optional Cavos console environment. Omitted means production. */
   environment?: "development" | "production";
+  /**
+   * The provider id_token from login. The device routes act on a wallet named
+   * by a client-supplied address, so the backend checks the caller owns it.
+   * Unrelated to social recovery, whose credential goes only to the enclave.
+   */
+  authToken?: () => string | null;
 }
 
 function toHex(n: bigint): string {
@@ -37,6 +43,14 @@ function deviceLabel(): string {
 export class HttpRecoveryClient implements RecoveryClient {
   constructor(private readonly opts: HttpRecoveryClientOptions) {}
 
+  private headers(): Record<string, string> {
+    const token = this.opts.authToken?.() ?? null;
+    return {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+  }
+
   async requestDeviceAddition(params: {
     userId: string;
     accountAddress: string;
@@ -46,7 +60,7 @@ export class HttpRecoveryClient implements RecoveryClient {
   }): Promise<{ requestId: string }> {
     const res = await fetch(new URL("/api/devices/request", this.opts.baseUrl), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify({
         app_id: this.opts.appId,
         ...(this.opts.environment ? { environment: this.opts.environment } : {}),
@@ -95,7 +109,7 @@ export class HttpRecoveryClient implements RecoveryClient {
       new URL(`/api/devices/request/${params.requestId}/confirm`, this.opts.baseUrl),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(),
         body: JSON.stringify({
           tx_hash: params.txHash,
           ...(params.email ? { email: params.email } : {}),
@@ -126,7 +140,7 @@ export class HttpRecoveryClient implements RecoveryClient {
   }): Promise<void> {
     const res = await fetch(new URL('/api/devices/added', this.opts.baseUrl), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify({
         app_id: this.opts.appId,
         ...(this.opts.environment ? { environment: this.opts.environment } : {}),
@@ -168,7 +182,7 @@ export class HttpRecoveryClient implements RecoveryClient {
       new URL(`/api/devices/removal/${params.requestId}/confirm`, this.opts.baseUrl),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(),
         body: JSON.stringify({ tx_hash: params.txHash }),
       },
     );

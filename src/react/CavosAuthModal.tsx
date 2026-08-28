@@ -111,6 +111,8 @@ type Screen =
 // ─── Style injection ──────────────────────────────────────────────────────────
 
 const STYLE_ID = 'cavos-modal-styles-v2';
+/** Which provider this browser last signed in with, for the "Recent" hint. */
+const RECENT_PROVIDER_KEY = 'cavos-kit:recent-provider';
 
 function injectStyles() {
   if (typeof document === 'undefined') return;
@@ -186,6 +188,27 @@ function injectStyles() {
       stroke-dashoffset: 30;
       animation: cavos-check-draw 0.35s 0.2s cubic-bezier(.22,1,.36,1) forwards;
     }
+    /* The waiting ring: an arc that orbits the provider mark. Sized to sit just
+       outside the 64px circle so the mark never moves between waiting and done
+       — only what surrounds it changes. */
+    .cavos-progress-ring {
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      pointer-events: none;
+      animation: cavos-spin 0.9s linear infinite;
+    }
+    /* The ring, settled. Same geometry as the spinning one so the transition
+       is the arc completing, not a new element appearing. */
+    .cavos-settled-ring {
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid rgba(34,197,94,0.55);
+      pointer-events: none;
+      animation: cavos-fade 0.25s ease-out;
+    }
     .cavos-input-inner:focus { outline:none; }
     .cavos-provider:active { transform:scale(0.99); }
     .cavos-primary-btn:active { transform:scale(0.98); }
@@ -240,8 +263,8 @@ function injectStyles() {
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
-const GoogleIcon = () => (
-  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+const GoogleIcon = ({ size = 18 }: { size?: number } = {}) => (
+  <svg width={size} height={size} viewBox="0 0 18 18" fill="none">
     <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
     <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
     <path d="M3.964 10.707A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.039l3.007-2.332z" fill="#FBBC05"/>
@@ -249,8 +272,8 @@ const GoogleIcon = () => (
   </svg>
 );
 
-const AppleIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 814 1000" fill="currentColor">
+const AppleIcon = ({ size = 16 }: { size?: number } = {}) => (
+  <svg width={size} height={size * (1000 / 814)} viewBox="0 0 814 1000" fill="currentColor">
     <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-194.3 126.4-297.5 250.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z"/>
   </svg>
 );
@@ -475,6 +498,7 @@ export function CavosAuthModal({
   secureStep = 'optional',
 }: CavosAuthModalProps) {
   const {
+    user,
     login,
     sendMagicLink,
     sendOtp,
@@ -487,6 +511,8 @@ export function CavosAuthModal({
     resendDeviceApproval,
     recover,
     passkeySupported,
+    deviceAuthorization,
+    authorizingDevice,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
     setupRecovery,
@@ -549,6 +575,52 @@ export function CavosAuthModal({
   const footer = footerBar(textColor);
   const close = closeBtn(textColor);
   const pBtn = providerBtn(textColor, btnRadius);
+
+  // The provider this browser signed in with last. Nearly everyone returns the
+  // same way they arrived, so surfacing it turns a choice into a confirmation.
+  // Purely a hint: it reorders nothing and hides nothing.
+  const [recentProvider, setRecentProvider] = useState<string | null>(null);
+  // Which provider this attempt is going through. Known from the click, so the
+  // waiting screen can name it long before the credential comes back.
+  const [pendingProvider, setPendingProvider] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      setRecentProvider(window.localStorage.getItem(RECENT_PROVIDER_KEY));
+    } catch {
+      // Private mode or blocked storage: no hint, everything else unaffected.
+    }
+  }, []);
+  const rememberProvider = useCallback((name: string) => {
+    setPendingProvider(name);
+    try {
+      window.localStorage.setItem(RECENT_PROVIDER_KEY, name);
+    } catch {
+      /* the hint is a nicety, never a dependency */
+    }
+  }, []);
+
+  // Absolutely positioned on purpose: the button centres its icon and label as
+  // a pair, and a third child in that flow shoves the label off centre and onto
+  // the icon. The hint sits over the row instead of inside its layout.
+  const recentTag = (name: string) =>
+    recentProvider === name ? (
+      <span
+        aria-label="Last used"
+        style={{
+          position: 'absolute',
+          right: '14px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          fontSize: '11.5px',
+          fontWeight: 500,
+          color: subTextColor,
+          letterSpacing: '0.01em',
+          pointerEvents: 'none',
+        }}
+      >
+        Recent
+      </span>
+    ) : null;
 
   const [screen, setScreen] = useState<Screen>('select');
   const [email, setEmail] = useState('');
@@ -629,11 +701,21 @@ export function CavosAuthModal({
     if (!authError) return;
     setBusy(false);
     setDeployState('loading');
-    if (screen !== 'device-approval') setScreen('select');
+    // Sign-in is the right place to land only when the error means the session
+    // is unusable. A device that failed to recover is still signed in — the
+    // wallet exists, it is simply not this device's yet — so asking for
+    // credentials again is both wrong and a dead end: doing it changes nothing.
+    // The approval flow is what actually moves that user forward.
+    // The error belongs to whichever screen owns that mechanism. Painting it
+    // over whatever happens to be up is how an approval spinner ended up
+    // carrying a recovery's error and a recovery-phrase link at once.
+    if (walletStatus.needsDeviceApproval && screen !== 'device-approval') {
+      setScreen(false /* email is no longer an automatic route */ ? 'device-approval' : 'select');
+    }
     setError(authError);
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
     clearAuthError();
-  }, [authError, clearAuthError, screen]);
+  }, [authError, clearAuthError, screen, walletStatus.needsDeviceApproval]);
 
   // Arm the "taking longer than usual" hint while the deploy spinner is up.
   useEffect(() => {
@@ -658,12 +740,24 @@ export function CavosAuthModal({
       setScreen('select');
       setDeployState('loading');
       setEmail(''); setOtpCode(''); setError('');
-      doneHandledRef.current = false;
-      secureHandledRef.current = false;
+      // `doneHandledRef` deliberately stays true. A host that keeps the modal
+      // mounted and open — an inline preview, say — would otherwise satisfy the
+      // completion condition again on the next render and replay "You're all
+      // set" forever. It is cleared on sign-out and when a real deploy starts.
     }, 1600);
     // addr unused beyond guarding the transition; keep the param for clarity.
     void addr;
   }, [onClose]);
+
+  // Sign-out is what makes a completed sign-up repeatable. Without this the
+  // guard above would survive into the next session and the modal would never
+  // show its done screen again.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      doneHandledRef.current = false;
+      secureHandledRef.current = false;
+    }
+  }, [isAuthenticated]);
 
   // Show the "deploying" screen whenever a deploy is in progress (e.g. while
   // returning from an OAuth redirect), or once authenticated, then flip to
@@ -677,7 +771,11 @@ export function CavosAuthModal({
       doneHandledRef.current = false;
     }
 
-    if (isAuthenticated && address && walletStatus.isReady) {
+    // `isUndeployed` counts as finished. Under lazy deploy a new wallet stays
+    // undeployed until its first execute, so waiting for `isReady` here left the
+    // modal spinning on "Setting up your account" forever. The account is usable:
+    // it has an address, this device owns it, and it can already sign.
+    if (isAuthenticated && address && (walletStatus.isReady || walletStatus.isUndeployed)) {
       // First sign-up: offer a one-time "secure your account" step (passkey /
       // recovery phrase) before finishing — unless the app opted out via
       // secureStep: 'off'. Stay put once we've shown it.
@@ -710,18 +808,36 @@ export function CavosAuthModal({
       // passkey enrolled on a phone is no use from a browser that cannot reach
       // it — so a passkey that fails to produce an assertion falls back here,
       // and a recovery already in flight is never interrupted.
-      if (walletStatus.hasPasskey && passkeySupported && !walletStatus.isSocialRecovering) {
-        setScreen('passkey-approval');
-        doneHandledRef.current = false;
-      } else if (walletStatus.socialRecoveryReadyAt || walletStatus.isSocialRecovering) {
+        // Only when an authorization was actually asked for. A device that is
+      // merely not a signer yet does not interrupt signing in — it is resolved
+      // when something needs it, the same way a wallet is not deployed until it
+      // is used.
+      // One decision, made by the provider before anything ran, instead of this
+      // screen guessing from flags that three racing processes were setting.
+      // The modal no longer runs the authorization — the provider performs it
+      // where the action happened, because most routes need no screen at all:
+      // the enclave runs on its own and an approval email is a request, not a
+      // dialog. This only reflects what is already under way.
+      if (!authorizingDevice && !walletStatus.isSocialRecovering && !walletStatus.awaitingApproval) {
+        // Nothing asked for this. Leave the screen alone.
+      } else if (walletStatus.isSocialRecovering) {
         setScreen('social-recovery');
         doneHandledRef.current = false;
-      } else if (walletStatus.awaitingApproval) {
+      } else if (deviceAuthorization === 'passkey') {
+        setScreen('passkey-approval');
+        doneHandledRef.current = false;
+      } else if (deviceAuthorization === 'enclave-needs-login') {
+        // Not an error: the proof the enclave checks is only good for one
+        // session, and signing in again mints a new one. That is an action.
+        setScreen('select');
+        setError('Sign in again to restore this device.');
+        doneHandledRef.current = false;
+      } else if (false /* email is no longer an automatic route */) {
         setScreen('device-approval');
         doneHandledRef.current = false;
       }
     }
-  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
+  }, [authorizingDevice, deviceAuthorization, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
@@ -1175,30 +1291,101 @@ export function CavosAuthModal({
 
   if (screen === 'deploying') {
     const isDone = deployState === 'done';
+    // The provider the user is signing in with — from the credential once it is
+    // back, from the button they pressed before that. Naming it in BOTH states
+    // is what makes waiting and success read as one object changing, rather
+    // than a spinner being replaced by a tick.
+    // The click survives the OAuth redirect in localStorage; component state
+    // does not, because the redirect remounts everything. So the recorded
+    // provider is what names the waiting screen, and the credential confirms it
+    // once it lands.
+    const activeProvider = user?.provider ?? pendingProvider ?? recentProvider;
+    const providerFace = (() => {
+      // Both vocabularies reach here: the issuer-derived "google" and Firebase's
+      // "google.com". Normalise for display only — the field itself is API.
+      switch (activeProvider?.replace(/\.com$/, '')) {
+        case 'google':
+          return { name: 'Google', icon: <GoogleIcon size={40} /> };
+        case 'apple':
+          return { name: 'Apple', icon: <AppleIcon size={38} /> };
+        case 'password':
+        case 'email':
+        case 'emailLink':
+          return { name: 'email', icon: null };
+        default:
+          return { name: null, icon: null };
+      }
+    })();
     return (
       <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
         <div style={card}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: '52px 28px 44px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '16px' }}>
-            {isDone ? (
-              <div className="cavos-check-circle" style={{ width: 64, height: 64, borderRadius: '50%', background: 'rgba(34,197,94,0.12)', border: '1.5px solid rgba(34,197,94,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'cavos-ring-glow 1.5s ease-out' }}>
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-                  <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+            {/* One object across both states: the mark stays put and the ring
+                around it changes — spinning while we wait, solid green once it
+                lands. Swapping a spinner for a tick reads as two different
+                things happening; this reads as one thing finishing. */}
+            <div style={{ position: 'relative', width: 64, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div
+                className={isDone ? 'cavos-check-circle' : undefined}
+                style={{
+                  width: 64, height: 64, borderRadius: '50%',
+                  // No plate behind the mark. A bordered box around a small
+                  // glyph makes the container the subject and the identity an
+                  // afterthought; presented large and unframed, the mark is the
+                  // subject and the ring is the only chrome.
+                  color: textColor,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  ...(isDone ? { animation: 'cavos-ring-glow 1.5s ease-out' } : {}),
+                }}
+              >
+                {providerFace.icon ?? (
+                  isDone ? (
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+                      <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <Spinner size={26} color={isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.6)'} />
+                  )
+                )}
               </div>
-            ) : (
-              <div style={{ width: 64, height: 64, borderRadius: '50%', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)', border: `1.5px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Spinner size={26} color={isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.6)'} />
-              </div>
-            )}
+              {/* The ring is the only thing that changes: it orbits while we
+                  wait and closes into a solid green circle once it lands. With
+                  the fallback spinner inside there is nothing to orbit, so it
+                  stays away rather than doubling up. */}
+              {providerFace.icon && (
+                isDone ? (
+                  <span className="cavos-settled-ring" />
+                ) : (
+                  <span data-cavos-spinner className="cavos-progress-ring" style={{ borderTopColor: primaryColor }} />
+                )
+              )}
+            </div>
             <div>
               <h2 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
-                {isDone ? "You're all set" : 'Setting up your account'}
+                {/* This screen means two different things. Signing in is one;
+                    restoring a wallet onto a device that is not a signer yet is
+                    the other, and naming the identity provider there is simply
+                    false — nothing is being connected, the enclave is deciding
+                    whether this device may have the wallet back. */}
+                {isDone
+                  ? walletStatus.isSocialRecovering
+                    ? 'Wallet restored'
+                    : providerFace.name
+                      ? `Connected with ${providerFace.name}`
+                      : "You're all set"
+                  : walletStatus.isSocialRecovering
+                    ? 'Restoring your wallet'
+                    : providerFace.name
+                      ? `Connecting with ${providerFace.name}`
+                      : 'Setting up your account'}
               </h2>
               <p style={{ margin: '6px 0 0', fontSize: '13px', color: subTextColor }}>
                 {isDone
-                  ? 'Your account is ready'
-                  : deploySlow
+                  ? "You're good to go"
+                  : walletStatus.isSocialRecovering
+                    ? 'Proving to the enclave that this device is yours'
+                    : deploySlow
                     ? 'This is taking longer than usual — the network may be slow.'
                     : 'This only takes a moment…'}
               </p>
@@ -1406,16 +1593,18 @@ export function CavosAuthModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {showGoogle && (
-              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => handleOAuth('google')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('google'); handleOAuth('google'); }} disabled={busy}>
                 {btnIcon(<GoogleIcon />, <Spinner size={14} color="#888" />, '#4285F4')}
                 <span>Continue with Google</span>
+                {recentTag('google')}
               </button>
             )}
 
             {showApple && (
-              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => handleOAuth('apple')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('apple'); handleOAuth('apple'); }} disabled={busy}>
                 {btnIcon(<AppleIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
                 <span>Continue with Apple</span>
+                {recentTag('apple')}
               </button>
             )}
 

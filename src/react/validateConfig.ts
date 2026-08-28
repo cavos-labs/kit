@@ -8,7 +8,8 @@ export interface CavosConfigProblem {
     | "missing-app-id"
     | "missing-paymaster-key"
     | "unused-paymaster-key"
-    | "social-recovery-without-app-id";
+    | "social-recovery-without-app-id"
+  | "ambiguous-rpc-url";
   /** `error` breaks the integration; `warning` works but is probably a mistake. */
   level: "error" | "warning";
   message: string;
@@ -27,7 +28,19 @@ export function validateCavosConfig(config: CavosConfig): CavosConfigProblem[] {
       code: "missing-app-salt",
       level: "error",
       message:
-        "`appSalt` is required: it is mixed into every wallet address, so each app derives its own wallets. Pick one string and never change it.",
+        "`appSalt` is required: it names this app's device-key slot on the user's device. Pick one string and never change it.",
+    });
+  }
+
+  // One node cannot serve three chains. The mismatched one does not fail
+  // usefully — it answers `starknet_call` with "Method not found" — so say so
+  // at config time instead of leaving it to a confusing runtime error.
+  if ((config.chains?.length ?? 0) > 1 && config.rpcUrl && !config.rpcUrls) {
+    problems.push({
+      code: "ambiguous-rpc-url",
+      level: "error",
+      message:
+        "`rpcUrl` applies to every chain, but this config has several. Use `rpcUrls: { solana: '…', starknet: '…' }` so each chain reaches its own node.",
     });
   }
 
@@ -78,9 +91,10 @@ function saltKeyFor(config: CavosConfig): string {
 /**
  * Detect an `appSalt` that changed since this browser last connected.
  *
- * Addresses are derived from the salt, so changing it silently points every
- * existing user at a brand-new empty wallet — the app keeps working, on the
- * wrong accounts, with no error anywhere. That is worth one loud warning.
+ * The salt no longer enters the address, but it does name the device-key slot:
+ * change it and every returning device generates a NEW key, finds the same
+ * wallet in the registry, and lands in `needs-device-approval` — the app keeps
+ * working while every user is locked out until they re-approve. Worth a warning.
  *
  * Returns the problem to report, or null. Records the salt on first sight.
  */
@@ -111,7 +125,7 @@ export function checkAppSaltDrift(
     code: "app-salt-changed",
     level: "error",
     message:
-      `\`appSalt\` changed from "${previous}" to "${config.appSalt}". Wallet addresses are derived from it, so existing users will land on new, empty wallets and will not find their funds. ` +
+      `\`appSalt\` changed from "${previous}" to "${config.appSalt}". It names this app's device-key slot, so every returning user's device will look unknown to their wallet and need re-approval. ` +
       "Change it only for a deliberate migration; otherwise restore the previous value.",
   };
 }

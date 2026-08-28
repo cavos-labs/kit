@@ -21,7 +21,8 @@ function fakeStarknet(overrides: {
   execute?: jest.Mock;
 }): Cavos {
   const wallet = Object.create(Cavos.prototype) as Cavos & Record<string, unknown>;
-  wallet.status = overrides.status;
+  // status is now a getter, so we need to set statusValue
+  wallet.statusValue = overrides.status;
   wallet.address = "0xacc";
   wallet.devicePubkey = self;
   wallet.adapter = {
@@ -42,7 +43,8 @@ function fakeSolana(overrides: {
   send?: jest.Mock;
 }): CavosSolana {
   const wallet = Object.create(CavosSolana.prototype) as CavosSolana & Record<string, unknown>;
-  wallet.status = overrides.status;
+  // status is now a getter, so we need to set statusValue
+  wallet.statusValue = overrides.status;
   wallet.address = "acc";
   wallet.devicePubkey = self;
   wallet.adapter = {

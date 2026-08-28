@@ -105,8 +105,16 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     expect(auth.consumeSocialRecoveryCredential()).toEqual(
       createSocialRecoveryCredential(token),
     );
-    expect(() => auth.getSocialRecoveryCredential()).toThrow(
-      "complete a fresh social login",
+    // Still available after use, because a session holds a wallet on every
+    // configured chain and each needs its own enrolment. Dropping it after the
+    // first left the rest unprotected with nothing to try again with.
+    //
+    // Replay is refused where it can actually be enforced: the control plane
+    // allows one session per credential per wallet, so this cannot be reused
+    // against a wallet it has already enrolled. A one-shot here only ever
+    // constrained a client that was cooperating anyway.
+    expect(auth.consumeSocialRecoveryCredential()).toEqual(
+      createSocialRecoveryCredential(token),
     );
   });
 });

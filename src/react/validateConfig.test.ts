@@ -120,3 +120,36 @@ describe("checkAppSaltDrift", () => {
     expect(() => checkAppSaltDrift(base, hostile)).not.toThrow();
   });
 });
+
+describe("rpcUrl across several chains", () => {
+  const base = { appId: "app-1", appSalt: "salt", network: "testnet" as const, paymasterApiKey: "k" };
+
+  it("rejects a single rpcUrl once more than one chain is configured", () => {
+    // One node cannot serve three chains, and the mismatched one answers
+    // `starknet_call` with "Method not found" rather than failing usefully.
+    const problems = validateCavosConfig({
+      ...base,
+      chains: ["starknet", "solana"],
+      rpcUrl: "https://api.devnet.solana.com",
+    } as never);
+    expect(problems.map((p) => p.code)).toContain("ambiguous-rpc-url");
+  });
+
+  it("accepts per-chain overrides", () => {
+    const problems = validateCavosConfig({
+      ...base,
+      chains: ["starknet", "solana"],
+      rpcUrls: { solana: "https://api.devnet.solana.com" },
+    } as never);
+    expect(problems.map((p) => p.code)).not.toContain("ambiguous-rpc-url");
+  });
+
+  it("leaves a single-chain config alone", () => {
+    const problems = validateCavosConfig({
+      ...base,
+      chain: "solana",
+      rpcUrl: "https://api.devnet.solana.com",
+    } as never);
+    expect(problems.map((p) => p.code)).not.toContain("ambiguous-rpc-url");
+  });
+});

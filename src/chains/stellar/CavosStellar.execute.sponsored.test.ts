@@ -1,7 +1,7 @@
 import { Account, Keypair } from "@stellar/stellar-sdk";
 import { CavosStellar } from "./CavosStellar";
 import { StellarAdapter } from "./StellarAdapter";
-import { deriveStellarMasterKeypair, generateControlKey } from "./keys";
+import { generateControlKey } from "./keys";
 import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
 import { KeypairControlKey } from "./WebCryptoControlKey";
@@ -31,7 +31,8 @@ function makeWallet(opts: { relayer?: StellarRelayer; control: Keypair }): Cavos
   const Ctor = CavosStellar as any as new (...args: any[]) => CavosStellar;
   return new Ctor(
     identity,
-    deriveStellarMasterKeypair(identity).publicKey(),
+    // The control key IS the account address now.
+    opts.control.publicKey(),
     "ready",
     "stellar-testnet",
     adapter,
@@ -39,6 +40,7 @@ function makeWallet(opts: { relayer?: StellarRelayer; control: Keypair }): Cavos
     new KeypairControlKey(opts.control),
     new Uint8Array(32), // dek — unused on the execute() path
     opts.relayer,
+    { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
   );
 }
 

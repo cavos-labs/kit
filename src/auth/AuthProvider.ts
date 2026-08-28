@@ -29,6 +29,13 @@ export interface Identity {
  */
 export interface AuthProvider {
   authenticate(): Promise<Identity>;
+  /**
+   * The provider id_token from the last login, if this provider has one. The
+   * wallet registry authenticates the end user with it — Cavos decides who owns
+   * an address, so a public app id is not enough. Kept in memory only; a
+   * returning device that no longer has one falls back to its address cache.
+   */
+  getAuthToken?(): string | null;
 }
 
 /** Trivial provider when the app already has the user's stable id. */

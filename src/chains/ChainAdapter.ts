@@ -26,15 +26,13 @@ export interface ExecuteOptions {
 }
 
 export interface ComputeAddressParams {
-  addressSeed: bigint;
+  /** 32-byte app namespace (see `appNamespace` in identity.ts). */
+  namespace: Uint8Array;
   /**
-   * First device signer. Required by chains whose address derivation still
-   * includes the device pubkey (Solana PDA seeds, Stellar factory salt). The
-   * Starknet adapter IGNORES this — its address is `f(addressSeed)` only.
+   * The first device signer. It NAMES the address on every chain, so it is
+   * required: without the key there is no address to compute.
    */
-  initialSigner?: DevicePublicKey;
-  /** Defaults to `addressSeed` when omitted. */
-  salt?: bigint;
+  initialSigner: DevicePublicKey;
 }
 
 /**
@@ -45,10 +43,9 @@ export interface ChainAdapter {
   readonly chain: "starknet" | "stellar" | "solana";
 
   /**
-   * Deterministic account address. Starknet: `f(addressSeed)` only (device
-   * pubkey not in the derivation — recovery is self-custodial). Solana: also
-   * `f(addressSeed)` (PDA seeds use only the seed). Stellar: classic `G…`
-   * multisig where the address is the source account.
+   * The address this device would claim if the user has none yet:
+   * `f(app namespace, first device pubkey)`. Only ever used on a registry miss
+   * — a user with an existing wallet gets their address from the registry.
    */
   computeAddress(params: ComputeAddressParams): string;
 

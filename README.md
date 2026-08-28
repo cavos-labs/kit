@@ -97,10 +97,11 @@ the application also creates a new device that must be approved or recovered.
 
 | Piece | Role |
 |-------|------|
-| `Cavos.connect` | Unified entry point: log in → derive deterministic address → create/load device key → auto-deploy → ready, gas-sponsored wallet. |
-| `deriveAddressSeed` / `deriveAddressSeedSolana` | Stable `address_seed` from `{ userId, appSalt }`. Identity → wallet, device-independent. |
-| `StarknetAdapter` / `SolanaAdapter` | Per-chain: compute the deterministic address, build deploy/initialize/add/remove calls, serialize signatures. |
-| `CavosStellar` / `StellarAdapter` | Deterministic classic Stellar `G…` accounts, encrypted control-key envelope, device/passkey/recovery unlock, XLM payments, Soroban invocation, and optional fee-bump sponsorship. |
+| `Cavos.connect` | Unified entry point: log in → look the address up in the registry → create/load device key → lazy deploy on first execute → ready, gas-sponsored wallet. |
+| `WalletRegistry` | `(user, app, chain) → address`. The source of truth: Cavos holds the map and cannot spend; the device holds the key and can sign without Cavos once it has cached the address. |
+| `appNamespace` | Scopes an address to one app, so the same device key in two apps gives two wallets. Not a secret and not an identity. |
+| `StarknetAdapter` / `SolanaAdapter` | Per-chain: compute the address a NEW user's first device claims, build deploy/add/remove calls, serialize signatures. |
+| `CavosStellar` / `StellarAdapter` | Classic Stellar `G…` accounts named by the first control key, encrypted control-key envelope, device/passkey/recovery unlock, XLM payments, Soroban invocation, and optional fee-bump sponsorship. |
 | `WebCryptoSigner` | Browser silent device signer: non-extractable P-256 key in IndexedDB, no UI on sign. |
 | `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` | Cavos gasless sponsor for Solana: co-signs as fee payer so the integrator holds no keypair. |
@@ -167,8 +168,9 @@ described above.
 
 ## Quickstart
 
-One call logs the user in and returns a ready, deployed, gas-sponsored smart
-account controlled by a silent device key. The user only sees the login.
+One call logs the user in and returns a wallet handle controlled by a silent
+device key. **Connect never deploys** — deployment happens lazily on the first
+`execute()` call, combined atomically with the user's operation.
 
 ```ts
 import { Cavos, StaticIdentity } from "@cavos/kit";
@@ -181,15 +183,91 @@ const wallet = await Cavos.connect({
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
-console.log(wallet.address);          // deterministic; auto-deployed on first connect
+console.log(wallet.address);          // deterministic; derived from identity + appSalt
+console.log(wallet.status);           // "undeployed" | "ready" | "needs-device-approval"
 
-if (wallet.status === "ready") {
-  // Chain-specific execution — see chain quickstarts below
+// First execute deploys + runs your calls atomically
+if (wallet.status === "undeployed" || wallet.status === "ready") {
+  await wallet.execute(calls);        // gasless; deploys if needed, then executes
 }
 ```
 
 `wallet` is a discriminated union (`Cavos | CavosSolana | CavosStellar`); narrow on
 `wallet.chain` before calling `execute`, since its signature differs per chain.
+
+### Multi-chain sessions
+
+Configure multiple chains and a default chain. Connect derives addresses for all
+configured chains but never deploys on connect — deployment is always lazy.
+
+```ts
+const session = await Cavos.connect({
+  chains: ["solana", "stellar"],      // chains to configure
+  defaultChain: "stellar",            // must be in chains
+  network: "testnet",
+  appSalt: "my-app",
+  auth: new StaticIdentity({ userId: user.id }),
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
+});
+
+// session IS the default-chain wallet (back-compat)
+console.log(session.chain);           // "stellar" (the default)
+console.log(session.address);         // the stellar address
+console.log(session.status);          // "undeployed" | "ready" | "needs-device-approval"
+
+// Access other configured chains without reconnecting
+const solanaWallet = session.wallet("solana");
+console.log(session.chainStatus("solana")); // status of solana wallet
+console.log(session.chainAddress("solana")); // solana address
+
+// Execute on the default chain
+if (session.status === "ready" || session.status === "undeployed") {
+  await session.execute(10_000_000n, dest); // stellar payment (deploys if needed)
+}
+
+// Execute on another chain
+if (solanaWallet.status === "ready" || solanaWallet.status === "undeployed") {
+  await solanaWallet.execute(1_000_000n, recipient); // solana payment
+}
+```
+
+**Note:** The `chains` config ensures only the specified chains are ever derived,
+deployed, or enrolled. A chain not in the list is never touched.
+
+#### React: switching chains without re-auth
+
+In `CavosProvider`, use `setChain()` to switch the active chain without
+re-authenticating or re-connecting:
+
+```tsx
+const { chain, setChain, wallet, session, configuredChains } = useCavos();
+
+// Switch to Solana
+setChain("solana");
+// wallet is now the Solana wallet; no login prompt, no new deploy
+```
+
+### Enroll once, deploy later
+
+Passkey and recovery enrollment can happen before the first deploy. The factors
+are stored locally and included in the first deployment transaction:
+
+```ts
+const wallet = await Cavos.connect({ chain: "starknet", ... });
+
+// Status is "undeployed" — no on-chain account yet
+await wallet.enrollPasskey(passkey, params);  // stores pending, no tx
+await wallet.setupRecovery(code);             // stores pending, no tx
+
+// First execute deploys + initializes + adds the pending factors atomically
+await wallet.execute(calls);  // one sponsored transaction does it all
+```
+
+**Honest limits:**
+- The squat window is longer: attackers can squat an address until the user's
+  first transaction, not just until their first connect.
+- Recovery factors are not on-chain until that chain's first transaction.
+- The first execute is heavier (deploy + init + factors + user calls).
 
 ## Quickstart — Starknet
 
@@ -235,8 +313,9 @@ if (wallet.chain === "solana" && wallet.status === "ready") {
 
 On Solana every guarded action (initialize, add/remove signer, execute) is a
 two-instruction bundle pairing Solana's **native secp256r1 precompile** with the
-Cavos `cavos-device-account` program instruction. The address is a deterministic
-PDA derived from `deriveAddressSeedSolana` (`{ userId, appSalt }`).
+Cavos `cavos-device-account` program instruction. The address is a PDA of
+`[b"cavos-account", app_namespace, first_device_pubkey_x]`, so `initialize` with
+any other key derives a different account and cannot claim this one.
 
 ```ts
 // Arbitrary program calls (SPL transfers, swaps, staking):
@@ -261,21 +340,22 @@ adapter + signer directly instead of `Cavos.connect`:
 ```ts
 import {
   StarknetAdapter, WebCryptoSigner,
-  deriveAddressSeed, DEVICE_ACCOUNT_CLASS_HASH,
+  appNamespace, DEVICE_ACCOUNT_CLASS_HASH,
 } from "@cavos/kit";
 
-// 1. Identity (from your OAuth/email login) derives the address. No device key
-//    needed for this — the address depends only on identity + salt.
-const identity = { userId: user.id, appSalt: "my-app" };
+// 1. Create/load the SILENT device key. No prompt, ever. This key NAMES the
+//    address, so it has to exist before there is an address at all.
+const signer = await WebCryptoSigner.loadOrCreate({ keyId: `${user.id}:my-app` });
+
+// 2. The address a first device claims. A returning user's address comes from
+//    your own registry instead — it cannot be re-derived from their login.
 const classHash = DEVICE_ACCOUNT_CLASS_HASH.sepolia; // from deployments/sepolia.json
 const address = new StarknetAdapter({ classHash }).computeAddress({
-  addressSeed: deriveAddressSeed(identity),
+  namespace: appNamespace({ appId: "my-app-id" }),
+  initialSigner: await signer.getPublicKey(),
 });
 
-// 2. Create/load the SILENT device key (keyed by the address). No prompt, ever.
-const signer = await WebCryptoSigner.loadOrCreate({ keyId: address });
-
-// 3. Build deploy/initialize/add/remove calls, then submit through your own
+// 3. Build deploy/add/remove calls, then submit through your own
 //    paymaster. Route signing through a standard starknet.js Account:
 import { Account, RpcProvider } from "starknet";
 import { StarknetDeviceSigner } from "@cavos/kit";
@@ -292,7 +372,8 @@ choice.
 
 ## Quickstart — Stellar
 
-`CavosStellar` creates or loads a deterministic classic Stellar `G…` account.
+`CavosStellar` creates or loads a classic Stellar `G…` account, named by the
+first device's control key.
 On a known device, the control key is unlocked silently from the encrypted
 on-chain envelope. Set `appId` to use the Cavos relayer for sponsored account
 creation and fee-bump submission, or provide a self-funded `sourceKeypair`.
