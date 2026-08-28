@@ -457,6 +457,16 @@ export function CavosProvider({
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [walletStatus, setWalletStatus] = useState<WalletStatus>(INITIAL_STATUS);
 
+  // The selected chain is seeded from the config once, so an app that changes
+  // which chains it configures -- switching to passkey approval makes the
+  // session single-chain -- was left pointing at a chain no longer in it. The
+  // lookup then threw and fell back to the default wallet, so the app showed
+  // one chain and acted on another.
+  useEffect(() => {
+    const configured = config.chains ?? (config.chain ? [config.chain] : ['starknet']);
+    if (!configured.includes(selectedChain)) setSelectedChain(configured[0]!);
+  }, [config.chains, config.chain, selectedChain]);
+
   // Derive the active wallet from the session and selected chain
   const wallet = useMemo<CavosWallet | null>(() => {
     if (!session) return null;
