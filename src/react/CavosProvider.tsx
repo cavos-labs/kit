@@ -1463,12 +1463,23 @@ export function CavosProvider({
         case 'passkey':
           await approveDeviceWithPasskey();
           break;
-        case 'enclave':
+        case 'enclave': {
+          // Waiting is only worth it if there is something to wait for. A
+          // wallet with no authority on-chain cannot be recovered, and the
+          // attempt that proved it is deduplicated — so nothing would fail
+          // again and the wait would sit out its whole timeout in silence.
+          if (!socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`)) {
+            throw new Error(
+              'This wallet has no recovery set up, so this device cannot be restored. ' +
+                'Open it on the device that created it and it will be set up there.',
+            );
+          }
           // The effect below starts it as soon as a wallet needing
           // authorization meets a live login proof; this waits for the outcome,
           // so the action that asked can carry straight on.
           await waitUntilAuthorized(wallet);
           break;
+        }
         case 'enclave-needs-login':
           setAuthError('Sign in again to restore this device.');
           break;

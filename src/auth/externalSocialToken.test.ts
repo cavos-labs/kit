@@ -78,12 +78,14 @@ describe("useExternalSocialRecoveryToken", () => {
     expect(() => a.consumeSocialRecoveryCredential()).toThrow();
   });
 
-  it("hands out the credential exactly once", () => {
-    // A provider token is bound to one enclave session; retaining it after use
-    // would only enable an accidental replay.
+  it("keeps the credential for the session, once per wallet", () => {
+    // A token is bound to one enclave session PER WALLET, not one outright: a
+    // multi-chain session enrols each chain separately, and dropping the
+    // credential after the first left every other chain unprotected.
+    // The control plane refuses the reuse that matters.
     const a = auth();
     a.useExternalSocialRecoveryToken(jwt({ iss: "https://accounts.google.com", sub: "u1" }));
     expect(a.consumeSocialRecoveryCredential()).toBeTruthy();
-    expect(() => a.consumeSocialRecoveryCredential()).toThrow();
+    expect(a.consumeSocialRecoveryCredential()).toBeTruthy();
   });
 });

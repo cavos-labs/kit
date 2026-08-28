@@ -209,9 +209,15 @@ export class CavosAuth implements AuthProvider {
   }
 
   consumeSocialRecoveryCredential(): SocialRecoveryCredential {
-    const credential = this.getSocialRecoveryCredential();
-    this.recoveryCredential = null;
-    return credential;
+    // Kept for the session rather than dropped on first use. A session holds a
+    // wallet on every configured chain and each needs its own enrolment, so
+    // spending the credential on the first one left the rest unprotected —
+    // with no error, because there was simply nothing left to try with.
+    //
+    // Replay is the control plane's to refuse, and it does: one session per
+    // credential per wallet. It cannot be reused against a wallet it has
+    // already enrolled.
+    return this.getSocialRecoveryCredential();
   }
 
   /**
