@@ -441,6 +441,8 @@ export class Cavos {
         network: SOLANA_ENV[opts.network],
         identity: opts.identity,
         appSalt: opts.appSalt,
+        // Carries the login token the wallet registry authenticates with.
+        ...(opts.auth ? { auth: opts.auth } : {}),
         ...(opts.appId ? { appId: opts.appId } : {}),
         ...(opts.environment ? { environment: opts.environment } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
@@ -466,6 +468,7 @@ export class Cavos {
         identity: opts.identity,
         appSalt: opts.appSalt,
         deviceKey,
+        ...(opts.auth ? { auth: opts.auth } : {}),
         ...(opts.appId ? { appId: opts.appId } : {}),
         ...(opts.environment ? { environment: opts.environment } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
@@ -480,6 +483,7 @@ export class Cavos {
     return Cavos.connectStarknet({
       network: STARKNET_ENV[opts.network],
       identity: opts.identity,
+      auth: opts.auth,
       appSalt: opts.appSalt,
       appId: opts.appId,
       environment: opts.environment,
