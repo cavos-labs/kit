@@ -188,6 +188,17 @@ function injectStyles() {
       stroke-dashoffset: 30;
       animation: cavos-check-draw 0.35s 0.2s cubic-bezier(.22,1,.36,1) forwards;
     }
+    /* The waiting ring: an arc that orbits the provider mark. Sized to sit just
+       outside the 64px circle so the mark never moves between waiting and done
+       — only what surrounds it changes. */
+    .cavos-progress-ring {
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      pointer-events: none;
+      animation: cavos-spin 0.9s linear infinite;
+    }
     .cavos-input-inner:focus { outline:none; }
     .cavos-provider:active { transform:scale(0.99); }
     .cavos-primary-btn:active { transform:scale(0.98); }
@@ -557,6 +568,9 @@ export function CavosAuthModal({
   // same way they arrived, so surfacing it turns a choice into a confirmation.
   // Purely a hint: it reorders nothing and hides nothing.
   const [recentProvider, setRecentProvider] = useState<string | null>(null);
+  // Which provider this attempt is going through. Known from the click, so the
+  // waiting screen can name it long before the credential comes back.
+  const [pendingProvider, setPendingProvider] = useState<string | null>(null);
   useEffect(() => {
     try {
       setRecentProvider(window.localStorage.getItem(RECENT_PROVIDER_KEY));
@@ -565,6 +579,7 @@ export function CavosAuthModal({
     }
   }, []);
   const rememberProvider = useCallback((name: string) => {
+    setPendingProvider(name);
     try {
       window.localStorage.setItem(RECENT_PROVIDER_KEY, name);
     } catch {
@@ -572,11 +587,24 @@ export function CavosAuthModal({
     }
   }, []);
 
+  // Absolutely positioned on purpose: the button centres its icon and label as
+  // a pair, and a third child in that flow shoves the label off centre and onto
+  // the icon. The hint sits over the row instead of inside its layout.
   const recentTag = (name: string) =>
     recentProvider === name ? (
       <span
         aria-label="Last used"
-        style={{ marginLeft: 'auto', fontSize: '11.5px', fontWeight: 500, color: subTextColor, letterSpacing: '0.01em' }}
+        style={{
+          position: 'absolute',
+          right: '14px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          fontSize: '11.5px',
+          fontWeight: 500,
+          color: subTextColor,
+          letterSpacing: '0.01em',
+          pointerEvents: 'none',
+        }}
       >
         Recent
       </span>
@@ -1223,20 +1251,27 @@ export function CavosAuthModal({
 
   if (screen === 'deploying') {
     const isDone = deployState === 'done';
-    // `provider` comes from the credential the user actually signed in with, so
-    // the confirmation names the thing they chose rather than a generic success.
-    const doneProvider = (() => {
-      switch (user?.provider) {
+    // The provider the user is signing in with — from the credential once it is
+    // back, from the button they pressed before that. Naming it in BOTH states
+    // is what makes waiting and success read as one object changing, rather
+    // than a spinner being replaced by a tick.
+    // The click survives the OAuth redirect in localStorage; component state
+    // does not, because the redirect remounts everything. So the recorded
+    // provider is what names the waiting screen, and the credential confirms it
+    // once it lands.
+    const activeProvider = user?.provider ?? pendingProvider ?? recentProvider;
+    const providerFace = (() => {
+      switch (activeProvider) {
         case 'google':
-          return { title: 'Connected with Google', icon: <GoogleIcon /> };
+          return { name: 'Google', icon: <GoogleIcon /> };
         case 'apple':
-          return { title: 'Connected with Apple', icon: <AppleIcon /> };
+          return { name: 'Apple', icon: <AppleIcon /> };
         case 'password':
         case 'email':
         case 'emailLink':
-          return { title: 'Connected with email', icon: null };
+          return { name: 'email', icon: null };
         default:
-          return { title: "You're all set", icon: null };
+          return { name: null, icon: null };
       }
     })();
     return (
@@ -1244,26 +1279,50 @@ export function CavosAuthModal({
         <div style={card}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: '52px 28px 44px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '16px' }}>
-            {isDone ? (
-              // Show WHAT connected, not just that something did. A generic tick
-              // could follow any action; the provider's own mark can only mean
-              // the one the user just chose, which is what makes the
-              // confirmation read as caused by them.
-              <div className="cavos-check-circle" style={{ width: 64, height: 64, borderRadius: '50%', background: isLight ? '#fff' : 'rgba(255,255,255,0.06)', border: '1.5px solid rgba(34,197,94,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'cavos-ring-glow 1.5s ease-out' }}>
-                {doneProvider.icon ?? (
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-                    <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
+            {/* One object across both states: the mark stays put and the ring
+                around it changes — spinning while we wait, solid green once it
+                lands. Swapping a spinner for a tick reads as two different
+                things happening; this reads as one thing finishing. */}
+            <div style={{ position: 'relative', width: 64, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div
+                className={isDone ? 'cavos-check-circle' : undefined}
+                style={{
+                  width: 64, height: 64, borderRadius: '50%',
+                  background: isDone
+                    ? (isLight ? '#fff' : 'rgba(255,255,255,0.06)')
+                    : (isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)'),
+                  border: `1.5px solid ${isDone ? 'rgba(34,197,94,0.5)' : (isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)')}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'border-color 0.3s ease, background-color 0.3s ease',
+                  ...(isDone ? { animation: 'cavos-ring-glow 1.5s ease-out' } : {}),
+                }}
+              >
+                {providerFace.icon ?? (
+                  isDone ? (
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+                      <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <Spinner size={26} color={isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.6)'} />
+                  )
                 )}
               </div>
-            ) : (
-              <div style={{ width: 64, height: 64, borderRadius: '50%', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)', border: `1.5px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Spinner size={26} color={isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.6)'} />
-              </div>
-            )}
+              {/* The waiting ring only exists when there is a mark to wrap; with
+                  the fallback spinner inside, a second spinner outside it would
+                  just be noise. */}
+              {!isDone && providerFace.icon && (
+                <span data-cavos-spinner className="cavos-progress-ring" style={{ borderTopColor: primaryColor }} />
+              )}
+            </div>
             <div>
               <h2 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
-                {isDone ? doneProvider.title : 'Setting up your account'}
+                {isDone
+                  ? providerFace.name
+                    ? `Connected with ${providerFace.name}`
+                    : "You're all set"
+                  : providerFace.name
+                    ? `Connecting with ${providerFace.name}`
+                    : 'Setting up your account'}
               </h2>
               <p style={{ margin: '6px 0 0', fontSize: '13px', color: subTextColor }}>
                 {isDone

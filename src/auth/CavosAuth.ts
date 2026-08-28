@@ -238,7 +238,7 @@ export class CavosAuth implements AuthProvider {
       // Standard OIDC `name` — present on Google's id_token, absent on the
       // Cavos-signed Firebase JWT (email/OTP/magic-link) and Apple's token.
       name: claims.name,
-      provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
+      provider: providerFromClaims(claims, provider),
     });
   }
 
@@ -326,6 +326,29 @@ function currentCleanCallbackUrl(): string | null {
 }
 
 /** Decode a JWT payload (no verification — the backend already validated it). */
+/**
+ * Which provider actually signed this token.
+ *
+ * A raw Google or Apple id_token carries neither `provider` nor Firebase's
+ * `sign_in_provider`, so the OAuth path used to fall through to the literal
+ * "oauth" — true, and useless to anything that wants to name the provider back
+ * to the user. The issuer is the authoritative answer and is always there.
+ */
+function providerFromClaims(claims: any, fallback: string): string {
+  const signIn: string | undefined = claims?.firebase?.sign_in_provider;
+  if (signIn) return signIn.replace(/\.com$/, "");
+  switch (claims?.iss) {
+    case "https://accounts.google.com":
+      return "google";
+    case "https://appleid.apple.com":
+      return "apple";
+    case "https://cavos.app/firebase":
+      return "email";
+    default:
+      return claims?.provider ?? fallback;
+  }
+}
+
 function parseJwt(jwt: string): any {
   const part = jwt.split(".")[1];
   if (!part) throw new Error("kit/auth: malformed JWT");
