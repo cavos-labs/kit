@@ -21,6 +21,7 @@ import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
 import { recoverCandidatePublicKeys, webauthnDigest } from '../crypto/webauthn';
 import { agreedPublicKey } from '../crypto/passkeyKey';
+import { confirmedByCandidates, recallPasskeyKey, rememberPasskeyKey } from './passkeyKeyCache';
 import type { DevicePublicKey } from '../signer/DeviceSigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
@@ -1499,6 +1500,12 @@ export function CavosProvider({
     const source = sources.find((w) => w !== null);
 
     const candidates = await candidatesFrom();
+
+    // The key this browser saw at enrolment, believed only because this
+    // signature just recovered it. A wrong one cannot appear here.
+    const remembered = confirmedByCandidates(recallPasskeyKey(identity?.userId ?? ''), candidates);
+    if (remembered) return remembered;
+
     if (source) {
       for (const candidate of candidates) {
         if (await source.isApprover(candidate)) return candidate;
@@ -1515,7 +1522,7 @@ export function CavosProvider({
       throw new Error('kit: could not establish which passkey approves this wallet.');
     }
     return agreed;
-  }, [session, deviceAuthorization, rpName]);
+  }, [session, deviceAuthorization, rpName, identity]);
   approverForDeployRef.current = approverForDeploy;
 
   /**
@@ -1554,6 +1561,8 @@ export function CavosProvider({
     // so there is somewhere to check a recovered key against later. Deploying
     // every configured chain here would buy gas on chains the user may never
     // touch; each of those picks the passkey up when it is created.
+    rememberPasskeyKey(identity.userId, enrolled.publicKey);
+
     for (const w of passkeyEnrolmentTargets(
       session.chains.map((c) => session.wallet(c)),
       selectedChain,
