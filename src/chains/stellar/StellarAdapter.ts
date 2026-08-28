@@ -33,6 +33,13 @@ export interface StellarAdapterOptions {
 }
 
 /** How long a built transaction stays valid before it must be rebuilt. */
+/**
+ * What a classic account must hold to exist: two entries at the 0.5 XLM base
+ * reserve. Creating one below this is rejected by the network, so it is worth
+ * saying so before spending a signature on it.
+ */
+const MIN_ACCOUNT_BALANCE = 10_000_000n;
+
 const TX_TIMEOUT = 180;
 
 /**
@@ -240,13 +247,31 @@ export class StellarAdapter {
     amount: bigint;
   }): Promise<Transaction> {
     const source = await this.server().loadAccount(params.from);
+
+    // Stellar is unlike the other chains here: an account has to exist before it
+    // can hold anything, so paying an address that was never funded fails with
+    // `op_no_destination` rather than creating it. Sending to a new address is
+    // `createAccount`, and the caller should not have to know which.
+    const exists = await this.isDeployed(params.to);
+    if (!exists && params.amount < MIN_ACCOUNT_BALANCE) {
+      throw new Error(
+        `kit/stellar: ${params.to} does not exist yet, and creating it needs at least ` +
+          `${fromStroops(MIN_ACCOUNT_BALANCE)} XLM — ${fromStroops(params.amount)} would leave it below the reserve`,
+      );
+    }
+
     return new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.passphrase })
       .addOperation(
-        Operation.payment({
-          destination: params.to,
-          asset: Asset.native(),
-          amount: fromStroops(params.amount),
-        }),
+        exists
+          ? Operation.payment({
+              destination: params.to,
+              asset: Asset.native(),
+              amount: fromStroops(params.amount),
+            })
+          : Operation.createAccount({
+              destination: params.to,
+              startingBalance: fromStroops(params.amount),
+            }),
       )
       .setTimeout(TX_TIMEOUT)
       .build();

@@ -76,3 +76,44 @@ describe("StellarAdapter tx building", () => {
     expect(bump.innerTransaction.hash().equals(inner.hash())).toBe(true);
   });
 });
+
+describe("buildPaymentTx: paying an address that does not exist yet", () => {
+  const funded = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+
+  function adapterWhere(destinationExists: boolean) {
+    const adapter = new StellarAdapter({ network: "stellar-testnet" });
+    stubServer(adapter);
+    // `isDeployed` is the only chain read the builder makes beyond the source.
+    (adapter as unknown as { isDeployed: (a: string) => Promise<boolean> }).isDeployed =
+      async () => destinationExists;
+    return adapter;
+  }
+
+  it("pays an account that exists", async () => {
+    const tx = await adapterWhere(true).buildPaymentTx({
+      from: funded,
+      to: funded,
+      amount: 5_000_000n,
+    });
+    expect(tx.operations[0].type).toBe("payment");
+  });
+
+  it("creates an account that does not", async () => {
+    // Stellar refuses `payment` to an address it has never funded — that is the
+    // `op_no_destination` this exists to prevent.
+    const tx = await adapterWhere(false).buildPaymentTx({
+      from: funded,
+      to: funded,
+      amount: 20_000_000n,
+    });
+    const op = tx.operations[0] as Operation.CreateAccount;
+    expect(op.type).toBe("createAccount");
+    expect(op.startingBalance).toBe("2.0000000");
+  });
+
+  it("refuses to create one below the reserve, and says why", async () => {
+    await expect(
+      adapterWhere(false).buildPaymentTx({ from: funded, to: funded, amount: 1_000_000n }),
+    ).rejects.toThrow(/does not exist yet/);
+  });
+});
