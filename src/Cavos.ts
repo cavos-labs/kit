@@ -581,12 +581,21 @@ export class Cavos {
       // Account not deployed yet — first execute will deploy + initialize
       status = "undeployed";
     } else {
-      // Account exists — check if this device is authorized
+      // Account exists — check if this device is authorized.
+      //
+      // A failed read is not a negative answer. Reporting one told the owner of
+      // the wallet that their own device was not theirs, and sent them into a
+      // recovery they did not need — which on Starknet adds a signer to the
+      // contract for nothing. An RPC that cannot answer is a connect that
+      // failed, and says so.
       try {
         isSigner = await adapter.isAuthorizedSigner(address, devicePubkey);
       } catch (e) {
-        console.warn("[Cavos] isAuthorizedSigner read failed:", e);
-        isSigner = false;
+        throw new Error(
+          `kit: could not check whether this device signs for ${address} — ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
       }
       status = isSigner ? "ready" : "needs-device-approval";
     }
