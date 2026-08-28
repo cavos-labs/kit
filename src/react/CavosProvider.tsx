@@ -691,6 +691,30 @@ export function CavosProvider({
   );
 
 
+  /**
+   * On passkeys, authorize this device at login rather than at the first
+   * action.
+   *
+   * Authorization was moved to the action deliberately: the enclave takes
+   * seconds, can fail, and asking for it during sign-in broke onboarding for a
+   * wallet the user could otherwise already see. A passkey has none of that --
+   * it is local, instant, and the gesture is the one the user already
+   * associates with proving it is them. Waiting to ask buys nothing and leaves
+   * the session in a state that cannot sign.
+   *
+   * So the rule follows the method, not the moment. Declining still costs
+   * nothing: the wallet stays usable for reads and the first action asks again.
+   */
+  const loginApprovalRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (deviceAuthorization !== 'passkey' || !wallet) return;
+    if (wallet.status !== 'needs-device-approval') return;
+    const key = `${wallet.chain}:${wallet.address}`;
+    if (loginApprovalRef.current.has(key)) return;
+    loginApprovalRef.current.add(key);
+    void authorizeDeviceRef.current();
+  }, [deviceAuthorization, wallet, wallet?.status]);
+
   // The wallet turning ready is what ends an authorization, whoever performed it.
   useEffect(() => {
     if (walletStatus.isReady) setAuthorizingDevice(false);
