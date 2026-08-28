@@ -46,3 +46,34 @@ describe("reading an account that is not one of ours", () => {
     expect(new PublicKey(address).toBase58()).toBe(address);
   });
 });
+
+/**
+ * The status the wallet reports rests on the same question, and got it wrong in
+ * the same way: an address holding lamports was read as a deployed wallet, so
+ * the device that created it was told it was not a signer of it.
+ */
+describe("deciding whether the program created the account", () => {
+  const address = "5UCmo53f4xxkUYvGvucmVwfcTZ4ehEHoLowR2wpz89Th";
+
+  const adapterOver = (data: Buffer | null) => {
+    const adapter = new SolanaAdapter({ network: "devnet" });
+    const getAccountInfo = jest.fn(async () => (data ? { data } : null));
+    jest
+      .spyOn(adapter as unknown as { requireConnection: () => unknown }, "requireConnection")
+      .mockReturnValue({ getAccountInfo });
+    return adapter;
+  };
+
+  it("does not call a funded address a wallet", async () => {
+    await expect(adapterOver(Buffer.alloc(0)).isDeviceAccount(address)).resolves.toBe(false);
+  });
+
+  it("does not call a missing address a wallet", async () => {
+    await expect(adapterOver(null).isDeviceAccount(address)).resolves.toBe(false);
+  });
+
+  it("recognises an account the program created", async () => {
+    const data = Buffer.alloc(8 + 32 + 1 + 8 + 33 + 4);
+    await expect(adapterOver(data).isDeviceAccount(address)).resolves.toBe(true);
+  });
+});

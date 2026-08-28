@@ -433,6 +433,21 @@ export class SolanaAdapter {
     return approvers.some((a) => Buffer.from(a).toString("hex") === target);
   }
 
+  /**
+   * Whether the program has actually created this account.
+   *
+   * Not the same question as whether an address exists. An address the program
+   * has not created can still hold lamports -- an airdrop, a transfer -- and
+   * taking that for a deployed wallet made the device that created the wallet
+   * look like a stranger to it: the account "existed", so the kit went looking
+   * for its signers, found none, and asked the enclave to restore a device that
+   * was never missing.
+   */
+  async isDeviceAccount(account: string): Promise<boolean> {
+    const info = await this.requireConnection().getAccountInfo(new PublicKey(account));
+    return isDeviceAccountData(info?.data);
+  }
+
   /** Read the current passkey-approval nonce. */
   async passkeyNonce(account: string): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(new PublicKey(account));

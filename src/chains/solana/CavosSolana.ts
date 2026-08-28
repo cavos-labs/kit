@@ -1,7 +1,6 @@
 import {
   Connection,
   Keypair,
-  PublicKey,
   Transaction,
   sendAndConfirmTransaction,
   type TransactionInstruction,
@@ -281,7 +280,10 @@ export class CavosSolana {
 
     // LAZY DEPLOY: Check deployment status but DO NOT deploy here.
     // Deployment happens on first execute() call.
-    const deployed = (await connection.getAccountInfo(new PublicKey(address))) !== null;
+    // Whether the program created it, not merely whether the address exists:
+    // a funded address is not a wallet, and reading it as one told the device
+    // that created the wallet it was not a signer of it.
+    const deployed = await adapter.isDeviceAccount(address);
 
     // Determine status: undeployed, ready, or needs-device-approval
     let status: ConnectStatus;
