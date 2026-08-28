@@ -868,9 +868,118 @@ export function CavosProvider({
   }, [session, selectedChain]);
 
   /**
-   * A fresh provider credential is available only immediately after login. Use
-   * that window to enrol a ready wallet or recover this exact new device. The
-   * credential is encrypted to the independently-attested enclave by the SDK.
+   * Enrol every wallet that is deployed and has no recovery authority yet.
+   *
+   * Every chain, not the visible one. A session holds a wallet per chain and
+   * only one is on screen -- `chains[0]` after a login, whatever the user was
+   * last using. Enrolling just that one left the others deployed and
+   * unrecoverable, and nothing said so until a second device tried to restore
+   * one and was told the wallet has no recovery set up.
+   *
+   * Recovery stays with the active wallet below: it belongs to the action the
+   * user is taking. This is background hardening and shows only in the result.
+   */
+  useEffect(() => {
+    if (
+      !socialRecovery?.enabled ||
+      !socialRecovery.provider ||
+      !socialRecoveryPolicy ||
+      !session ||
+      !identity ||
+      !config.appId
+    ) return;
+
+    const pending = session.chains
+      .map((c) => session.wallet(c))
+      .filter(
+        (w) =>
+          decideSocialRecovery(
+            w.status,
+            socialEnrolledRef.current.has(`${w.chain}:${w.address}`),
+          ).action === 'enroll',
+      );
+    if (pending.length === 0) return;
+
+    let credential: SocialRecoveryCredential;
+    try {
+      credential = auth.consumeSocialRecoveryCredential();
+    } catch {
+      // The proof is deliberately never persisted -- it is what the enclave
+      // verifies -- so a reloaded page does not have one and the next sign-in
+      // enrols instead. Worth saying out loud, though: silence here is how a
+      // wallet came to be deployed with no recovery at all.
+      console.warn(
+        '[CavosProvider] recovery not enrolled yet on ' +
+          pending.map((w) => w.chain).join(', ') +
+          ': this session has no fresh login proof. It will enrol on the next sign-in.',
+      );
+      return;
+    }
+
+    const client = new SocialRecoveryClient({
+      baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
+      appId: config.appId,
+      environment: config.environment,
+      attestation: socialRecoveryPolicy,
+    });
+    let cancelled = false;
+
+    void Promise.all(
+      pending.map(async (w) => {
+        const attemptKey = `${w.chain}:${w.address}:enroll:${credential.tokenFingerprint}`;
+        if (socialAttemptRef.current.has(attemptKey)) return;
+        socialAttemptRef.current.add(attemptKey);
+        try {
+          await enrollHardwareIsolatedRecovery({
+            client,
+            wallet: w,
+            credential,
+            delaySeconds: socialRecovery.delaySeconds,
+          });
+          socialEnrolledRef.current.add(`${w.chain}:${w.address}`);
+          if (cancelled) return;
+          setWalletStatus((status) => ({
+            ...status,
+            recovery: {
+              protected: true,
+              methods: status.recovery.methods.includes('social')
+                ? status.recovery.methods
+                : [...status.recovery.methods, 'social'],
+            },
+          }));
+        } catch (error) {
+          // Enrolment is hardening and must never break a working wallet. A 409
+          // means a previous login already did it.
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes('already_enrolled')) {
+            console.error(`[CavosProvider] enrolment failed on ${w.chain}:`, error);
+          }
+        }
+      }),
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    auth,
+    config.appId,
+    config.authBackendUrl,
+    config.environment,
+    socialRecovery,
+    socialRecoveryPolicy,
+    session,
+    identity,
+    // Wallets are mutated in place when the first execute deploys them, so the
+    // session reference alone never re-runs this.
+    walletStatus.isReady,
+    walletStatus.isUndeployed,
+  ]);
+
+  /**
+   * Restore this exact device on the active wallet, using the provider
+   * credential that is available only immediately after login. The credential
+   * is encrypted to the independently-attested enclave by the SDK.
    */
   useEffect(() => {
     if (
@@ -889,7 +998,9 @@ export function CavosProvider({
       wallet.status,
       socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`),
     );
-    if (!decision.takesCredential) return;
+    // Enrolment belongs to the sweep above, which does every chain. This is
+    // recovery: restoring the device the user is holding.
+    if (decision.action !== 'recover') return;
 
     let credential: SocialRecoveryCredential;
     try {
@@ -927,57 +1038,6 @@ export function CavosProvider({
     let cancelled = false;
 
     (async () => {
-      if (action === 'enroll') {
-        // A newly-created wallet is already controlled by this device. TEE
-        // enrollment is a hardening step and must not downgrade the usable
-        // wallet back to a blocking "deploying" state while an on-demand
-        // enclave answers. Browsers may suspend timers in the
-        // background; the in-flight task resumes when the app is foregrounded.
-        setWalletStatus((status) => ({
-          ...status,
-          isDeploying: false,
-          isReady: true,
-          isSocialRecovering: true,
-        }));
-        try {
-          await enrollHardwareIsolatedRecovery({
-            client,
-            wallet,
-            credential,
-            delaySeconds: socialRecovery.delaySeconds,
-          });
-          socialEnrolledRef.current.add(`${wallet.chain}:${wallet.address}`);
-          if (!cancelled) {
-            setWalletStatus((status) => ({
-              ...status,
-              recovery: {
-                protected: true,
-                methods: status.recovery.methods.includes('social')
-                  ? status.recovery.methods
-                  : [...status.recovery.methods, 'social'],
-              },
-            }));
-          }
-        } catch (error) {
-          // Enrollment is opt-in and must never make an already-working wallet
-          // unusable. A 409 means this wallet was enrolled on a prior login.
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes('already_enrolled')) {
-            console.error('[CavosProvider] social recovery enrollment failed:', error);
-          }
-        } finally {
-          if (!cancelled) {
-            setWalletStatus((status) => ({
-              ...status,
-              isDeploying: false,
-              isReady: true,
-              isSocialRecovering: false,
-            }));
-          }
-        }
-        return;
-      }
-
       setWalletStatus((status) => ({
         ...status,
         isDeploying: true,
