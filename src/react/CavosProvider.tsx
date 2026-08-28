@@ -581,7 +581,7 @@ export function CavosProvider({
     if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana') || !wallet.pendingRequestId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
     await recovery.requestDeviceAddition({
       userId: identity.userId,
       accountAddress: wallet.address,
@@ -1316,7 +1316,7 @@ export function CavosProvider({
     const cfg = configRef.current;
     if (!cfg.appId) return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment });
+    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
     const requestId = walletStatus.pendingRequestId;
     let cancelled = false;
     const tick = async () => {

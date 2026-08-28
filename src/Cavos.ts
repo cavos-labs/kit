@@ -548,7 +548,7 @@ export class Cavos {
           })
         : defaultRegistry);
     const recovery =
-      opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null);
+      opts.recovery ?? (opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment, authToken: () => opts.auth?.getAuthToken?.() ?? null }) : null);
 
     const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
     const addressParams = { namespace, initialSigner: devicePubkey };

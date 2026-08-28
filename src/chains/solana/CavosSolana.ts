@@ -217,7 +217,7 @@ export class CavosSolana {
     // when a returning user signs in on a new device, we ask the backend to email
     // the owner an approval link. Chain-agnostic — Solana's secp256r1 device key
     // is the same curve Starknet uses, so the {x,y} pubkey passes through as-is.
-    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment }) : null;
+    const recovery = opts.appId ? new HttpRecoveryClient({ baseUrl: backendUrl, appId: opts.appId, environment: opts.environment, authToken: () => opts.auth?.getAuthToken?.() ?? null }) : null;
 
     // The registry names the wallet; the PDA is only computed for a user who
     // does not have one yet. Its seeds include this device's pubkey, so the
