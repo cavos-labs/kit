@@ -643,8 +643,6 @@ export function CavosAuthModal({
   const [copied, setCopied] = useState(false);
 
   const doneHandledRef = useRef(false);
-  /** One approval email per device, not one per render of this screen. */
-  const approvalRequestedRef = useRef(false);
   // True once the first-time "secure your account" step has been shown & handled
   // (completed or skipped) this session, so we don't loop back into it.
   const secureHandledRef = useRef(false);
@@ -816,7 +814,11 @@ export function CavosAuthModal({
       // is used.
       // One decision, made by the provider before anything ran, instead of this
       // screen guessing from flags that three racing processes were setting.
-      if (!authorizingDevice && !walletStatus.isSocialRecovering) {
+      // The modal no longer runs the authorization — the provider performs it
+      // where the action happened, because most routes need no screen at all:
+      // the enclave runs on its own and an approval email is a request, not a
+      // dialog. This only reflects what is already under way.
+      if (!authorizingDevice && !walletStatus.isSocialRecovering && !walletStatus.awaitingApproval) {
         // Nothing asked for this. Leave the screen alone.
       } else if (walletStatus.isSocialRecovering) {
         setScreen('social-recovery');
@@ -833,17 +835,9 @@ export function CavosAuthModal({
       } else if (deviceAuthorization.method === 'email') {
         setScreen('device-approval');
         doneHandledRef.current = false;
-        // The email is sent from here, when it is the chosen way in — never
-        // alongside a recovery that was about to succeed.
-        if (!walletStatus.awaitingApproval && !approvalRequestedRef.current) {
-          approvalRequestedRef.current = true;
-          void resendDeviceApproval().catch(() => {
-            approvalRequestedRef.current = false;
-          });
-        }
       }
     }
-  }, [authorizingDevice, deviceAuthorization, resendDeviceApproval, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
+  }, [authorizingDevice, deviceAuthorization, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);

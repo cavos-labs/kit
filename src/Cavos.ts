@@ -647,6 +647,25 @@ export class Cavos {
     }
   }
 
+
+  /**
+   * Called when an action needs this device to be an authorized signer and it
+   * is not one yet.
+   *
+   * The refusal has to live where the action does. Wrapping `execute` in the
+   * React provider only covered calls made through the provider, and both the
+   * demo and any integrator call `wallet.execute` directly — so the request to
+   * authorize never appeared and the user got a bare "not an authorized
+   * signer", which is a statement of fact and no help at all.
+   */
+  onAuthorizationNeeded?: () => void;
+
+  /** Ask for authorization, then refuse the action that needed it. */
+  private refuseUnauthorized(prefix: string): never {
+    this.onAuthorizationNeeded?.();
+    throw new Error(`${prefix}: approve this device to continue — the request is on screen.`);
+  }
+
   /** This device's public key (e.g. to request addition to an existing wallet). */
   get publicKey(): DevicePublicKey {
     return this.devicePubkey;
@@ -666,7 +685,7 @@ export class Cavos {
     }
 
     if (this.statusValue !== "ready") {
-      throw new Error("kit: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit");
     }
 
     // `sponsored` defaults to true → paymaster pays the gas. Pass `sponsored:
@@ -778,7 +797,7 @@ export class Cavos {
     // Works while the account is still undeployed: the signature comes from the
     // local device key, and proving control of that key needs no chain state.
     if (this.status === "needs-device-approval") {
-      throw new Error("kit: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
@@ -804,7 +823,7 @@ export class Cavos {
    */
   async signTransaction(calls: ChainCall[]): Promise<StarknetSignedTransaction> {
     if (this.status !== "ready") {
-      throw new Error("kit: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit");
     }
     // Estimate fee to obtain nonce + resource bounds, then build + sign the
     // invocation without invoking `invokeFunction` (no submission).

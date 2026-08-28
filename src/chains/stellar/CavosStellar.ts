@@ -321,6 +321,14 @@ export class CavosStellar {
     }
   }
 
+
+  /**
+   * Called when an action needs this device to hold the control key and it does
+   * not. The refusal lives here, where the action is, because integrators call
+   * `wallet.execute` directly — a wrapper in the React provider never sees it.
+   */
+  onAuthorizationNeeded?: () => void;
+
   /** Native XLM balance of the account, in stroops. */
   async balance(): Promise<bigint> {
     return this.adapter.balance(this.address);
@@ -1031,7 +1039,8 @@ export class CavosStellar {
    */
   private requireControl(): ControlKey {
     if (!this.control) {
-      throw new Error("kit/stellar: control key not unlocked on this device (needs approval)");
+      this.onAuthorizationNeeded?.();
+      throw new Error("kit/stellar: approve this device to continue — the request is on screen.");
     }
     return this.control;
   }
@@ -1042,7 +1051,8 @@ export class CavosStellar {
    */
   private requireReadyControl(): ControlKey {
     if (this.statusValue !== "ready" || !this.control) {
-      throw new Error("kit/stellar: control key not unlocked on this device (needs approval)");
+      this.onAuthorizationNeeded?.();
+      throw new Error("kit/stellar: approve this device to continue — the request is on screen.");
     }
     return this.control;
   }

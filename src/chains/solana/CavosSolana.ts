@@ -183,6 +183,25 @@ export class CavosSolana {
     }
   }
 
+
+  /**
+   * Called when an action needs this device to be an authorized signer and it
+   * is not one yet.
+   *
+   * The refusal has to live where the action does. Wrapping `execute` in the
+   * React provider only covered calls made through the provider, and both the
+   * demo and any integrator call `wallet.execute` directly — so the request to
+   * authorize never appeared and the user got a bare "not an authorized
+   * signer", which is a statement of fact and no help at all.
+   */
+  onAuthorizationNeeded?: () => void;
+
+  /** Ask for authorization, then refuse the action that needed it. */
+  private refuseUnauthorized(prefix: string): never {
+    this.onAuthorizationNeeded?.();
+    throw new Error(`${prefix}: approve this device to continue — the request is on screen.`);
+  }
+
   get publicKey(): DevicePublicKey {
     return this.devicePubkey;
   }
@@ -554,7 +573,7 @@ export class CavosSolana {
     }
 
     if (this.statusValue !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecuteTransfer(this.address, destination, amount);
     return this.send(ixs, opts);
@@ -585,7 +604,7 @@ export class CavosSolana {
     }
 
     if (this.statusValue !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit/solana");
     }
     const ixs = await this.adapter.buildExecute(this.address, instructions);
     return this.send(ixs, opts);
@@ -724,7 +743,7 @@ export class CavosSolana {
     // Works while the account is still undeployed: the signature comes from the
     // local device key, and proving control of that key needs no chain state.
     if (this.status === "needs-device-approval") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit/solana");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
     const prefixed = prefixedMessageBytes(msgBytes);
@@ -749,7 +768,7 @@ export class CavosSolana {
    */
   async signTransaction(amount: bigint, destination: string): Promise<SolanaSignedTransaction> {
     if (this.status !== "ready") {
-      throw new Error("kit/solana: this device is not yet an authorized signer of the wallet");
+      this.refuseUnauthorized("kit/solana");
     }
     const message = await this.adapter.buildTransferMessage(this.address, destination, amount);
     const { signature, pubkey } = await this.adapter.signRaw(message);

@@ -460,6 +460,9 @@ export function CavosProvider({
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
   const [authorizingDevice, setAuthorizingDevice] = useState(false);
+  // Held in a ref so the wallets can be wired once, rather than re-subscribed
+  // every time the callback identity changes.
+  const authorizeDeviceRef = useRef<() => Promise<void>>(async () => {});
   /** Latest known social-enrolment answer, for the enrolment effect to consult
    *  without waiting on a re-render. */
   const socialEnrolledRef = useRef(false);
@@ -635,19 +638,6 @@ export function CavosProvider({
     [walletStatus.hasPasskey, passkeySupported, walletStatus.recovery.methods, auth, identity],
   );
 
-  // Authorization is lazy, like deployment. Signing in on a new device does not
-  // interrupt anyone: reads work without being a signer, so the wallet shows
-  // its address and balance straight away. Only an action that needs the
-  // account's authority asks — at a moment the user is already acting, where
-  // the request explains itself.
-  const authorizeDevice = useCallback(async () => {
-    if (!wallet || wallet.status !== 'needs-device-approval') return;
-    // Stays set until the device is authorized or the user closes the modal —
-    // the flow itself belongs to the modal, which runs whichever route
-    // `deviceAuthorization` named.
-    setAuthorizingDevice(true);
-    openModal();
-  }, [wallet, openModal]);
 
   // The wallet turning ready is what ends an authorization, whoever performed it.
   useEffect(() => {
@@ -836,7 +826,22 @@ export function CavosProvider({
       }));
     };
     const unsubscribes = session.chains.map((c) => session.wallet(c).onStatusChange(resync));
-    return () => unsubscribes.forEach((off) => off());
+
+    // The wallets refuse an unauthorized device wherever the action is called
+    // from — including `wallet.execute` straight from the app, which no wrapper
+    // here would ever see. This is how that refusal reaches the UI.
+    for (const c of session.chains) {
+      session.wallet(c).onAuthorizationNeeded = () => {
+        void authorizeDeviceRef.current();
+      };
+    }
+
+    return () => {
+      unsubscribes.forEach((off) => off());
+      for (const c of session.chains) {
+        session.wallet(c).onAuthorizationNeeded = undefined;
+      }
+    };
   }, [session, selectedChain]);
 
   /**
@@ -1231,11 +1236,11 @@ export function CavosProvider({
     // One rule: anything needing the account's authority authorizes the device
     // first. Reads never do, which is why signing in is no longer interrupted.
     if (wallet.status === 'needs-device-approval') {
-      await authorizeDevice();
-      throw new Error('kit: approve this device to continue — the request is on screen.');
+      await authorizeDeviceRef.current();
+      throw new Error('kit: approve this device to continue — the request has been sent.');
     }
     return wallet.execute(calls, opts);
-  }, [wallet, authorizeDevice]);
+  }, [wallet]);
 
   // Chain-agnostic off-chain message signing. Every chain's wallet exposes the
   // same `signMessage(message)` signature returning a uniform `MessageSignature`.
@@ -1251,7 +1256,7 @@ export function CavosProvider({
       }
       return wallet.signMessage(message);
     },
-    [wallet, authorizeDevice],
+    [wallet],
   );
 
   const addSigner = useCallback(
@@ -1379,6 +1384,43 @@ export function CavosProvider({
     }
     await connect(identity, { silent: true });
   }, [wallet, identity, rpName, connect]);
+
+  // Authorization is lazy, like deployment. Signing in on a new device does not
+  // interrupt anyone: reads work without being a signer, so the wallet shows
+  // its address and balance straight away. Only an action that needs the
+  // account's authority asks — at a moment the user is already acting, where
+  // the request explains itself.
+  const authorizeDevice = useCallback(async () => {
+    if (!wallet || wallet.status !== 'needs-device-approval') return;
+    setAuthorizingDevice(true);
+    try {
+      // Do the thing, rather than open a screen asking to do the thing. Most of
+      // these need nothing from the user: the enclave runs on its own, and an
+      // approval email is a request, not a dialog. Only a passkey needs a
+      // gesture, and only a missing login proof needs the user at all.
+      switch (deviceAuthorization.method) {
+        case 'passkey':
+          await approveDeviceWithPasskey();
+          break;
+        case 'email':
+          await resendDeviceApproval();
+          break;
+        case 'social':
+          // Already in flight: the effect below runs it as soon as a wallet
+          // needing authorization meets a live login proof.
+          break;
+        case 'social-needs-login':
+          setAuthError('Sign in again to restore this device.');
+          break;
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not authorize this device.');
+    } finally {
+      setAuthorizingDevice(false);
+    }
+  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, resendDeviceApproval]);
+
+  authorizeDeviceRef.current = authorizeDevice;
 
   // Generate a recovery code and register its derived backup signer (gasless).
   // The code is returned so the UI can display it once — never persisted.
