@@ -747,17 +747,23 @@ export function CavosProvider({
       !config.appId
     ) return;
 
+    // An undeployed wallet is neither case: it is brand new and this device
+    // already controls it, so there is nothing to recover, and there is no
+    // account on-chain yet to enrol an authority against. Enrolment happens
+    // once the first execute deploys it and the status turns 'ready'.
+    //
+    // This has to come BEFORE the credential is taken. `consume` is one-shot,
+    // so returning after it burns the only credential the session will ever
+    // have — and since every new wallet starts undeployed, that meant the
+    // enrolment which should follow the first execute could never run.
+    if (wallet.status === 'undeployed') return;
+
     let credential: SocialRecoveryCredential;
     try {
       credential = auth.consumeSocialRecoveryCredential();
     } catch {
       return;
     }
-    // An undeployed wallet is neither case: it is brand new and this device
-    // already controls it, so there is nothing to recover, and there is no
-    // account on-chain yet to enrol an authority against. Enrolment happens
-    // once the first execute deploys it and the status turns 'ready'.
-    if (wallet.status === 'undeployed') return;
     const action = wallet.status === 'ready' ? 'enroll' : 'recover';
     // A wallet that is already enrolled has nothing to enrol. Without this the
     // enclave ran on every fresh login purely to answer 409, and the UI flashed
