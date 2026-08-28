@@ -746,6 +746,11 @@ export function CavosProvider({
     } catch {
       return;
     }
+    // An undeployed wallet is neither case: it is brand new and this device
+    // already controls it, so there is nothing to recover, and there is no
+    // account on-chain yet to enrol an authority against. Enrolment happens
+    // once the first execute deploys it and the status turns 'ready'.
+    if (wallet.status === 'undeployed') return;
     const action = wallet.status === 'ready' ? 'enroll' : 'recover';
     // A wallet that is already enrolled has nothing to enrol. Without this the
     // enclave ran on every fresh login purely to answer 409, and the UI flashed
