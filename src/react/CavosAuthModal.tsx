@@ -710,7 +710,7 @@ export function CavosAuthModal({
     // over whatever happens to be up is how an approval spinner ended up
     // carrying a recovery's error and a recovery-phrase link at once.
     if (walletStatus.needsDeviceApproval && screen !== 'device-approval') {
-      setScreen(deviceAuthorization.method === 'email' ? 'device-approval' : 'select');
+      setScreen(false /* email is no longer an automatic route */ ? 'device-approval' : 'select');
     }
     setError(authError);
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
@@ -823,16 +823,16 @@ export function CavosAuthModal({
       } else if (walletStatus.isSocialRecovering) {
         setScreen('social-recovery');
         doneHandledRef.current = false;
-      } else if (deviceAuthorization.method === 'passkey') {
+      } else if (deviceAuthorization === 'passkey') {
         setScreen('passkey-approval');
         doneHandledRef.current = false;
-      } else if (deviceAuthorization.method === 'social-needs-login') {
+      } else if (deviceAuthorization === 'enclave-needs-login') {
         // Not an error: the proof the enclave checks is only good for one
         // session, and signing in again mints a new one. That is an action.
         setScreen('select');
         setError('Sign in again to restore this device.');
         doneHandledRef.current = false;
-      } else if (deviceAuthorization.method === 'email') {
+      } else if (false /* email is no longer an automatic route */) {
         setScreen('device-approval');
         doneHandledRef.current = false;
       }

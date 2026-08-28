@@ -22,7 +22,11 @@ import { PasskeySigner } from '../signer/PasskeySigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { decideSocialRecovery } from './socialRecoveryDecision';
-import { resolveDeviceAuthorization, type DeviceAuthorization } from './deviceAuthorization';
+import {
+  resolveDeviceAuthorization,
+  type DeviceApproval,
+  type DeviceAuthorizationMethod,
+} from './deviceAuthorization';
 import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
@@ -75,6 +79,13 @@ export interface CavosConfig {
   paymasterApiKey?: string;
   /** Override the Cavos auth backend (self-hosted / staging). */
   authBackendUrl?: string;
+  /**
+   * How a device that is not a signer yet gets authorized: by the attested
+   * enclave, or by a passkey on the device. This is the app's choice — an app
+   * runs one or the other, and inferring it at runtime gave different users
+   * different flows. Defaults to the enclave when `socialRecovery` is on.
+   */
+  deviceApproval?: DeviceApproval;
   /** Override the chain RPC. Unambiguous only with a single configured chain. */
   rpcUrl?: string;
   /**
@@ -275,7 +286,7 @@ export interface CavosContextValue {
    * yet. One decision taken before anything runs, so the UI shows one action
    * instead of racing every mechanism at once.
    */
-  deviceAuthorization: DeviceAuthorization;
+  deviceAuthorization: DeviceAuthorizationMethod;
   /**
    * Authorize this device on the wallet, by whichever route
    * `deviceAuthorization` chose. Called for you before any action that needs
@@ -631,11 +642,13 @@ export function CavosProvider({
   const deviceAuthorization = useMemo(
     () =>
       resolveDeviceAuthorization({
-        passkey: walletStatus.hasPasskey && passkeySupported,
-        socialEnrolled: walletStatus.recovery.methods.includes('social'),
+        // The app's choice, not a runtime discovery. `socialRecovery` already
+        // says an app runs the enclave; everything else authorizes by passkey.
+        approval: (config.deviceApproval
+          ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
         socialCredential: auth.hasSocialRecoveryCredential(),
       }),
-    [walletStatus.hasPasskey, passkeySupported, walletStatus.recovery.methods, auth, identity],
+    [config.deviceApproval, config.socialRecovery, config.socialRecoveryAttestation, auth, identity],
   );
 
 
@@ -1398,18 +1411,15 @@ export function CavosProvider({
       // these need nothing from the user: the enclave runs on its own, and an
       // approval email is a request, not a dialog. Only a passkey needs a
       // gesture, and only a missing login proof needs the user at all.
-      switch (deviceAuthorization.method) {
+      switch (deviceAuthorization) {
         case 'passkey':
           await approveDeviceWithPasskey();
           break;
-        case 'email':
-          await resendDeviceApproval();
-          break;
-        case 'social':
+        case 'enclave':
           // Already in flight: the effect below runs it as soon as a wallet
           // needing authorization meets a live login proof.
           break;
-        case 'social-needs-login':
+        case 'enclave-needs-login':
           setAuthError('Sign in again to restore this device.');
           break;
       }
@@ -1418,7 +1428,7 @@ export function CavosProvider({
     } finally {
       setAuthorizingDevice(false);
     }
-  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, resendDeviceApproval]);
+  }, [wallet, deviceAuthorization, approveDeviceWithPasskey]);
 
   authorizeDeviceRef.current = authorizeDevice;
 

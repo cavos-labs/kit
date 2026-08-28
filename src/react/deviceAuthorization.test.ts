@@ -1,67 +1,44 @@
 import { describe, expect, it } from "@jest/globals";
 import { resolveDeviceAuthorization } from "./deviceAuthorization";
 
-describe("how an unauthorized device gets in", () => {
-  it("uses a passkey when there is one: instant, and nothing else is needed", () => {
-    const { method } = resolveDeviceAuthorization({
-      passkey: true,
-      socialEnrolled: true,
-      socialCredential: true,
-    });
-    expect(method).toBe("passkey");
+describe("how a new device gets authorized", () => {
+  it("uses passkeys when the app chose passkeys", () => {
+    expect(resolveDeviceAuthorization({ approval: "passkey", socialCredential: false })).toBe(
+      "passkey",
+    );
   });
 
-  it("uses the enclave when it is enrolled and the proof is in hand", () => {
-    const { method } = resolveDeviceAuthorization({
-      passkey: false,
-      socialEnrolled: true,
-      socialCredential: true,
-    });
-    expect(method).toBe("social");
+  it("does not care about the login proof when the app chose passkeys", () => {
+    // The proof is the enclave's business. An app on passkeys never touches it,
+    // so its absence must not change anything.
+    expect(resolveDeviceAuthorization({ approval: "passkey", socialCredential: true })).toBe(
+      "passkey",
+    );
   });
 
-  it("asks for a fresh login rather than calling a missing proof an error", () => {
-    // The proof is never persisted — it is what the enclave verifies — so it
-    // does not survive a reload. Signing in again mints a new one, which makes
-    // this a primary action, not a red message beside somebody else's spinner.
-    const { method } = resolveDeviceAuthorization({
-      passkey: false,
-      socialEnrolled: true,
-      socialCredential: false,
-    });
-    expect(method).toBe("social-needs-login");
+  it("uses the enclave when the app chose the enclave", () => {
+    expect(resolveDeviceAuthorization({ approval: "enclave", socialCredential: true })).toBe(
+      "enclave",
+    );
   });
 
-  it("falls back to email only when nothing automatic exists", () => {
-    // Email was the default before: connect mailed one the moment it saw an
-    // unauthorized device, even while the enclave was about to do it in
-    // seconds. It needs a second device and the user's attention twice, so it
-    // is the floor.
-    const { method } = resolveDeviceAuthorization({
-      passkey: false,
-      socialEnrolled: false,
-      socialCredential: false,
-    });
-    expect(method).toBe("email");
+  it("asks for a fresh sign-in when the enclave's proof is gone", () => {
+    // Never an error and never a silent fallback to something else: the app
+    // chose the enclave, so the answer is the one thing that makes the enclave
+    // usable again.
+    expect(resolveDeviceAuthorization({ approval: "enclave", socialCredential: false })).toBe(
+      "enclave-needs-login",
+    );
   });
 
-  it("does not offer the enclave when the wallet has no authority on-chain", () => {
-    const { method, alternatives } = resolveDeviceAuthorization({
-      passkey: false,
-      socialEnrolled: false,
-      socialCredential: true,
-    });
-    expect(method).toBe("email");
-    expect(alternatives).not.toContain("social");
-  });
-
-  it("keeps the rest as alternatives, never as things that also run", () => {
-    const { method, alternatives } = resolveDeviceAuthorization({
-      passkey: true,
-      socialEnrolled: true,
-      socialCredential: true,
-    });
-    expect(method).toBe("passkey");
-    expect(alternatives).toEqual(["social", "email"]);
+  it("never resolves to a route the app did not choose", () => {
+    // The old ladder could mail an approval for a wallet the enclave was about
+    // to restore, because it resolved before the lookups it depended on.
+    const everyInput = [true, false].flatMap((socialCredential) =>
+      (["enclave", "passkey"] as const).map((approval) =>
+        resolveDeviceAuthorization({ approval, socialCredential }),
+      ),
+    );
+    expect(everyInput).not.toContain("email");
   });
 });
