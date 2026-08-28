@@ -471,12 +471,23 @@ export function CavosProvider({
   const [modalOpen, setModalOpen] = useState(false);
   const [passkeySupported, setPasskeySupported] = useState(false);
   const [authorizingDevice, setAuthorizingDevice] = useState(false);
+  /** Set when an authorization attempt fails, so a wait can end on it. */
+  const authorizationErrorRef = useRef<string | null>(null);
   // Held in a ref so the wallets can be wired once, rather than re-subscribed
   // every time the callback identity changes.
   const authorizeDeviceRef = useRef<() => Promise<void>>(async () => {});
   /** Latest known social-enrolment answer, for the enrolment effect to consult
    *  without waiting on a re-render. */
-  const socialEnrolledRef = useRef(false);
+  /**
+   * Which wallets already hold a recovery authority, keyed by chain and
+   * address.
+   *
+   * This was one boolean for the whole session. Enrolling on one chain set it,
+   * and every other chain was then skipped as "already enrolled" — so a user
+   * who enrolled Stellar got a Starknet wallet with no authority at all, and
+   * found out only when a second device could not recover it.
+   */
+  const socialEnrolledRef = useRef(new Set<string>());
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
   const socialAttemptRef = useRef(new Set<string>());
@@ -581,7 +592,8 @@ export function CavosProvider({
         })(),
       ]);
       if (cancelled) return;
-      socialEnrolledRef.current = social;
+      if (social) socialEnrolledRef.current.add(`${wallet.chain}:${wallet.address}`);
+      else socialEnrolledRef.current.delete(`${wallet.chain}:${wallet.address}`);
       const methods: ('passkey' | 'social')[] = [];
       // Passkey first: it is the immediate route, where the enclave path waits
       // out a timelock.
@@ -873,7 +885,10 @@ export function CavosProvider({
     // ordering lives in `decideSocialRecovery` because getting it wrong is
     // silent: taking the credential for a wallet we then skip burns it, and the
     // enrolment that should follow the first execute never runs.
-    const decision = decideSocialRecovery(wallet.status, socialEnrolledRef.current);
+    const decision = decideSocialRecovery(
+      wallet.status,
+      socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`),
+    );
     if (!decision.takesCredential) return;
 
     let credential: SocialRecoveryCredential;
@@ -931,7 +946,7 @@ export function CavosProvider({
             credential,
             delaySeconds: socialRecovery.delaySeconds,
           });
-          socialEnrolledRef.current = true;
+          socialEnrolledRef.current.add(`${wallet.chain}:${wallet.address}`);
           if (!cancelled) {
             setWalletStatus((status) => ({
               ...status,
@@ -1047,7 +1062,11 @@ export function CavosProvider({
         if (!cancelled) await connect(identity, { silent: true });
       } catch (error) {
         if (!cancelled) {
-          setAuthError(error instanceof Error ? error.message : 'Social recovery failed.');
+          const message = error instanceof Error ? error.message : 'Social recovery failed.';
+          // Also ends any action waiting on this authorization, rather than
+          // leaving it to time out having already been refused.
+          authorizationErrorRef.current = message;
+          setAuthError(message);
           setWalletStatus((status) => ({
             ...status,
             isDeploying: false,
@@ -1405,16 +1424,29 @@ export function CavosProvider({
     (w: CavosWallet, timeoutMs = 90_000) =>
       new Promise<void>((resolve, reject) => {
         if (w.status === 'ready') return resolve();
+        authorizationErrorRef.current = null;
         const timer = setTimeout(() => {
-          off();
+          stop();
           reject(new Error('Authorizing this device took too long. Try again.'));
         }, timeoutMs);
+        // A wallet with no recovery authority is refused in a second — waiting
+        // out the full timeout to say so is a minute and a half of nothing.
+        const poll = setInterval(() => {
+          if (!authorizationErrorRef.current) return;
+          const message = authorizationErrorRef.current;
+          stop();
+          reject(new Error(message));
+        }, 250);
         const off = w.onStatusChange(() => {
           if (w.status !== 'ready') return;
-          clearTimeout(timer);
-          off();
+          stop();
           resolve();
         });
+        function stop() {
+          clearTimeout(timer);
+          clearInterval(poll);
+          off();
+        }
       }),
     [],
   );
