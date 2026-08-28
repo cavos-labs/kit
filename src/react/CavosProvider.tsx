@@ -734,6 +734,26 @@ export function CavosProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The first execute deploys the account and flips the wallet to ready by
+  // mutating it, which re-renders nothing. Without this the provider kept
+  // reporting the wallet as undeployed after a successful send, and the effect
+  // below — which enrols recovery once a wallet is ready — never re-ran.
+  useEffect(() => {
+    if (!session) return;
+    const resync = () => {
+      const w = session.wallet(selectedChain);
+      setWalletStatus((status) => ({
+        ...status,
+        isReady: w.status === 'ready',
+        isUndeployed: w.status === 'undeployed',
+        needsDeviceApproval: w.status === 'needs-device-approval',
+        isNewAccount: w.isNewAccount,
+      }));
+    };
+    const unsubscribes = session.chains.map((c) => session.wallet(c).onStatusChange(resync));
+    return () => unsubscribes.forEach((off) => off());
+  }, [session, selectedChain]);
+
   /**
    * A fresh provider credential is available only immediately after login. Use
    * that window to enrol a ready wallet or recover this exact new device. The
@@ -946,6 +966,10 @@ export function CavosProvider({
     identity,
     socialRecovery,
     wallet,
+    // The wallet object is mutated in place when the first execute deploys it,
+    // so depending on the reference alone never re-runs this. The status is the
+    // thing that actually changed, and enrolment is what has to follow it.
+    wallet?.status,
     externalSocialToken,
   ]);
 

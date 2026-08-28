@@ -159,6 +159,36 @@ export class CavosSolana {
     return this.statusValue;
   }
 
+  /**
+   * Listeners for status changes.
+   *
+   * The status moves when the first execute deploys the account, and it moves
+   * by mutating this object — so nothing holding a reference re-renders, and an
+   * effect keyed on the wallet never re-runs. That is how recovery enrolment
+   * came to be skipped entirely: the wallet turned ready and nobody was told.
+   */
+  private readonly statusListeners = new Set<() => void>();
+
+  /** Subscribe to status changes. Returns an unsubscribe. */
+  onStatusChange(listener: () => void): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  private setStatus(next: ConnectStatus): void {
+    if (this.statusValue === next) return;
+    this.statusValue = next;
+    for (const listener of this.statusListeners) {
+      try {
+        listener();
+      } catch {
+        /* a bad listener must not break the wallet that just became usable */
+      }
+    }
+  }
+
   get publicKey(): DevicePublicKey {
     return this.devicePubkey;
   }
@@ -676,7 +706,7 @@ export class CavosSolana {
 
     // Update status to ready
     this._isDeployed = true;
-    this.statusValue = "ready";
+    this.setStatus("ready");
     this.isNewAccount = true;
 
     // Register with registry (best-effort)
