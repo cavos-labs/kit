@@ -699,11 +699,20 @@ export function CavosAuthModal({
     if (!authError) return;
     setBusy(false);
     setDeployState('loading');
-    if (screen !== 'device-approval') setScreen('select');
+    // Sign-in is the right place to land only when the error means the session
+    // is unusable. A device that failed to recover is still signed in — the
+    // wallet exists, it is simply not this device's yet — so asking for
+    // credentials again is both wrong and a dead end: doing it changes nothing.
+    // The approval flow is what actually moves that user forward.
+    if (walletStatus.needsDeviceApproval) {
+      if (screen !== 'device-approval') setScreen('device-approval');
+    } else if (screen !== 'device-approval') {
+      setScreen('select');
+    }
     setError(authError);
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
     clearAuthError();
-  }, [authError, clearAuthError, screen]);
+  }, [authError, clearAuthError, screen, walletStatus.needsDeviceApproval]);
 
   // Arm the "taking longer than usual" hint while the deploy spinner is up.
   useEffect(() => {
