@@ -8,7 +8,8 @@ export interface CavosConfigProblem {
     | "missing-app-id"
     | "missing-paymaster-key"
     | "unused-paymaster-key"
-    | "social-recovery-without-app-id";
+    | "social-recovery-without-app-id"
+  | "ambiguous-rpc-url";
   /** `error` breaks the integration; `warning` works but is probably a mistake. */
   level: "error" | "warning";
   message: string;
@@ -28,6 +29,18 @@ export function validateCavosConfig(config: CavosConfig): CavosConfigProblem[] {
       level: "error",
       message:
         "`appSalt` is required: it names this app's device-key slot on the user's device. Pick one string and never change it.",
+    });
+  }
+
+  // One node cannot serve three chains. The mismatched one does not fail
+  // usefully — it answers `starknet_call` with "Method not found" — so say so
+  // at config time instead of leaving it to a confusing runtime error.
+  if ((config.chains?.length ?? 0) > 1 && config.rpcUrl && !config.rpcUrls) {
+    problems.push({
+      code: "ambiguous-rpc-url",
+      level: "error",
+      message:
+        "`rpcUrl` applies to every chain, but this config has several. Use `rpcUrls: { solana: '…', starknet: '…' }` so each chain reaches its own node.",
     });
   }
 

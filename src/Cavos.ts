@@ -170,6 +170,13 @@ export interface ConnectOptions {
    */
   legacyDeviceApproval?: boolean;
   rpcUrl?: string;
+  /**
+   * Per-chain RPC overrides. With more than one configured chain a single
+   * `rpcUrl` cannot be right — pointing Starknet at a Solana node answers
+   * `starknet_call` with "Method not found" — so this wins over `rpcUrl` for
+   * the chain it names.
+   */
+  rpcUrls?: Partial<Record<Chain, string>>;
   /** Override the device signer factory (native / tests); default WebCrypto. */
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
 
@@ -230,6 +237,21 @@ interface StarknetConnectOptions {
 export type ConnectStatus = "undeployed" | "ready" | "needs-device-approval";
 
 /** Options for recovering an account after losing every device signer. */
+/**
+ * The RPC to use for `chain`.
+ *
+ * `rpcUrls` names the chain, so it is always safe. The older single `rpcUrl` is
+ * only unambiguous when one chain is configured; applied across a multi-chain
+ * session it sends every chain's calls to one node, and the node that is wrong
+ * answers "Method not found" rather than failing usefully.
+ */
+function rpcFor(chain: Chain, opts: ConnectOptions): string | undefined {
+  const named = opts.rpcUrls?.[chain];
+  if (named) return named;
+  const configured = opts.chains ?? (opts.chain ? [opts.chain] : []);
+  return configured.length > 1 ? undefined : opts.rpcUrl;
+}
+
 export interface RecoveryOptions {
   /** The recovery code the user stored when they ran setupRecovery. */
   code: string;
@@ -447,7 +469,7 @@ export class Cavos {
         ...(opts.environment ? { environment: opts.environment } : {}),
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
         ...(opts.registry ? { registry: opts.registry } : {}),
-        ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
+        ...(rpcFor('solana', opts) ? { rpcUrl: rpcFor('solana', opts)! } : {}),
         ...(opts.programId ? { programId: opts.programId } : {}),
         ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
@@ -493,7 +515,7 @@ export class Cavos {
       legacyDeviceApproval: opts.legacyDeviceApproval,
       paymasterApiKey: opts.paymasterApiKey,
       paymasterUrl: opts.paymasterUrl,
-      rpcUrl: opts.rpcUrl,
+      rpcUrl: rpcFor('starknet', opts),
       classHash: opts.classHash,
       createSigner: opts.createSigner,
     });

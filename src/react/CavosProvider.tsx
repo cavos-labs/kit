@@ -73,8 +73,14 @@ export interface CavosConfig {
   paymasterApiKey?: string;
   /** Override the Cavos auth backend (self-hosted / staging). */
   authBackendUrl?: string;
-  /** Override the chain RPC. */
+  /** Override the chain RPC. Unambiguous only with a single configured chain. */
   rpcUrl?: string;
+  /**
+   * Per-chain RPC overrides, e.g. `{ solana: '…', starknet: '…' }`. Required
+   * instead of `rpcUrl` once `chains` has more than one entry: one node cannot
+   * serve them all, and the mismatched one answers "Method not found".
+   */
+  rpcUrls?: Partial<Record<Chain, string>>;
   /** Explicit OAuth callback. Optional on web; required by the native provider. */
   redirectUri?: string;
   /** Passkey relying-party id. Optional on web; required by the native provider. */
@@ -616,6 +622,7 @@ export function CavosProvider({
       ...(cfg.environment ? { environment: cfg.environment } : {}),
       ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
       ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+      ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
       ...(resolveSocialRecoveryPolicy(cfg)
         ? { legacyDeviceApproval: false }
         : {}),
