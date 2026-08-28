@@ -26,6 +26,8 @@ import {
 import type { PasskeyAssertion } from "../../crypto/webauthn";
 
 const COMPRESSED_PUBKEY_SIZE = 33;
+/** 8 discriminator + 32 address_seed + 1 bump + 8 nonce + 33 initial_signer. */
+const DEVICE_ACCOUNT_HEADER = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE;
 const SIGNATURE_SIZE = 64;
 const CURRENT_IX = 0xffff;
 
@@ -434,7 +436,7 @@ export class SolanaAdapter {
   /** Read the current passkey-approval nonce. */
   async passkeyNonce(account: string): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(new PublicKey(account));
-    if (!info) return 0n;
+    if (!isDeviceAccountData(info?.data)) return 0n;
     const d = info.data;
     const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
     const signerCount = d.readUInt32LE(signersLenOff);
@@ -610,7 +612,7 @@ export class SolanaAdapter {
 
   private async fetchNonce(account: PublicKey): Promise<bigint> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return 0n;
+    if (!isDeviceAccountData(info?.data)) return 0n;
     // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce(LE) + 33 initial_signer + ...
     // nonce is right after bump, so its offset is unaffected by initial_signer.
     return readU64le(info.data, 41);
@@ -618,7 +620,7 @@ export class SolanaAdapter {
 
   private async fetchSigners(account: PublicKey): Promise<Uint8Array[]> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return [];
+    if (!isDeviceAccountData(info?.data)) return [];
     const d = info.data;
     // layout: 8 disc + 32 address_seed + 1 bump + 8 nonce + 33 initial_signer + 4 vec_len + signers
     const lenOffset = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // = 82
@@ -634,7 +636,7 @@ export class SolanaAdapter {
 
   private async fetchApprovers(account: PublicKey): Promise<Uint8Array[]> {
     const info = await this.requireConnection().getAccountInfo(account);
-    if (!info) return [];
+    if (!isDeviceAccountData(info?.data)) return [];
     const d = info.data;
     const signersLenOff = 8 + 32 + 1 + 8 + COMPRESSED_PUBKEY_SIZE; // 82
     const signerCount = d.readUInt32LE(signersLenOff);
@@ -729,6 +731,21 @@ function i64le(n: bigint | number): Buffer {
   const b = Buffer.alloc(8);
   new DataView(b.buffer, b.byteOffset, 8).setBigInt64(0, BigInt(n), true);
   return b;
+}
+
+/**
+ * Whether this is one of our device accounts, rather than any account that
+ * happens to live at the address.
+ *
+ * An address the program has not created can still exist -- funded by an
+ * airdrop or a transfer, it is a system account holding lamports and no data.
+ * The readers took the account's existence as proof of the layout and read
+ * straight past the end of it, so connect died on `Trying to access beyond
+ * buffer length` and the whole session failed to come back, for a wallet whose
+ * only sin was having been sent some SOL.
+ */
+function isDeviceAccountData(data: Buffer | undefined): data is Buffer {
+  return !!data && data.length >= DEVICE_ACCOUNT_HEADER + 4;
 }
 
 function readU64le(buf: Buffer, offset: number): bigint {
