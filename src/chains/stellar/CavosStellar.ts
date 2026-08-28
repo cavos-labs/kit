@@ -144,6 +144,16 @@ export class CavosStellar {
   private _isDeployed: boolean;
   /** Pending passkey PRF output to include in first create. */
   private _pendingPasskeyPrf: Uint8Array | null = null;
+  /**
+   * Asked for the passkey secret that wraps this account's DEK, while creating
+   * the account.
+   *
+   * The same shape as `Cavos.approverForDeploy`, and here it is not merely
+   * tidier: this secret opens the account, so it must never be written down.
+   * Deriving it from the passkey at the moment of the create is the only
+   * handling that leaves no copy behind.
+   */
+  passkeyFactorForCreate?: () => Promise<Uint8Array | null>;
   /** Pending recovery code to include in first create. */
   private _pendingRecoveryCode: string | null = null;
   /** Pre-generated control seed for first create (not persisted on-chain until execute). */
@@ -444,9 +454,10 @@ export class CavosStellar {
       deviceWraps: { [this.deviceKey.slotId()]: eciesWrapDEK(dek, this.deviceKey.publicKeySec1()) },
     };
 
-    // Add pending passkey wrap if enrolled before first create
-    if (this._pendingPasskeyPrf) {
-      envelope.passkeyWrap = wrapDEK(dek, derivePasskeyKEK(this._pendingPasskeyPrf));
+    // The passkey factor, derived now rather than carried since enrolment.
+    const passkeyPrf = this._pendingPasskeyPrf ?? (await this.passkeyFactorForCreate?.()) ?? null;
+    if (passkeyPrf) {
+      envelope.passkeyWrap = wrapDEK(dek, derivePasskeyKEK(passkeyPrf));
     }
 
     // Add pending recovery wrap if set up before first create

@@ -19,6 +19,8 @@ import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { PasskeySigner } from '../signer/PasskeySigner';
+import { recoverCandidatePublicKeys, webauthnDigest } from '../crypto/webauthn';
+import type { DevicePublicKey } from '../signer/DeviceSigner';
 import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
 import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
 import { decideSocialRecovery } from './socialRecoveryDecision';
@@ -478,6 +480,10 @@ export function CavosProvider({
   // Held in a ref so the wallets can be wired once, rather than re-subscribed
   // every time the callback identity changes.
   const authorizeDeviceRef = useRef<() => Promise<void>>(async () => {});
+  // Same reason as the one above: the wallets hold the callback, so it has to
+  // stay reachable without re-wiring them on every render.
+  const approverForDeployRef = useRef<() => Promise<DevicePublicKey | null>>(async () => null);
+  const passkeyFactorRef = useRef<() => Promise<Uint8Array | null>>(async () => null);
   /** Latest known social-enrolment answer, for the enrolment effect to consult
    *  without waiting on a re-render. */
   /**
@@ -843,6 +849,7 @@ export function CavosProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+
   // The first execute deploys the account and flips the wallet to ready by
   // mutating it, which re-renders nothing. Without this the provider kept
   // reporting the wallet as undeployed after a successful send, and the effect
@@ -865,13 +872,19 @@ export function CavosProvider({
     // from — including `wallet.execute` straight from the app, which no wrapper
     // here would ever see. This is how that refusal reaches the UI.
     for (const c of session.chains) {
-      session.wallet(c).onAuthorizationNeeded = () => authorizeDeviceRef.current();
+      const w = session.wallet(c);
+      w.onAuthorizationNeeded = () => authorizeDeviceRef.current();
+      if (w.chain === 'stellar') w.passkeyFactorForCreate = () => passkeyFactorRef.current();
+      else w.approverForDeploy = () => approverForDeployRef.current();
     }
 
     return () => {
       unsubscribes.forEach((off) => off());
       for (const c of session.chains) {
-        session.wallet(c).onAuthorizationNeeded = undefined;
+        const w = session.wallet(c);
+        w.onAuthorizationNeeded = undefined;
+        if (w.chain === 'stellar') w.passkeyFactorForCreate = undefined;
+        else w.approverForDeploy = undefined;
       }
     };
   }, [session, selectedChain]);
@@ -1446,6 +1459,57 @@ export function CavosProvider({
   );
 
   const rpName = branding.appName ?? modal?.appName ?? 'Cavos';
+
+  /**
+   * The passkey that approves this wallet, recovered rather than remembered.
+   *
+   * A passkey is enrolled once, on whichever chain the user was using; the
+   * other chains are deployed later and each needs that same approver, or a new
+   * device could never be authorized there. Keeping it in the meantime is the
+   * problem -- a note in the tab dies with a refresh, one on disk is a copy that
+   * goes stale, and one in the backend is a dependency this does not need.
+   *
+   * An assertion carries no public key, but two candidates can be recovered
+   * from its signature, and the chain that already holds the approver says
+   * which is which. So the answer is derived from a signature and a contract
+   * read, and nothing is stored anywhere.
+   */
+  const approverForDeploy = useCallback(async (): Promise<DevicePublicKey | null> => {
+    if (!session || deviceAuthorization !== 'passkey') return null;
+    // Somewhere to check the answer against. Without it a wrong candidate would
+    // be written as the approver, and only the wrong passkey could ever
+    // authorize a device on this chain.
+    const sources = await Promise.all(
+      session.chains.map(async (c) => {
+        const w = session.wallet(c);
+        if (w.chain === 'stellar' || w.status === 'undeployed') return null;
+        return (await w.hasPasskey()) ? w : null;
+      }),
+    );
+    const source = sources.find((w) => w !== null);
+    if (!source) return null;
+
+    const assertion = await new PasskeySigner({ rpName }).assert(
+      crypto.getRandomValues(new Uint8Array(32)),
+    );
+    const digest = webauthnDigest(assertion.authenticatorData, assertion.clientDataJSON);
+    for (const candidate of recoverCandidatePublicKeys(assertion.r, assertion.s, digest)) {
+      if (await source.isApprover(candidate.publicKey)) return candidate.publicKey;
+    }
+    throw new Error('kit: that passkey does not approve this wallet.');
+  }, [session, deviceAuthorization, rpName]);
+  approverForDeployRef.current = approverForDeploy;
+
+  /**
+   * Stellar's factor is the PRF secret, not a public key, so it cannot be read
+   * back off any chain -- and must not be stored anywhere. It is derived from
+   * the same passkey at the moment the account is created.
+   */
+  const passkeyFactorForCreate = useCallback(async (): Promise<Uint8Array | null> => {
+    if (deviceAuthorization !== 'passkey') return null;
+    return new PasskeyPrf({ rpName }).getSecret();
+  }, [deviceAuthorization, rpName]);
+  passkeyFactorRef.current = passkeyFactorForCreate;
 
   // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
   /**
