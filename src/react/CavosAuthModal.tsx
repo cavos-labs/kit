@@ -658,12 +658,24 @@ export function CavosAuthModal({
       setScreen('select');
       setDeployState('loading');
       setEmail(''); setOtpCode(''); setError('');
-      doneHandledRef.current = false;
-      secureHandledRef.current = false;
+      // `doneHandledRef` deliberately stays true. A host that keeps the modal
+      // mounted and open — an inline preview, say — would otherwise satisfy the
+      // completion condition again on the next render and replay "You're all
+      // set" forever. It is cleared on sign-out and when a real deploy starts.
     }, 1600);
     // addr unused beyond guarding the transition; keep the param for clarity.
     void addr;
   }, [onClose]);
+
+  // Sign-out is what makes a completed sign-up repeatable. Without this the
+  // guard above would survive into the next session and the modal would never
+  // show its done screen again.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      doneHandledRef.current = false;
+      secureHandledRef.current = false;
+    }
+  }, [isAuthenticated]);
 
   // Show the "deploying" screen whenever a deploy is in progress (e.g. while
   // returning from an OAuth redirect), or once authenticated, then flip to
