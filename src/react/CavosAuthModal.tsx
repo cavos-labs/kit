@@ -677,7 +677,11 @@ export function CavosAuthModal({
       doneHandledRef.current = false;
     }
 
-    if (isAuthenticated && address && walletStatus.isReady) {
+    // `isUndeployed` counts as finished. Under lazy deploy a new wallet stays
+    // undeployed until its first execute, so waiting for `isReady` here left the
+    // modal spinning on "Setting up your account" forever. The account is usable:
+    // it has an address, this device owns it, and it can already sign.
+    if (isAuthenticated && address && (walletStatus.isReady || walletStatus.isUndeployed)) {
       // First sign-up: offer a one-time "secure your account" step (passkey /
       // recovery phrase) before finishing — unless the app opted out via
       // secureStep: 'off'. Stay put once we've shown it.
@@ -721,7 +725,7 @@ export function CavosAuthModal({
         doneHandledRef.current = false;
       }
     }
-  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
+  }, [open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
