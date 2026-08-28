@@ -111,6 +111,8 @@ type Screen =
 // ─── Style injection ──────────────────────────────────────────────────────────
 
 const STYLE_ID = 'cavos-modal-styles-v2';
+/** Which provider this browser last signed in with, for the "Recent" hint. */
+const RECENT_PROVIDER_KEY = 'cavos-kit:recent-provider';
 
 function injectStyles() {
   if (typeof document === 'undefined') return;
@@ -475,6 +477,7 @@ export function CavosAuthModal({
   secureStep = 'optional',
 }: CavosAuthModalProps) {
   const {
+    user,
     login,
     sendMagicLink,
     sendOtp,
@@ -549,6 +552,35 @@ export function CavosAuthModal({
   const footer = footerBar(textColor);
   const close = closeBtn(textColor);
   const pBtn = providerBtn(textColor, btnRadius);
+
+  // The provider this browser signed in with last. Nearly everyone returns the
+  // same way they arrived, so surfacing it turns a choice into a confirmation.
+  // Purely a hint: it reorders nothing and hides nothing.
+  const [recentProvider, setRecentProvider] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      setRecentProvider(window.localStorage.getItem(RECENT_PROVIDER_KEY));
+    } catch {
+      // Private mode or blocked storage: no hint, everything else unaffected.
+    }
+  }, []);
+  const rememberProvider = useCallback((name: string) => {
+    try {
+      window.localStorage.setItem(RECENT_PROVIDER_KEY, name);
+    } catch {
+      /* the hint is a nicety, never a dependency */
+    }
+  }, []);
+
+  const recentTag = (name: string) =>
+    recentProvider === name ? (
+      <span
+        aria-label="Last used"
+        style={{ marginLeft: 'auto', fontSize: '11.5px', fontWeight: 500, color: subTextColor, letterSpacing: '0.01em' }}
+      >
+        Recent
+      </span>
+    ) : null;
 
   const [screen, setScreen] = useState<Screen>('select');
   const [email, setEmail] = useState('');
@@ -1191,16 +1223,38 @@ export function CavosAuthModal({
 
   if (screen === 'deploying') {
     const isDone = deployState === 'done';
+    // `provider` comes from the credential the user actually signed in with, so
+    // the confirmation names the thing they chose rather than a generic success.
+    const doneProvider = (() => {
+      switch (user?.provider) {
+        case 'google':
+          return { title: 'Connected with Google', icon: <GoogleIcon /> };
+        case 'apple':
+          return { title: 'Connected with Apple', icon: <AppleIcon /> };
+        case 'password':
+        case 'email':
+        case 'emailLink':
+          return { title: 'Connected with email', icon: null };
+        default:
+          return { title: "You're all set", icon: null };
+      }
+    })();
     return (
       <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
         <div style={card}>
           {isMobile && <div style={handle} />}
           <div style={{ padding: '52px 28px 44px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '16px' }}>
             {isDone ? (
-              <div className="cavos-check-circle" style={{ width: 64, height: 64, borderRadius: '50%', background: 'rgba(34,197,94,0.12)', border: '1.5px solid rgba(34,197,94,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'cavos-ring-glow 1.5s ease-out' }}>
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-                  <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+              // Show WHAT connected, not just that something did. A generic tick
+              // could follow any action; the provider's own mark can only mean
+              // the one the user just chose, which is what makes the
+              // confirmation read as caused by them.
+              <div className="cavos-check-circle" style={{ width: 64, height: 64, borderRadius: '50%', background: isLight ? '#fff' : 'rgba(255,255,255,0.06)', border: '1.5px solid rgba(34,197,94,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'cavos-ring-glow 1.5s ease-out' }}>
+                {doneProvider.icon ?? (
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+                    <polyline className="cavos-check-path" points="20 6 9 17 4 12" stroke="#22c55e" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
               </div>
             ) : (
               <div style={{ width: 64, height: 64, borderRadius: '50%', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)', border: `1.5px solid ${isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1209,11 +1263,11 @@ export function CavosAuthModal({
             )}
             <div>
               <h2 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>
-                {isDone ? "You're all set" : 'Setting up your account'}
+                {isDone ? doneProvider.title : 'Setting up your account'}
               </h2>
               <p style={{ margin: '6px 0 0', fontSize: '13px', color: subTextColor }}>
                 {isDone
-                  ? 'Your account is ready'
+                  ? "You're good to go"
                   : deploySlow
                     ? 'This is taking longer than usual — the network may be slow.'
                     : 'This only takes a moment…'}
@@ -1422,16 +1476,18 @@ export function CavosAuthModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {showGoogle && (
-              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => handleOAuth('google')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('google'); handleOAuth('google'); }} disabled={busy}>
                 {btnIcon(<GoogleIcon />, <Spinner size={14} color="#888" />, '#4285F4')}
                 <span>Continue with Google</span>
+                {recentTag('google')}
               </button>
             )}
 
             {showApple && (
-              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => handleOAuth('apple')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('apple'); handleOAuth('apple'); }} disabled={busy}>
                 {btnIcon(<AppleIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
                 <span>Continue with Apple</span>
+                {recentTag('apple')}
               </button>
             )}
 
