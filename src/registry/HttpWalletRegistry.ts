@@ -38,6 +38,15 @@ export class HttpWalletRegistry implements WalletRegistry {
   constructor(private readonly opts: HttpWalletRegistryOptions) {}
 
   async lookup(userId: string): Promise<RegisteredWallet | null> {
+    // The registry authenticates the end user. Calling without a login token
+    // produces `Invalid user token` 401s — and after OAuth, a silent reconnect
+    // of the previous localStorage identity can race the callback exchange and
+    // hit exactly that. Skip the fetch; resolveAddress already falls back to
+    // the address cache when lookup throws.
+    if (!this.opts.authToken()) {
+      throw new Error("registry lookup skipped: no login token");
+    }
+
     const url = new URL("/api/wallets", this.opts.baseUrl);
     url.searchParams.set("app_id", this.opts.appId);
     url.searchParams.set("user_social_id", userId);
@@ -45,7 +54,12 @@ export class HttpWalletRegistry implements WalletRegistry {
     if (this.opts.environment) url.searchParams.set("environment", this.opts.environment);
 
     const res = await fetch(url, { headers: this.headers() });
-    if (!res.ok) throw new Error(`registry lookup failed: ${res.status}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `registry lookup failed: ${res.status}${body ? ` ${body}` : ""}`,
+      );
+    }
     const data = await res.json();
     if (!data.found || !data.address) return null;
 

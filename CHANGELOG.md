@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.11
+
+### Registry lookup without a login token
+
+After OAuth, `CavosProvider` stripped `cavos_auth_code` from the URL and then
+silent-reconnected the previous localStorage identity in the same tick. That
+reconnect called `GET /api/wallets` with no Bearer token and failed with
+`Invalid user token` (401).
+
+- **`HttpWalletRegistry.lookup`** skips the fetch when there is no login token
+  (`registry lookup skipped: no login token`). HTTP errors include the response
+  body. `resolveAddress` already falls back to the address cache when lookup
+  throws.
+- **`CavosProvider`** marks the OAuth callback in flight *before* cleaning the
+  URL, so silent reconnect does not race the code exchange.
+
 ## 0.1.10
 
 ### Multi-chain sessions
