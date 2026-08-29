@@ -31,15 +31,13 @@ describe("HttpWalletRegistry", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer id-token");
   });
 
-  it("omits the header when this session has no token", async () => {
-    const fetchSpy = jest
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(jsonResponse({ found: false }));
+  it("does not fetch when this session has no login token", async () => {
+    const fetchSpy = jest.spyOn(globalThis, "fetch");
 
-    await registry(null).lookup("google:u1");
-
-    const init = fetchSpy.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+    await expect(registry(null).lookup("google:u1")).rejects.toThrow(
+      "registry lookup skipped: no login token",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("returns the winner's address on a 409 instead of throwing", async () => {
@@ -59,6 +57,8 @@ describe("HttpWalletRegistry", () => {
   it("throws on an unauthorized lookup rather than reporting no wallet", async () => {
     jest.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ error: "Invalid user token" }, 401));
 
-    await expect(registry().lookup("google:u1")).rejects.toThrow("401");
+    await expect(registry().lookup("google:u1")).rejects.toThrow(
+      /registry lookup failed: 401.*Invalid user token/,
+    );
   });
 });

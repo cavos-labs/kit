@@ -31,6 +31,10 @@ import {
 import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
 import { generateRecoveryCode } from '../recovery/BackupSigner';
 import {
+  shouldSkipSilentReconnect,
+  urlHasOAuthCallbackCode,
+} from './oauthCallback';
+import {
   SocialRecoveryClient,
   type AttestationPolicy,
   type SocialRecoveryProvider,
@@ -516,6 +520,13 @@ export function CavosProvider({
   const agreedAuthorityRef = useRef(new Map<string, AgreedRecoveryAuthority>());
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
+  /**
+   * Set before `replaceState` strips the OAuth callback code from the URL, so
+   * the silent-reconnect effect — which otherwise runs in the same tick and
+   * sees a clean URL — does not restore the previous localStorage identity
+   * without a login token.
+   */
+  const oauthCallbackInFlightRef = useRef(false);
 
   // Detect platform-passkey support once, so the modal can hide passkey options
   // on devices/browsers that can't offer them.
@@ -866,6 +877,10 @@ export function CavosProvider({
     const params = new URLSearchParams(window.location.search);
     const authData = params.get('cavos_auth_code') || params.get('auth_data') || params.get('zk_auth_data');
     if (!authData) return;
+    // Claim the callback before cleaning the URL. Silent reconnect checks this
+    // ref in the same tick and would otherwise reconnect the previous identity
+    // with no Bearer token (registry 401).
+    oauthCallbackInFlightRef.current = true;
     const cleanUrl = new URL(window.location.href);
     cleanUrl.searchParams.delete('cavos_auth_code');
     cleanUrl.searchParams.delete('auth_data');
@@ -1323,8 +1338,14 @@ export function CavosProvider({
     // it is never written to storage. Restoring here would resurrect a session
     // the host may have already ended.
     if (isExternalAuth) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("cavos_auth_code") || params.get("auth_data") || params.get("zk_auth_data")) return;
+    if (
+      shouldSkipSilentReconnect({
+        oauthCallbackInFlight: oauthCallbackInFlightRef.current,
+        urlHasAuthCode: urlHasOAuthCallbackCode(window.location.search),
+      })
+    ) {
+      return;
+    }
 
     const savedIdentity = auth.restoreIdentity();
     if (!savedIdentity) {
