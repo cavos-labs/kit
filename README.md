@@ -1,10 +1,11 @@
 # @cavos/kit
 
-Device-native, verifiable smart accounts. Users get a wallet bound to their
-identity, controlled by **silent device signers** — non-extractable secp256r1
-(P-256) keys that live on the device and sign **invisibly** (no passkey, no
-Face ID / Touch ID, no popups). OAuth / email authenticates the user; the
-**registry** names the wallet; the device key signs.
+`@cavos/kit` is an **embedded Stellar wallet SDK**, **embedded Solana wallet**,
+and **embedded Starknet wallet** for React Native and web. Device-native
+self-custodial accounts controlled by **silent device signers** — non-extractable
+secp256r1 (P-256) keys that sign invisibly (no passkey popups, no Face ID /
+Touch ID prompts). OAuth / email authenticates the user; the registry names the
+wallet; the device key signs.
 
 **Chains:** **Starknet, Solana, and Stellar** are implemented today. Starknet
 and Solana use on-chain device-signer accounts. Stellar uses a classic `G…`
