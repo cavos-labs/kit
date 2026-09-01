@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.12
+
+### Seed-lifetime hardening
+
+No public API changes.
+
+**Stellar browser (WebCrypto):** `CavosStellar` no longer keeps the raw control seed (`_controlSeed`) on the instance. The spend path imports the seed into WebCrypto as a non-extractable Ed25519 `CryptoKey` and signs via `crypto.subtle.sign`. XSS cannot call `exportKey` on the imported key. XSS can still call `sign` or `execute` while the tab is unlocked; silent spend remains unchanged.
+
+Account creation still unwraps the seed momentarily to write the `cv:ct` envelope to the ledger, then wipes the scalar. The DEK may remain in-session for passkey or recovery factor enrollment.
+
+**React Native iOS:** `unwrapControlAndSign` keeps the seed and DEK inside the native module. Only the 64-byte Ed25519 signature crosses the JS bridge. Keychain protection class is `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. No Face ID prompt.
+
+**Android:** Native `unwrapControlAndSign` is not included in this release; the existing JS-side path continues.
+
+**Scope:** Classic `G…` accounts only. No C-account (Soroban contract account). No MPC.
+
 ## 0.1.11
 
 ### Registry lookup without a login token
