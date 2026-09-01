@@ -12,6 +12,7 @@ export { NativeDeviceSigner } from "./NativeDeviceSigner";
 export type { NativeDeviceSignerOptions, MinimumKeySecurity } from "./NativeDeviceSigner";
 export { NativeDeviceUnwrapKey } from "./NativeDeviceUnwrapKey";
 export type { NativeDeviceUnwrapKeyOptions } from "./NativeDeviceUnwrapKey";
+export { NativeControlSigner } from "./NativeControlSigner";
 export { NativePasskeySigner, NativePasskeyPrf } from "./NativePasskeys";
 export type { NativePasskeyOptions } from "./NativePasskeys";
 export type { NativeSecurityLevel, NativeCapabilities } from "./NativeModule";

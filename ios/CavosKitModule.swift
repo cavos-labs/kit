@@ -75,6 +75,37 @@ public final class CavosKitModule: Module {
         }
       }
     }.runOnQueue(.main)
+
+    /// Native ed25519 signing that never exposes the seed or DEK to JavaScript.
+    ///
+    /// Performs the full unwrap → sign flow in native code:
+    /// 1. ECDH with device key to get shared secret
+    /// 2. HKDF to derive KEK from shared secret
+    /// 3. AES-GCM decrypt to unwrap DEK
+    /// 4. AES-GCM decrypt to open control seed
+    /// 5. Ed25519 sign with control seed
+    /// 6. Return ONLY { signature, publicKey } — seed is wiped, never crosses bridge
+    ///
+    /// This is the secure spend path for React Native: no biometric prompt (silent),
+    /// but the private key material stays in the native process.
+    AsyncFunction("unwrapControlAndSign") { (alias: String, deviceWrap: String, ciphertext: String, data: String) in
+      try KeyStore.shared.unwrapControlAndSign(
+        alias: alias,
+        deviceWrap: Data(base64Encoded: deviceWrap)!,
+        ciphertext: Data(base64Encoded: ciphertext)!,
+        data: Data(base64Encoded: data)!
+      )
+    }
+
+    /// Get the ed25519 public key for a control seed wrapped to this device.
+    /// Returns the public key without exposing the seed to JavaScript.
+    AsyncFunction("unwrapControlPublicKey") { (alias: String, deviceWrap: String, ciphertext: String) in
+      try KeyStore.shared.unwrapControlPublicKey(
+        alias: alias,
+        deviceWrap: Data(base64Encoded: deviceWrap)!,
+        ciphertext: Data(base64Encoded: ciphertext)!
+      )
+    }
   }
 
   fileprivate static func digest(_ value: String) -> String {
@@ -127,6 +158,138 @@ final class KeyStore {
       throw CavosNativeError("ECDH failed")
     }
     return secret as Data
+  }
+
+  /// Native ed25519 signing — the seed never leaves this function.
+  ///
+  /// `deviceWrap`: ephPubCompressed(33) || nonce(12) || AES-GCM(kek, dek)
+  /// `ciphertext`: nonce(12) || AES-GCM(dek, controlSeed)
+  /// `data`: the payload to sign (typically a transaction hash)
+  ///
+  /// Returns { "signature": base64, "publicKey": base64 }
+  func unwrapControlAndSign(alias: String, deviceWrap: Data, ciphertext: Data, data: Data) throws -> [String: String] {
+    // 1. Extract ephemeral public key and wrapped DEK from device wrap
+    guard deviceWrap.count > 33 + 12 + 16 else {
+      throw CavosNativeError("Device wrap too short")
+    }
+    let ephPubCompressed = deviceWrap.prefix(33)
+    let wrappedDEK = deviceWrap.dropFirst(33)
+
+    // 2. ECDH to get shared secret X
+    let sharedX = try ecdhSharedX(alias: alias, ephPubCompressed: ephPubCompressed)
+
+    // 3. Derive KEK using HKDF
+    let kek = try eciesKEK(sharedX: sharedX, ephPubCompressed: ephPubCompressed)
+
+    // 4. Unwrap DEK (AES-GCM decrypt)
+    let dek = try aesGcmDecrypt(ciphertext: wrappedDEK, key: kek)
+
+    // 5. Open control seed from ciphertext
+    var controlSeed = try aesGcmDecrypt(ciphertext: ciphertext, key: dek)
+    defer {
+      // Wipe the seed from memory as soon as we're done
+      controlSeed.resetBytes(in: controlSeed.startIndex..<controlSeed.endIndex)
+    }
+
+    guard controlSeed.count == 32 else {
+      throw CavosNativeError("Invalid control seed length")
+    }
+
+    // 6. Sign with ed25519
+    let signingKey = try Curve25519.Signing.PrivateKey(rawRepresentation: controlSeed)
+    let signature = try signingKey.signature(for: data)
+    let publicKey = signingKey.publicKey.rawRepresentation
+
+    return [
+      "signature": Data(signature).base64EncodedString(),
+      "publicKey": publicKey.base64EncodedString(),
+    ]
+  }
+
+  /// Get ed25519 public key without exposing seed to JS.
+  func unwrapControlPublicKey(alias: String, deviceWrap: Data, ciphertext: Data) throws -> [String: String] {
+    guard deviceWrap.count > 33 + 12 + 16 else {
+      throw CavosNativeError("Device wrap too short")
+    }
+    let ephPubCompressed = deviceWrap.prefix(33)
+    let wrappedDEK = deviceWrap.dropFirst(33)
+
+    let sharedX = try ecdhSharedX(alias: alias, ephPubCompressed: ephPubCompressed)
+    let kek = try eciesKEK(sharedX: sharedX, ephPubCompressed: ephPubCompressed)
+    let dek = try aesGcmDecrypt(ciphertext: wrappedDEK, key: kek)
+
+    var controlSeed = try aesGcmDecrypt(ciphertext: ciphertext, key: dek)
+    defer {
+      controlSeed.resetBytes(in: controlSeed.startIndex..<controlSeed.endIndex)
+    }
+
+    guard controlSeed.count == 32 else {
+      throw CavosNativeError("Invalid control seed length")
+    }
+
+    let signingKey = try Curve25519.Signing.PrivateKey(rawRepresentation: controlSeed)
+    return ["publicKey": signingKey.publicKey.rawRepresentation.base64EncodedString()]
+  }
+
+  /// ECDH with the device's P-256 key, returning only the X coordinate (32 bytes).
+  private func ecdhSharedX(alias: String, ephPubCompressed: Data) throws -> Data {
+    // Decompress the P-256 point for Security framework
+    let uncompressed = try decompressP256(ephPubCompressed)
+    let sharedPoint = try sharedSecret(alias: alias, peer: uncompressed)
+    // sharedPoint is the full point; we need just the X coordinate (32 bytes)
+    return sharedPoint.prefix(32)
+  }
+
+  /// Derive ECIES KEK: HKDF-SHA256(sharedX, salt=ephPubCompressed, info="cavos-stellar-dek-ecies", len=32)
+  private func eciesKEK(sharedX: Data, ephPubCompressed: Data) throws -> Data {
+    let info = Data("cavos-stellar-dek-ecies".utf8)
+    let key = SymmetricKey(data: sharedX)
+    let derived = HKDF<SHA256>.deriveKey(
+      inputKeyMaterial: key,
+      salt: ephPubCompressed,
+      info: info,
+      outputByteCount: 32
+    )
+    return derived.withUnsafeBytes { Data($0) }
+  }
+
+  /// AES-256-GCM decrypt. Input: nonce(12) || ciphertext || tag(16)
+  private func aesGcmDecrypt(ciphertext: Data, key: Data) throws -> Data {
+    guard ciphertext.count > 12 + 16 else {
+      throw CavosNativeError("Ciphertext too short for AES-GCM")
+    }
+    let nonce = ciphertext.prefix(12)
+    let sealed = ciphertext.dropFirst(12)
+
+    let aesKey = SymmetricKey(data: key)
+    let sealedBox = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), ciphertext: sealed.dropLast(16), tag: sealed.suffix(16))
+    return try AES.GCM.open(sealedBox, using: aesKey)
+  }
+
+  /// Decompress a SEC1 compressed P-256 point (33 bytes) to uncompressed (65 bytes).
+  /// The Security framework requires uncompressed format for ECDH.
+  private func decompressP256(_ compressed: Data) throws -> Data {
+    guard compressed.count == 33 else {
+      throw CavosNativeError("Invalid compressed point length")
+    }
+    let prefix = compressed[compressed.startIndex]
+    guard prefix == 0x02 || prefix == 0x03 else {
+      throw CavosNativeError("Invalid compression prefix")
+    }
+    let x = compressed.dropFirst()
+
+    // P-256 field prime: p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+    // y^2 = x^3 - 3x + b  (mod p)
+    // b = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+
+    // Use CryptoKit to decompress by creating a P256 public key
+    // CryptoKit accepts compressed format directly
+    do {
+      let p256Key = try P256.KeyAgreement.PublicKey(compressedRepresentation: compressed)
+      return p256Key.x963Representation
+    } catch {
+      throw CavosNativeError("Failed to decompress P-256 point: \(error)")
+    }
   }
 
   func delete(alias: String) {
