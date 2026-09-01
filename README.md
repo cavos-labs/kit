@@ -384,16 +384,25 @@ signer.
 with the Cavos program instruction. The fee payer is not bound by the device
 signature, so the relayer co-signs without re-authorizing the action.
 
-**Stellar:** The daily signing key is a random Ed25519 control key recovered
-from an encrypted account envelope. The device's non-extractable P-256 key is
-used for ECIES unwrapping, not as the Stellar transaction signature. The control
-key signs the actual Stellar transaction.
+**Stellar:** The control key is an Ed25519 keypair recovered from an encrypted
+account envelope. The device's P-256 key is used for ECIES unwrapping, not as
+the Stellar transaction signature. The control key signs the actual Stellar
+transaction. Protection varies by runtime:
 
-**Security model:** The private key is non-extractable (never visible to JS) and
-device-bound — non-custodial, no MPC, verified on-chain. Because signing is
-silent there is no per-signature user-verification gate (unlike a biometric
-passkey); this is the standard embedded-wallet trade-off. Multi-device + the
-non-custodial recovery relay cover device loss.
+- **Browser (WebCrypto):** The control seed is imported as a non-extractable
+  `CryptoKey`. XSS cannot call `exportKey` on it. XSS can still call `sign` or
+  `execute` while the tab is unlocked.
+- **React Native iOS:** `unwrapControlAndSign` keeps the seed inside the native
+  module. Only the signature crosses the JS bridge.
+- **Node / custom `LocalDeviceUnwrapKey`:** The caller handles the raw scalar;
+  no WebCrypto isolation.
+
+**Security model:** Starknet and Solana device keys are non-extractable P-256
+keys in WebCrypto (browser) or Secure Enclave/Keystore (mobile). Stellar browser
+uses a non-extractable Ed25519 `CryptoKey`; React Native iOS keeps the seed
+native-side; Node callers handle scalars directly. Signing is silent — no
+per-signature user-verification gate (unlike a biometric passkey). Multi-device
+and the non-custodial recovery relay cover device loss.
 
 ## Hardware-isolated social recovery
 
