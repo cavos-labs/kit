@@ -102,7 +102,7 @@ export class WebCryptoControlKey implements ControlKey {
     const pkcs8 = wrapEd25519SeedAsPkcs8(seed);
     const privateKey = await crypto.subtle.importKey(
       "pkcs8",
-      pkcs8,
+      toBufferSource(pkcs8),
       { name: "Ed25519" },
       false,
       ["sign"],
@@ -137,7 +137,7 @@ export class WebCryptoControlKey implements ControlKey {
     const sig = await crypto.subtle.sign(
       { name: "Ed25519" },
       this.privateKey,
-      data,
+      toBufferSource(data),
     );
     return new Uint8Array(sig);
   }
@@ -222,6 +222,16 @@ function wrapEd25519SeedAsPkcs8(seed: Uint8Array): Uint8Array {
 /** Derive the 32-byte Ed25519 public key from a 32-byte seed using noble. */
 function deriveEd25519PublicKey(seed: Uint8Array): Uint8Array {
   return ed25519.getPublicKey(seed);
+}
+
+/**
+ * Ensure a Uint8Array is backed by a plain ArrayBuffer for WebCrypto APIs.
+ * TypeScript's strict BufferSource typing rejects Uint8Array<ArrayBufferLike>
+ * (which may be SharedArrayBuffer). Copying creates a fresh ArrayBuffer-backed
+ * view that satisfies the BufferSource constraint.
+ */
+function toBufferSource(data: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(data).buffer;
 }
 
 /**
