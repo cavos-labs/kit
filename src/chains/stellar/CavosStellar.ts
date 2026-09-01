@@ -5,10 +5,7 @@ import {
   type ControlRotation,
   type DataEntryWrites,
 } from "./StellarAdapter";
-import {
-  controlKeypairFromSeed,
-  generateControlKey,
-} from "./keys";
+import { generateControlKey } from "./keys";
 import {
   generateDEK,
   sealControlSeed,
@@ -156,8 +153,6 @@ export class CavosStellar {
   passkeyFactorForCreate?: () => Promise<Uint8Array | null>;
   /** Pending recovery code to include in first create. */
   private _pendingRecoveryCode: string | null = null;
-  /** Pre-generated control seed for first create (not persisted on-chain until execute). */
-  private _controlSeed: Uint8Array | null = null;
   /** Starting balance for account creation. */
   private readonly startingBalance: bigint;
   /** Source keypair for self-funded creation. */
@@ -180,14 +175,12 @@ export class CavosStellar {
       environment?: "development" | "production";
       startingBalance: bigint;
       sourceKeypair?: Keypair;
-      controlSeed?: Uint8Array;
     },
   ) {
     this.statusValue = status;
     this._isDeployed = status !== "undeployed";
     this.startingBalance = opts.startingBalance;
     this.sourceKeypair = opts.sourceKeypair;
-    this._controlSeed = opts.controlSeed ?? null;
   }
 
   get status(): StellarConnectStatus {
@@ -253,7 +246,7 @@ export class CavosStellar {
 
     const build = (
       status: StellarConnectStatus,
-      unlocked?: Unlocked & { controlSeed?: Uint8Array },
+      unlocked?: Unlocked,
     ): CavosStellar =>
       new CavosStellar(
         identity,
@@ -265,7 +258,7 @@ export class CavosStellar {
         unlocked?.control,
         unlocked?.dek,
         relayer,
-        { ...buildOpts, controlSeed: unlocked?.controlSeed },
+        buildOpts,
       );
 
     // LAZY DEPLOY: Check if account exists but DO NOT create here.
@@ -430,6 +423,11 @@ export class CavosStellar {
    * Create the Stellar account on-chain. Returns the control key and DEK.
    * Uses the pre-generated control key from connect() if available, otherwise
    * generates a new one.
+   *
+   * The control seed is loaded from pendingControl at the moment of creation,
+   * used only to write the encrypted cv:ct entry, then wiped immediately. The
+   * signing is done via the non-extractable WebCryptoControlKey, so the seed
+   * never sits in memory on the hot spend path.
    */
   private async _createAccount(): Promise<Unlocked> {
     if (!this.relayer && !this.sourceKeypair) {
@@ -438,15 +436,23 @@ export class CavosStellar {
 
     // The control key IS the account, so it must be the exact one generated at
     // connect — a fresh key here would create a DIFFERENT account.
-    if (!this._controlSeed || !this.control || !this.dek) {
+    if (!this.control || !this.dek) {
       throw new Error(
         "kit/stellar: the control key for this address is not held by this device — approve this device first",
       );
     }
-    const controlSeed = this._controlSeed;
-    const controlAddress = this.control.publicAddress();
+
+    // Load the seed from pendingControl — it was saved at connect() time
+    const controlSeed = await loadPendingControl(this.address, this.deviceKey);
+    if (!controlSeed) {
+      throw new Error(
+        "kit/stellar: the control seed for this address is not available — the account may have already been created or the seed was lost",
+      );
+    }
+
+    const control = this.control;
+    const controlAddress = control.publicAddress();
     const dek = this.dek;
-    const controlKeypair = controlKeypairFromSeed(controlSeed);
 
     // Build envelope with device wrap and any pending factors
     const envelope: AccountEnvelope = {
@@ -464,6 +470,10 @@ export class CavosStellar {
     if (this._pendingRecoveryCode) {
       envelope.recoveryWrap = wrapDEK(dek, deriveRecoveryKEK(this._pendingRecoveryCode));
     }
+
+    // Wipe the control seed now — it was only needed for sealControlSeed.
+    // All signing from here uses the non-extractable WebCryptoControlKey.
+    wipeSeed(controlSeed);
 
     // The account can already exist without ever having been ours to create:
     // funding a testnet address with friendbot creates it, and the demo tells
@@ -484,7 +494,7 @@ export class CavosStellar {
           account: this.address,
           entries: toDataEntries(envelope),
         });
-        tx.sign(controlKeypair);
+        await signTransactionWithControlKey(tx, control);
         await this.relayer.submit("sponsored-data", tx.toXDR());
       } else {
         const tx = await this.adapter.buildSponsoredCreateTx({
@@ -492,7 +502,7 @@ export class CavosStellar {
           controlAddress,
           envelope,
         });
-        tx.sign(controlKeypair);
+        await signTransactionWithControlKey(tx, control);
         await this.relayer.submit("create", tx.toXDR());
       }
     } else {
@@ -502,7 +512,7 @@ export class CavosStellar {
           account: this.address,
           entries: toDataEntries(envelope),
         });
-        tx.sign(controlKeypair);
+        await signTransactionWithControlKey(tx, control);
         await this.adapter.submit(tx);
       } else {
         const tx = await this.adapter.buildCreateTx({
@@ -511,25 +521,14 @@ export class CavosStellar {
           envelope,
           startingBalance: this.startingBalance,
         });
-        tx.sign(controlKeypair, funder);
+        await signTransactionWithControlKey(tx, control);
+        tx.sign(funder);
         await this.adapter.submit(tx);
       }
     }
 
-    // If we didn't have a pre-generated control key, import now
-    let control = this.control;
-    if (!control) {
-      control = await WebCryptoControlKey.importFromSeed(controlSeed, {
-        keyId: this.address,
-      });
-    }
-
     // The envelope is on-chain now; the local claim copy has done its job.
     await clearPendingControl(this.address);
-
-    // Wipe the control seed from memory
-    wipeSeed(controlSeed);
-    this._controlSeed = null;
 
     // Update status to ready
     this._isDeployed = true;
@@ -1210,12 +1209,17 @@ function newControlKey(): { address: string; seed: Uint8Array } {
  * on-chain yet, so this device can sign messages before the first execute. The
  * seed is imported as a non-extractable WebCrypto key; the on-chain envelope is
  * written when the account is created.
+ *
+ * NOTE: The seed is NOT returned to the caller. It is saved in pendingControl
+ * at connect() time and loaded only at _createAccount() time for the one-time
+ * cv:ct write, then immediately wiped. This ensures the seed never sits on the
+ * CavosStellar instance where XSS could copy it.
  */
 async function persistControlKey(
   address: string,
   fresh: { seed: Uint8Array },
-): Promise<Unlocked & { controlSeed: Uint8Array }> {
+): Promise<Unlocked> {
   const cached = await WebCryptoControlKey.load({ keyId: address });
   const control = cached ?? (await WebCryptoControlKey.importFromSeed(fresh.seed, { keyId: address }));
-  return { control, dek: generateDEK(), controlSeed: fresh.seed };
+  return { control, dek: generateDEK() };
 }
