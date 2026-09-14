@@ -23,6 +23,12 @@ describe("asking at login", () => {
     expect(asksAtLogin({ approval: "enclave", socialCredential: true })).toBe(false);
   });
 
+  it("asks on classic Stellar even when the app runs the enclave", () => {
+    expect(
+      asksAtLogin({ approval: "enclave", socialCredential: true, chain: "stellar" }),
+    ).toBe(true);
+  });
+
   it("does not ask when the enclave is waiting on a fresh sign-in", () => {
     expect(asksAtLogin({ approval: "enclave", socialCredential: false })).toBe(false);
   });
@@ -46,6 +52,12 @@ describe("which recovery machinery runs", () => {
 
   it("runs it for an app on the enclave", () => {
     expect(enclaveRuns({ approval: "enclave", socialCredential: true })).toBe(true);
+  });
+
+  it("does not run it on classic Stellar", () => {
+    expect(
+      enclaveRuns({ approval: "enclave", socialCredential: true, chain: "stellar" }),
+    ).toBe(false);
   });
 
   it("still runs it when the login proof is missing, so it can ask for one", () => {

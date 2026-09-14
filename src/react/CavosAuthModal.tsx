@@ -802,28 +802,17 @@ export function CavosAuthModal({
       screen !== 'device-approval' &&
       screen !== 'passkey-approval'
     ) {
-      // Passkey first when one is available: it approves this device now, where
-      // the enclave path waits out an on-chain timelock and costs a sponsored
-      // transaction. Social recovery stays the route that always works — a
-      // passkey enrolled on a phone is no use from a browser that cannot reach
-      // it — so a passkey that fails to produce an assertion falls back here,
-      // and a recovery already in flight is never interrupted.
-        // Only when an authorization was actually asked for. A device that is
-      // merely not a signer yet does not interrupt signing in — it is resolved
-      // when something needs it, the same way a wallet is not deployed until it
-      // is used.
-      // One decision, made by the provider before anything ran, instead of this
-      // screen guessing from flags that three racing processes were setting.
-      // The modal no longer runs the authorization — the provider performs it
-      // where the action happened, because most routes need no screen at all:
-      // the enclave runs on its own and an approval email is a request, not a
-      // dialog. This only reflects what is already under way.
-      if (!authorizingDevice && !walletStatus.isSocialRecovering && !walletStatus.awaitingApproval) {
-        // Nothing asked for this. Leave the screen alone.
-      } else if (walletStatus.isSocialRecovering) {
+      // Classic Stellar (and passkey apps) authorize this device with a
+      // passkey. Show that screen as soon as connect finishes — staying on
+      // "Connecting with Google" is how iOS looked hung. The tap on the button
+      // is the WebAuthn gesture; Safari ignores credentials.get() from here.
+      if (walletStatus.isSocialRecovering) {
         setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (deviceAuthorization === 'passkey') {
+        // The button is the gesture. Calling WebAuthn from this effect hung
+        // Safari on iOS on "Connecting with Google" — credentials.get() without
+        // a tap is ignored, and this screen never moved.
         setScreen('passkey-approval');
         doneHandledRef.current = false;
       } else if (deviceAuthorization === 'enclave-needs-login') {

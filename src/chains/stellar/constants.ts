@@ -28,5 +28,11 @@ export const SOROBAN_RPC_URL = {
   "stellar-mainnet": "https://mainnet.sorobanrpc.com",
 } as const;
 
+/** Relayer create still requires a `cv:` data entry. This is a version tag, not a secret. */
+export const STELLAR_MODEL_DATA_KEY = "cv:v";
+export const STELLAR_PASSKEY_DATA_KEY = "cv:pk";
+/** Public G address of the enclave-sealed social-recovery signer. */
+export const STELLAR_SOCIAL_DATA_KEY = "cv:sr";
+
 /** Native XLM has 7 decimals (stroops). */
 export const XLM_DECIMALS = 7;

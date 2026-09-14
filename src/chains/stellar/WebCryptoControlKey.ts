@@ -83,6 +83,11 @@ export class WebCryptoControlKey implements ControlKey {
     return new WebCryptoControlKey(pair.privateKey, publicRaw, opts?.keyId);
   }
 
+  async persist(keyId: string): Promise<void> {
+    if (!hasIndexedDB()) return;
+    await idbPut(keyId, { privateKey: this.privateKey, publicRaw: this.publicRaw });
+  }
+
   /**
    * Import a control key from a raw 32-byte Ed25519 seed. The seed is imported
    * with `extractable: false`, so after this call the caller should wipe the

@@ -5,36 +5,15 @@ import {
   type ControlRotation,
   type DataEntryWrites,
 } from "./StellarAdapter";
-import { generateControlKey } from "./keys";
-import {
-  generateDEK,
-  sealControlSeed,
-  openControlSeed,
-  wrapDEK,
-  eciesWrapDEK,
-  deriveRecoveryKEK,
-  derivePasskeyKEK,
-  unwrapDEK,
-} from "./envelope";
-import {
-  fromDataEntries,
-  toDataEntries,
-  deviceWrapEntries,
-  PASSKEY_BASE,
-  RECOVERY_BASE,
-  type AccountEnvelope,
-} from "./datamap";
-import { chunkTo64 } from "./envelope";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
 import { resolveAddress } from "../../registry/resolveAddress";
-import {
-  savePendingControl,
-  loadPendingControl,
-  clearPendingControl,
-} from "./pendingControl";
 import type { DeviceUnwrapKey } from "./DeviceUnwrapKey";
 import { StellarRelayer } from "./StellarRelayer";
-import type { StellarNetwork } from "./constants";
+import {
+  STELLAR_MODEL_DATA_KEY,
+  STELLAR_PASSKEY_DATA_KEY,
+  type StellarNetwork,
+} from "./constants";
 import type { Transaction } from "@stellar/stellar-sdk";
 import { utf8ToBytes } from "../../crypto/encoding";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
@@ -49,6 +28,7 @@ import {
   signTransactionWithControlKey,
   createSorobanSigner,
 } from "./WebCryptoControlKey";
+import { importPasskeySigner, importRecoverySigner } from "./derivedSigner";
 
 /** Default starting balance (stroops) for a new account: covers the 1 XLM base
  *  reserve + ~0.5 XLM per subentry (data entries + control signer) with headroom
@@ -100,10 +80,9 @@ export interface ConnectStellarOptions {
  */
 export type StellarConnectStatus = "undeployed" | "ready" | "needs-device-approval";
 
-/** The DEK + control key recovered by opening any single unlock factor. */
+/** The local ed25519 signer recovered on this device. */
 interface Unlocked {
   control: ControlKey;
-  dek: Uint8Array;
 }
 
 /**
@@ -164,9 +143,9 @@ export class CavosStellar {
     status: StellarConnectStatus,
     readonly network: StellarNetwork,
     private readonly adapter: StellarAdapter,
-    private readonly deviceKey: DeviceUnwrapKey,
+    _deviceKey: DeviceUnwrapKey,
     private control: ControlKey | undefined,
-    private dek: Uint8Array | undefined,
+    _dek: Uint8Array | undefined,
     private readonly relayer: StellarRelayer | undefined,
     opts: {
       appId?: string;
@@ -228,21 +207,15 @@ export class CavosStellar {
         })
       : null;
 
-    type ControlSeed = { address: string; seed: Uint8Array };
-    let generated: ControlSeed | null = null;
+    type FreshKey = { address: string; control: WebCryptoControlKey };
+    const candidate = await WebCryptoControlKey.create();
+    const generated: FreshKey = { address: candidate.publicAddress(), control: candidate };
     const { address, existing } = await resolveAddress({
       key: { userId: identity.userId, appId: opts.appId ?? "local", chain: "stellar", network: opts.network },
       registry,
-      // Stellar has no secp256r1 signer in its address; the registry only needs
-      // an initial signer for the chains that record device keys.
       initialSigner: { x: 0n, y: 0n },
-      compute: () => {
-        generated = newControlKey();
-        return generated.address;
-      },
+      compute: () => generated.address,
     });
-    // TS cannot see that `compute` ran, so re-read it through its own type.
-    const fresh = generated as ControlSeed | null;
 
     const build = (
       status: StellarConnectStatus,
@@ -256,7 +229,7 @@ export class CavosStellar {
         adapter,
         opts.deviceKey,
         unlocked?.control,
-        unlocked?.dek,
+        undefined,
         relayer,
         buildOpts,
       );
@@ -264,32 +237,19 @@ export class CavosStellar {
     // LAZY DEPLOY: Check if account exists but DO NOT create here.
     // Account creation happens on first execute() call.
     if (await adapter.isDeployed(address)) {
-      // Returning user: first try to load the non-extractable control key from
-      // IndexedDB (no unwrap needed). If not found, unwrap from on-chain envelope,
-      // import into WebCrypto (non-extractable), and wipe the seed from JS memory.
-      const unlocked = await unlockViaDevice(adapter, address, opts.deviceKey);
+      const unlocked = await unlockViaDevice(address);
       return build(unlocked ? "ready" : "needs-device-approval", unlocked ?? undefined);
     }
 
-    // The address was already the user's, so the key this device may have just
-    // generated lost the race and is worthless under someone else's address.
     if (existing) {
-      if (fresh) wipeSeed(fresh.seed);
-      // But THIS device may be the one that claimed it a moment ago and simply
-      // has not created the account yet — a reload, a remount, a second connect.
-      // Its seed is still here, so it is the owner, not a stranger.
-      const pending = await loadPendingControl(address, opts.deviceKey);
+      const pending = await WebCryptoControlKey.load({ keyId: address });
       if (!pending) return build("needs-device-approval");
-      return build("undeployed", await persistControlKey(address, { seed: pending }));
+      return build("undeployed", { control: pending });
     }
 
-    // This device named the address. Persist its control key now so off-chain
-    // signing (signMessage, signXdr) works before the first execute, and keep
-    // the sealed seed until creation writes the envelope on-chain.
-    await savePendingControl(address, fresh!.seed, opts.deviceKey);
-    const unlocked = await persistControlKey(address, fresh!);
-    const wallet = build("undeployed", unlocked);
-    wallet.isNewAccount = false; // Will be set to true after first deploy
+    await generated.control.persist(address);
+    const wallet = build("undeployed", { control: generated.control });
+    wallet.isNewAccount = false;
     return wallet;
   }
 
@@ -349,8 +309,8 @@ export class CavosStellar {
       return this._pendingPasskeyPrf !== null;
     }
     try {
-      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
-      return !!env.passkeyWrap;
+      const entries = await this.adapter.loadDataEntries(this.address);
+      return STELLAR_PASSKEY_DATA_KEY in entries;
     } catch {
       return false;
     }
@@ -434,91 +394,66 @@ export class CavosStellar {
       throw new Error("kit/stellar: a relayer (appId) or sourceKeypair is required to create the account");
     }
 
-    // The control key IS the account, so it must be the exact one generated at
-    // connect — a fresh key here would create a DIFFERENT account.
-    if (!this.control || !this.dek) {
+    if (!this.control) {
       throw new Error(
         "kit/stellar: the control key for this address is not held by this device — approve this device first",
       );
     }
 
-    // Load the seed from pendingControl — it was saved at connect() time
-    const controlSeed = await loadPendingControl(this.address, this.deviceKey);
-    if (!controlSeed) {
-      throw new Error(
-        "kit/stellar: the control seed for this address is not available — the account may have already been created or the seed was lost",
-      );
-    }
-
     const control = this.control;
     const controlAddress = control.publicAddress();
-    const dek = this.dek;
+    const extraSigners: string[] = [];
+    let passkeyEntry: Uint8Array | undefined;
 
-    // Build envelope with device wrap and any pending factors
-    const envelope: AccountEnvelope = {
-      ct: sealControlSeed(controlSeed, dek),
-      deviceWraps: { [this.deviceKey.slotId()]: eciesWrapDEK(dek, this.deviceKey.publicKeySec1()) },
-    };
-
-    // The passkey factor, derived now rather than carried since enrolment.
     const passkeyPrf = this._pendingPasskeyPrf ?? (await this.passkeyFactorForCreate?.()) ?? null;
     if (passkeyPrf) {
-      envelope.passkeyWrap = wrapDEK(dek, derivePasskeyKEK(passkeyPrf));
+      const passkey = await importPasskeySigner(passkeyPrf);
+      extraSigners.push(passkey.publicAddress());
+      passkeyEntry = utf8ToBytes(passkey.publicAddress());
     }
 
-    // Add pending recovery wrap if set up before first create
     if (this._pendingRecoveryCode) {
-      envelope.recoveryWrap = wrapDEK(dek, deriveRecoveryKEK(this._pendingRecoveryCode));
+      const recovery = await importRecoverySigner(this._pendingRecoveryCode);
+      extraSigners.push(recovery.publicAddress());
     }
 
-    // Wipe the control seed now — it was only needed for sealControlSeed.
-    // All signing from here uses the non-extractable WebCryptoControlKey.
-    wipeSeed(controlSeed);
-
-    // The account can already exist without ever having been ours to create:
-    // funding a testnet address with friendbot creates it, and the demo tells
-    // people to do exactly that before their first send. Creating it again is
-    // `op_already_exists` and takes the whole transaction down with it.
-    //
-    // What still has to happen either way is the envelope. Without those `cv:`
-    // entries the control key exists only on this device, and no other device —
-    // and no recovery — can ever reach the wallet again.
     const alreadyExists = await this.adapter.isDeployed(this.address);
 
     if (this.relayer) {
-      // Gasless + sponsored: the relayer is source + fee payer + reserve sponsor.
       const relayerSource = await this.relayer.getSource();
       if (alreadyExists) {
-        const tx = await this.adapter.buildSponsoredDataTx({
-          relayer: relayerSource,
-          account: this.address,
-          entries: toDataEntries(envelope),
-        });
-        await signTransactionWithControlKey(tx, control);
-        await this.relayer.submit("sponsored-data", tx.toXDR());
+        const entries: DataEntryWrites = { [STELLAR_MODEL_DATA_KEY]: utf8ToBytes("1") };
+        if (passkeyEntry) entries[STELLAR_PASSKEY_DATA_KEY] = passkeyEntry;
+        const rotation = extraSigners[0] ? { newControl: extraSigners[0] } : undefined;
+        await this.submitDataWrite(entries, control, undefined, rotation);
+        for (const signer of extraSigners.slice(1)) {
+          await this.submitDataWrite({}, control, undefined, { newControl: signer });
+        }
       } else {
         const tx = await this.adapter.buildSponsoredCreateTx({
           relayer: relayerSource,
           controlAddress,
-          envelope,
+          extraSigners,
         });
         await signTransactionWithControlKey(tx, control);
         await this.relayer.submit("create", tx.toXDR());
+        const afterCreate: DataEntryWrites = {};
+        if (passkeyEntry) afterCreate[STELLAR_PASSKEY_DATA_KEY] = passkeyEntry;
+        if (Object.keys(afterCreate).length > 0) {
+          await this.submitDataWrite(afterCreate, control);
+        }
       }
     } else {
       const funder = this.sourceKeypair!;
       if (alreadyExists) {
-        const tx = await this.adapter.buildDataTx({
-          account: this.address,
-          entries: toDataEntries(envelope),
-        });
-        await signTransactionWithControlKey(tx, control);
-        await this.adapter.submit(tx);
+        const entries: DataEntryWrites = { [STELLAR_MODEL_DATA_KEY]: utf8ToBytes("1") };
+        if (passkeyEntry) entries[STELLAR_PASSKEY_DATA_KEY] = passkeyEntry;
+        await this.submitDataWrite(entries, control, { sponsored: false }, extraSigners[0] ? { newControl: extraSigners[0] } : undefined);
       } else {
         const tx = await this.adapter.buildCreateTx({
           funder: funder.publicKey(),
           controlAddress,
-          envelope,
+          extraSigners,
           startingBalance: this.startingBalance,
         });
         await signTransactionWithControlKey(tx, control);
@@ -527,23 +462,14 @@ export class CavosStellar {
       }
     }
 
-    // The envelope is on-chain now; the local claim copy has done its job.
-    await clearPendingControl(this.address);
-
-    // Update status to ready
     this._isDeployed = true;
     this.setStatus("ready");
     this.isNewAccount = true;
-
-    // Store the control key and DEK on this instance
     this.control = control;
-    this.dek = dek;
-
-    // Clear pending factors
     this._pendingPasskeyPrf = null;
     this._pendingRecoveryCode = null;
 
-    return { control, dek };
+    return { control };
   }
 
   /**
@@ -688,11 +614,6 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
-    // An account that does not exist yet is created here, with the wrap in its
-    // envelope, rather than the secret being held until something else creates
-    // it. Holding it was the bug -- a refresh wiped it and the account was
-    // created without the passkey, silently -- and there is nothing to defer
-    // for: creating a classic account is sponsored and costs the user nothing.
     if (this.statusValue === "undeployed") {
       this._pendingPasskeyPrf = prfOutput;
       await this._createAccount();
@@ -700,9 +621,14 @@ export class CavosStellar {
       return this.address;
     }
 
-    const { control, dek } = this.requireUnlocked();
-    const wrap = wrapDEK(dek, derivePasskeyKEK(prfOutput));
-    return this.writeFactor(PASSKEY_BASE, wrap, control);
+    const passkey = await importPasskeySigner(prfOutput);
+    const control = this.requireUnlocked().control;
+    return this.submitDataWrite(
+      { [STELLAR_PASSKEY_DATA_KEY]: utf8ToBytes(passkey.publicAddress()) },
+      control,
+      undefined,
+      { newControl: passkey.publicAddress() },
+    );
   }
 
   /**
@@ -714,82 +640,30 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async setupRecovery(code: string): Promise<string> {
-    // For undeployed accounts, store the pending recovery code for first create
     if (this.statusValue === "undeployed") {
       this._pendingRecoveryCode = code;
-      return ""; // No tx yet — will be included in first create
+      return "";
     }
 
-    const { control, dek } = this.requireUnlocked();
-    const wrap = wrapDEK(dek, deriveRecoveryKEK(code));
-    return this.writeFactor(RECOVERY_BASE, wrap, control);
-  }
-
-  /**
-   * Export a short-lived copy of the Stellar DEK for social-recovery enrolment.
-   * The caller must send it only through `SocialRecoveryClient`, which encrypts
-   * it to the attested enclave before it leaves this device. The Ed25519 control
-   * seed is never exported.
-   */
-  socialRecoveryDek(): Uint8Array {
-    const { dek } = this.requireUnlocked();
-    return Uint8Array.from(dek);
-  }
-
-  /**
-   * Public ECIES recipient for a social-recovery wrap addressed to this exact
-   * browser/device. Safe to disclose; the corresponding private key remains
-   * non-extractable in IndexedDB/Keychain.
-   */
-  socialRecoveryRecipientPublicKey(): Uint8Array {
-    return Uint8Array.from(this.deviceKey.publicKeySec1());
+    const recovery = await importRecoverySigner(code);
+    return this.submitDataWrite({}, this.requireUnlocked().control, undefined, {
+      newControl: recovery.publicAddress(),
+    });
   }
 
   /**
    * From a new browser/device (`needs-device-approval`), approve THIS device using
-   * the user's synced passkey: unlock the DEK via the passkey factor, then wrap it
-   * to this device's slot so future sessions unlock silently. Flips status to
-   * `ready`. No trip back to an already-authorized device.
+   * the user's synced passkey. Reconstructs the passkey extra signer, then
+   * `setOptions` adds this device. Flips status to `ready`.
    */
   async approveThisDeviceWithPasskey(prfOutput: Uint8Array): Promise<string> {
-    return this.approveThisDevice(
-      await unlockViaPasskey(this.adapter, this.address, prfOutput),
-      "passkey",
-    );
+    return this.addThisDeviceWith(await importPasskeySigner(prfOutput), "passkey");
   }
 
   /** Approve THIS device using the recovery code (same as the passkey path, for
    *  the backup factor). */
   async approveThisDeviceWithRecovery(code: string): Promise<string> {
-    return this.approveThisDevice(
-      await unlockViaRecovery(this.adapter, this.address, code),
-      "recovery code",
-    );
-  }
-
-  /**
-   * Complete a TEE social recovery on a new device. `deviceWrap` is ECIES
-   * ciphertext addressed to this device's non-extractable P-256 unwrap key.
-   * Cavos/Google may relay it, but only this device can recover the DEK.
-   */
-  async approveThisDeviceWithSocialWrap(deviceWrap: Uint8Array): Promise<string> {
-    if (this.statusValue === "ready") {
-      throw new Error("kit/stellar: this device is already authorized");
-    }
-    try {
-      const dek = await this.deviceKey.unwrap(deviceWrap);
-      const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
-      const controlSeed = openControlSeed(env.ct, dek);
-      const control = await WebCryptoControlKey.importFromSeed(controlSeed, {
-        keyId: this.address,
-      });
-      wipeSeed(controlSeed);
-      return this.approveThisDevice({ control, dek }, "social recovery");
-    } catch {
-      throw new Error(
-        "kit/stellar: social recovery wrap is invalid for this device",
-      );
-    }
+    return this.addThisDeviceWith(await importRecoverySigner(code), "recovery code");
   }
 
   /**
@@ -798,96 +672,27 @@ export class CavosStellar {
    * to `removeDevice` to build a device-management UI.
    */
   async listDevices(): Promise<string[]> {
-    const env = fromDataEntries(await this.adapter.loadDataEntries(this.address));
-    return Object.keys(env.deviceWraps);
+    return this.adapter.signerKeys(this.address);
   }
 
-  /**
-   * Revoke a device — the escape hatch behind the "this wasn't me" link in the
-   * device-added email, and the way out if a device was authorized through a
-   * path that bypassed you (a leaked recovery code, or a social-recovery wrap
-   * relayed by the enclave).
-   *
-   * Classic Stellar has no `remove_signer`: a "device" here is an ECIES wrap of
-   * the DEK in the account's data entries, and the evicted device may already
-   * have cached the control seed. Erasing its wrap alone would therefore revoke
-   * nothing. So this rotates, in a single tx signed by the current control key:
-   *
-   *   1. deletes EVERY existing `cv:` envelope entry;
-   *   2. writes a fresh DEK-sealed control seed and a wrap for THIS device;
-   *   3. adds the new control key as the weight-1 signer and zeroes the old one.
-   *
-   * Consequence, and the reason this is deliberate rather than surgical: device
-   * wraps are ECIES to each device's public key, which is never stored on-chain,
-   * so no other device's wrap can be re-created here. **Every other device is
-   * evicted**, not just the revoked one, and must be approved again. The passkey
-   * and recovery factors are KEK-derived, so they survive only if the user
-   * presents them now — pass `passkeyPrfOutput` / `recoveryCode` to carry them
-   * over. Prompt for the passkey before calling; otherwise the user loses their
-   * synced anchor and this device becomes the only way in.
-   */
   async removeDevice(params: {
-    /** Slot to revoke. Must not be this device's own slot. */
     slotId: string;
-    /** Fresh WebAuthn PRF output, to keep the passkey factor working. */
     passkeyPrfOutput?: Uint8Array;
-    /** The user's recovery code, to keep the recovery factor working. */
     recoveryCode?: string;
     opts?: ExecuteOptions;
   }): Promise<{ transactionHash: string; controlAddress: string; evictedSlots: string[] }> {
-    const { control: oldControl } = this.requireUnlocked();
-    const mySlot = this.deviceKey.slotId();
-    if (params.slotId === mySlot) {
-      throw new Error(
-        "kit/stellar: cannot revoke the device you are using — revoke it from another authorized device",
-      );
+    const control = this.requireUnlocked().control;
+    if (params.slotId === this.address || params.slotId === control.publicAddress()) {
+      throw new Error("kit/stellar: cannot revoke the signer you are using");
     }
-
-    const existing = await this.adapter.loadDataEntries(this.address);
-    const env = fromDataEntries(existing);
-    if (!env.deviceWraps[params.slotId]) {
-      throw new Error(`kit/stellar: no device is enrolled in slot ${params.slotId}`);
-    }
-
-    const dek = generateDEK();
-    const { keypair: controlKeypair, seed: controlSeed } = generateControlKey();
-    const newControlAddress = controlKeypair.publicKey();
-    const next = toDataEntries({
-      ct: sealControlSeed(controlSeed, dek),
-      deviceWraps: { [mySlot]: eciesWrapDEK(dek, this.deviceKey.publicKeySec1()) },
-      passkeyWrap: params.passkeyPrfOutput
-        ? wrapDEK(dek, derivePasskeyKEK(params.passkeyPrfOutput))
-        : undefined,
-      recoveryWrap: params.recoveryCode
-        ? wrapDEK(dek, deriveRecoveryKEK(params.recoveryCode))
-        : undefined,
+    const transactionHash = await this.submitDataWrite({}, control, params.opts, {
+      oldControl: params.slotId,
     });
-
-    // Clear every old `cv:` entry, then lay the new envelope over it. Entries
-    // present in both maps end up as a plain overwrite (one op), and entries only
-    // in the old map are deleted — which also refunds their reserve.
-    const writes: DataEntryWrites = {};
-    for (const name of Object.keys(existing)) {
-      if (name.startsWith("cv:")) writes[name] = null;
-    }
-    Object.assign(writes, next);
-
-    const transactionHash = await this.submitDataWrite(writes, oldControl, params.opts, {
-      newControl: newControlAddress,
-      oldControl: oldControl.publicAddress(),
-    });
-
-    // Import the new control seed into WebCrypto as non-extractable, then wipe.
-    const control = await WebCryptoControlKey.importFromSeed(controlSeed, {
-      keyId: this.address,
-    });
-    wipeSeed(controlSeed);
-
-    // The account is now signed by the new key; keep this session usable.
-    this.control = control;
-    this.dek = dek;
-    const evictedSlots = Object.keys(env.deviceWraps).filter((s) => s !== mySlot);
-    return { transactionHash, controlAddress: newControlAddress, evictedSlots };
+    return {
+      transactionHash,
+      controlAddress: control.publicAddress(),
+      evictedSlots: [params.slotId],
+    };
   }
 
   /** The control key's public G address (the weight-1 real signer), for display. */
@@ -897,32 +702,22 @@ export class CavosStellar {
 
   // --- internals ----------------------------------------------------------
 
-  private async approveThisDevice(unlocked: Unlocked | null, factor: string): Promise<string> {
+  private async addThisDeviceWith(factor: ControlKey, name: string): Promise<string> {
     if (this.statusValue === "ready") {
       throw new Error("kit/stellar: this device is already authorized");
     }
-    if (!unlocked) {
-      throw new Error(`kit/stellar: could not unlock the account with the ${factor} — wrong factor or not enrolled`);
+    const device = await WebCryptoControlKey.create();
+    await device.persist(this.address);
+    try {
+      const hash = await this.submitDataWrite({}, factor, undefined, {
+        newControl: device.publicAddress(),
+      });
+      this.control = device;
+      this.setStatus("ready");
+      return hash;
+    } catch {
+      throw new Error(`kit/stellar: could not add this device with the ${name} — wrong factor or not enrolled`);
     }
-    const slot = this.deviceKey.slotId();
-    const wrap = eciesWrapDEK(unlocked.dek, this.deviceKey.publicKeySec1());
-    const hash = await this.submitDataWrite(deviceWrapEntries(slot, wrap), unlocked.control);
-    // This device is now a silent-unlock factor.
-    this.control = unlocked.control;
-    this.dek = unlocked.dek;
-    this.setStatus("ready");
-    return hash;
-  }
-
-  /** Write a single-factor wrap (passkey/recovery) into the account data entries,
-   *  signed by the control key. Overwrites cleanly if the base already existed and
-   *  the new blob has the same chunk count. */
-  private async writeFactor(base: string, wrap: Uint8Array, control: ControlKey): Promise<string> {
-    const entries: Record<string, Uint8Array> = {};
-    chunkTo64(wrap).forEach((chunk, i) => {
-      entries[`${base}/${i}`] = chunk;
-    });
-    return this.submitDataWrite(entries, control);
   }
 
   /**
@@ -1079,109 +874,13 @@ export class CavosStellar {
   }
 
   private requireUnlocked(): Unlocked {
-    const control = this.requireControl();
-    if (!this.dek) throw new Error("kit/stellar: DEK unavailable on this device");
-    return { control, dek: this.dek };
+    return { control: this.requireControl() };
   }
 }
 
-/**
- * Rebuild the control key from the on-chain envelope using this device's ECIES
- * wrap. Returns null if this device has no slot or the wrap can't open.
- *
- * **Non-extractable flow**: First tries to load the control key from IndexedDB
- * (returning session on a known device). If found, no unwrap is needed — the
- * non-extractable key is already persisted. Only if IDB misses do we unwrap the
- * DEK, open the control seed, import it into WebCrypto as non-extractable, and
- * wipe the seed from JS memory.
- */
-async function unlockViaDevice(
-  adapter: StellarAdapter,
-  address: string,
-  deviceKey: DeviceUnwrapKey,
-): Promise<Unlocked | null> {
-  // Fast path: non-extractable control key already cached in IndexedDB.
+async function unlockViaDevice(address: string): Promise<Unlocked | null> {
   const cached = await WebCryptoControlKey.load({ keyId: address });
-  if (cached) {
-    const env = await loadEnvelope(adapter, address);
-    const wrap = env.deviceWraps[deviceKey.slotId()];
-    if (!wrap) return null;
-    try {
-      const dek = await deviceKey.unwrap(wrap);
-      return { control: cached, dek };
-    } catch {
-      return null;
-    }
-  }
-
-  // Slow path: unwrap the control seed from the on-chain envelope, import into
-  // WebCrypto as non-extractable, and wipe the seed from JS memory.
-  const env = await loadEnvelope(adapter, address);
-  const wrap = env.deviceWraps[deviceKey.slotId()];
-  if (!wrap) return null;
-  try {
-    const dek = await deviceKey.unwrap(wrap);
-    return openControlAndImport(env, dek, address);
-  } catch {
-    return null;
-  }
-}
-
-/** Unlock via the passkey PRF factor (`cv:wp`). */
-async function unlockViaPasskey(
-  adapter: StellarAdapter,
-  address: string,
-  prfOutput: Uint8Array,
-): Promise<Unlocked | null> {
-  const env = await loadEnvelope(adapter, address);
-  if (!env.passkeyWrap) return null;
-  try {
-    const dek = unwrapDEK(env.passkeyWrap, derivePasskeyKEK(prfOutput));
-    return openControlAndImport(env, dek, address);
-  } catch {
-    return null;
-  }
-}
-
-/** Unlock via the recovery-code factor (`cv:wr`). */
-async function unlockViaRecovery(
-  adapter: StellarAdapter,
-  address: string,
-  code: string,
-): Promise<Unlocked | null> {
-  const env = await loadEnvelope(adapter, address);
-  if (!env.recoveryWrap) return null;
-  try {
-    const dek = unwrapDEK(env.recoveryWrap, deriveRecoveryKEK(code));
-    return openControlAndImport(env, dek, address);
-  } catch {
-    return null;
-  }
-}
-
-async function loadEnvelope(adapter: StellarAdapter, address: string): Promise<AccountEnvelope> {
-  return fromDataEntries(await adapter.loadDataEntries(address));
-}
-
-/**
- * Open the control seed from the envelope, import it into WebCrypto as a
- * non-extractable Ed25519 key, then wipe the seed from JS memory. The key is
- * persisted in IndexedDB so subsequent sessions load it without unwrapping.
- */
-async function openControlAndImport(
-  env: AccountEnvelope,
-  dek: Uint8Array,
-  address: string,
-): Promise<Unlocked> {
-  const controlSeed = openControlSeed(env.ct, dek);
-  const control = await WebCryptoControlKey.importFromSeed(controlSeed, { keyId: address });
-  wipeSeed(controlSeed);
-  return { control, dek };
-}
-
-/** Overwrite a seed buffer with zeros. Best-effort memory wipe in JS. */
-function wipeSeed(seed: Uint8Array): void {
-  seed.fill(0);
+  return cached ? { control: cached } : null;
 }
 
 /**
@@ -1192,34 +891,4 @@ function wipeSeed(seed: Uint8Array): void {
 function isBadSequence(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("tx_bad_seq");
-}
-
-/**
- * A brand-new control key. Its public key IS the account's `G…` address: this
- * is where a Stellar wallet gets named, and only the device that generated it
- * holds the seed.
- */
-function newControlKey(): { address: string; seed: Uint8Array } {
-  const { keypair, seed } = generateControlKey();
-  return { address: keypair.publicKey(), seed };
-}
-
-/**
- * Store the freshly generated control key for an account that does not exist
- * on-chain yet, so this device can sign messages before the first execute. The
- * seed is imported as a non-extractable WebCrypto key; the on-chain envelope is
- * written when the account is created.
- *
- * NOTE: The seed is NOT returned to the caller. It is saved in pendingControl
- * at connect() time and loaded only at _createAccount() time for the one-time
- * cv:ct write, then immediately wiped. This ensures the seed never sits on the
- * CavosStellar instance where XSS could copy it.
- */
-async function persistControlKey(
-  address: string,
-  fresh: { seed: Uint8Array },
-): Promise<Unlocked> {
-  const cached = await WebCryptoControlKey.load({ keyId: address });
-  const control = cached ?? (await WebCryptoControlKey.importFromSeed(fresh.seed, { keyId: address }));
-  return { control, dek: generateDEK() };
 }

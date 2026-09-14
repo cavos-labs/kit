@@ -504,7 +504,7 @@ export function CavosProvider({
    *
    * This was one boolean for the whole session. Enrolling on one chain set it,
    * and every other chain was then skipped as "already enrolled" — so a user
-   * who enrolled Stellar got a Starknet wallet with no authority at all, and
+   * who enrolled Solana got a Starknet wallet with no authority at all, and
    * found out only when a second device could not recover it.
    */
   const socialEnrolledRef = useRef(new Set<string>());
@@ -685,56 +685,45 @@ export function CavosProvider({
   // nothing else), then the enclave, then email — which needs a second device
   // and the user's attention twice, so it is the floor rather than the default
   // it used to be.
+  //
+  // The app's choice is one value. Classic Stellar still authorizes by passkey
+  // even when the rest of a multichain app uses the enclave — that chain cannot
+  // restrict a recovery signer, so the enclave is not offered there.
+  const appDeviceApproval = useMemo(
+    () =>
+      (config.deviceApproval
+        ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
+    [config.deviceApproval, config.socialRecovery, config.socialRecoveryAttestation],
+  );
   const deviceAuthorization = useMemo(
     () => {
       assertDeviceApprovalScope(
-        (config.deviceApproval
-          ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
+        appDeviceApproval,
         config.chains ?? (config.chain ? [config.chain] : ['starknet']),
       );
       return resolveDeviceAuthorization({
-        // The app's choice, not a runtime discovery. `socialRecovery` already
-        // says an app runs the enclave; everything else authorizes by passkey.
-        approval: (config.deviceApproval
-          ?? (resolveSocialRecoveryPolicy(config) ? 'enclave' : 'passkey')) as DeviceApproval,
+        approval: appDeviceApproval,
         socialCredential: auth.hasSocialRecoveryCredential(),
+        chain: wallet?.chain,
       });
     },
     [
-      config.deviceApproval,
-      config.socialRecovery,
-      config.socialRecoveryAttestation,
+      appDeviceApproval,
       config.chains,
       config.chain,
       auth,
       identity,
+      wallet?.chain,
     ],
   );
 
 
   /**
-   * On passkeys, authorize this device at login rather than at the first
-   * action.
-   *
-   * Authorization was moved to the action deliberately: the enclave takes
-   * seconds, can fail, and asking for it during sign-in broke onboarding for a
-   * wallet the user could otherwise already see. A passkey has none of that --
-   * it is local, instant, and the gesture is the one the user already
-   * associates with proving it is them. Waiting to ask buys nothing and leaves
-   * the session in a state that cannot sign.
-   *
-   * So the rule follows the method, not the moment. Declining still costs
-   * nothing: the wallet stays usable for reads and the first action asks again.
+   * On passkeys, the modal shows the approval screen at login rather than
+   * waiting for the first action. The WebAuthn assertion itself must wait for
+   * a tap: Safari on iOS ignores `credentials.get()` from an effect, and the
+   * spinner on "Connecting with Google" never yields.
    */
-  const loginApprovalRef = useRef(new Set<string>());
-  useEffect(() => {
-    if (deviceAuthorization !== 'passkey' || !wallet) return;
-    if (wallet.status !== 'needs-device-approval') return;
-    const key = `${wallet.chain}:${wallet.address}`;
-    if (loginApprovalRef.current.has(key)) return;
-    loginApprovalRef.current.add(key);
-    void authorizeDeviceRef.current();
-  }, [deviceAuthorization, wallet, wallet?.status]);
 
   // The wallet turning ready is what ends an authorization, whoever performed it.
   useEffect(() => {
@@ -973,7 +962,11 @@ export function CavosProvider({
     // has an enclave, not that this app uses it -- reading it alone meant an
     // app on passkeys still had recovery authorities written into its accounts,
     // and had its one login credential spent doing it.
-    if (deviceAuthorization === 'passkey') return;
+    //
+    // Use the app's choice, not the visible wallet's resolved method. Classic
+    // Stellar authorizes by passkey even in an enclave app; that must not skip
+    // enrolment on Starknet and Solana.
+    if (appDeviceApproval === 'passkey') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -985,6 +978,7 @@ export function CavosProvider({
 
     const targets = session.chains
       .map((c) => session.wallet(c))
+      .filter((w) => w.chain !== 'stellar')
       .map((w) => ({
         wallet: w,
         action: decideSocialRecovery(
@@ -1081,7 +1075,7 @@ export function CavosProvider({
     config.appId,
     config.authBackendUrl,
     config.environment,
-    deviceAuthorization,
+    appDeviceApproval,
     socialRecovery,
     socialRecoveryPolicy,
     session,
@@ -1099,8 +1093,10 @@ export function CavosProvider({
    */
   useEffect(() => {
     // Same rule as the sweep above: on passkeys the enclave is not this app's
-    // to use, and a device is authorized by the gesture instead.
+    // to use, and a device is authorized by the gesture instead. Classic
+    // Stellar never uses the enclave either — passkey or recovery code.
     if (deviceAuthorization === 'passkey') return;
+    if (wallet?.chain === 'stellar') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -1222,7 +1218,7 @@ export function CavosProvider({
         // owner approving anything — the enclave did. Tell them, with a link to
         // revoke it. Best-effort: the signer is already on-chain, so a failed
         // notice must never fail the recovery the user is standing in front of.
-        if (config.appId && wallet.chain !== 'stellar') {
+        if (config.appId) {
           try {
             await new HttpRecoveryClient({
               baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
@@ -1282,6 +1278,7 @@ export function CavosProvider({
   // on-chain and finalization needs no social credential. Resume it when due.
   useEffect(() => {
     if (!wallet || !identity || wallet.status !== 'needs-device-approval') return;
+    if (wallet.chain === 'stellar') return;
     const persisted = loadPendingSocialRecovery(wallet.chain, wallet.address);
     const readyAt = walletStatus.socialRecoveryReadyAt ?? persisted;
     if (!readyAt) return;
@@ -1486,7 +1483,7 @@ export function CavosProvider({
       if (!wallet) throw new Error('Not logged in');
       if (wallet.chain === 'stellar') {
         throw new Error(
-          'kit: on Stellar, use wallet.removeDevice({ slotId }) — devices are envelope slots, not signer pubkeys, and revoking rotates the control key.',
+          'kit: on Stellar, use wallet.removeDevice({ slotId }) — slotId is the device G public key.',
         );
       }
       if (wallet.chain !== 'starknet') {
@@ -1505,7 +1502,7 @@ export function CavosProvider({
     if (!identity || !wallet) throw new Error('Not logged in');
     if (wallet.chain === 'stellar') {
       throw new Error(
-        'kit: on Stellar, use wallet.listDevices() — devices are envelope slots, not signer pubkeys.',
+        'kit: on Stellar, use wallet.listDevices() — devices are Horizon signer keys, not envelope slots.',
       );
     }
     if (!cfg.appId) throw new Error('kit: listDevices requires an appId');
@@ -1540,11 +1537,17 @@ export function CavosProvider({
    * Stellar's factor is the PRF secret, not a public key, so it cannot be read
    * back off any chain -- and must not be stored anywhere. It is derived from
    * the same passkey at the moment the account is created.
+   *
+   * Gated on the *app's* choice, not the visible wallet's resolved method.
+   * Classic Stellar authorizes a later device by passkey even in an enclave
+   * app, but baking a passkey into first create would prompt for one that
+   * has never been enrolled. `_pendingPasskeyPrf` still covers an explicit
+   * enroll before the first transaction.
    */
   const passkeyFactorForCreate = useCallback(async (): Promise<Uint8Array | null> => {
-    if (deviceAuthorization !== 'passkey') return null;
+    if (appDeviceApproval !== 'passkey') return null;
     return new PasskeyPrf({ rpName }).getSecret();
-  }, [deviceAuthorization, rpName]);
+  }, [appDeviceApproval, rpName]);
   passkeyFactorRef.current = passkeyFactorForCreate;
 
   // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
@@ -1555,7 +1558,7 @@ export function CavosProvider({
    * was not looking at stayed without a passkey -- and switching chain to fix
    * that meant another prompt, and another passkey. One credential is created
    * here and registered everywhere: as an on-chain approver on the chains that
-   * verify assertions, and as the DEK factor on Stellar, which does not.
+   * verify assertions, and as a derived ed25519 signer on Stellar, which does not.
    *
    * Works before the first transaction too: an undeployed wallet keeps the
    * approver pending and includes it in its deploy.

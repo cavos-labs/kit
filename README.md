@@ -442,11 +442,12 @@ enclave (otherwise the shipped constants are used):
 </CavosProvider>
 ```
 
-The provider automatically enrolls ready wallets after a fresh login and
-recovers an unregistered device with the same configured provider. Starknet and
-Solana restrict the enclave authority on-chain to scheduling one exact signer,
-with nonce, expiry, cancellation, and optional timelock. Stellar seals only the
-DEK (never the Ed25519 control seed) and rewraps it to the new device.
+The provider automatically enrolls ready **Starknet and Solana** wallets after a
+fresh login and recovers an unregistered device on those chains with the same
+configured provider. Those two chains restrict the enclave authority on-chain to
+scheduling one exact signer, with nonce, expiry, cancellation, and optional
+timelock. Classic Stellar (`G…`) is not enrolled: a new device uses a passkey or
+a recovery code. Contract accounts (`C…`) will use the enclave later.
 
 This is **hardware-isolated, non-custodial recovery**, not trustless recovery.
 The approved workload digest, AWS Nitro/KMS, and image-upgrade policy remain in
