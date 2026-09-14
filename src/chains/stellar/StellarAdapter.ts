@@ -15,7 +15,7 @@ import {
   type xdr,
 } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
-import { HORIZON_URL, SOROBAN_RPC_URL, STELLAR_NETWORKS, type StellarNetwork } from "./constants";
+import { HORIZON_URL, SOROBAN_RPC_URL, STELLAR_NETWORKS, STELLAR_MODEL_DATA_KEY, type StellarNetwork } from "./constants";
 import { toDataEntries, type AccountEnvelope } from "./datamap";
 
 export interface StellarAdapterOptions {
@@ -57,8 +57,8 @@ export type DataEntryWrites = Record<string, Uint8Array | null>;
  * cached the old control seed, so the old key must stop being a signer.
  */
 export interface ControlRotation {
-  newControl: string;
-  oldControl: string;
+  newControl?: string;
+  oldControl?: string;
 }
 
 /** Default per-request timeout for Horizon/RPC reads and submits. */
@@ -155,6 +155,11 @@ export class StellarAdapter {
     }
   }
 
+  async signerKeys(address: string): Promise<string[]> {
+    const account = await this.server().loadAccount(address);
+    return account.signers.map((s) => s.key);
+  }
+
   /**
    * Build the account-creation transaction (source = funder, the relayer or a
    * self-funded keypair):
@@ -168,7 +173,8 @@ export class StellarAdapter {
   async buildCreateTx(params: {
     funder: string;
     controlAddress: string;
-    envelope: AccountEnvelope;
+    envelope?: AccountEnvelope;
+    extraSigners?: string[];
     /** Starting balance in stroops (must cover base reserve + entries). */
     startingBalance: bigint;
   }): Promise<Transaction> {
@@ -185,10 +191,8 @@ export class StellarAdapter {
       }),
     );
 
-    for (const [name, value] of Object.entries(toDataEntries(params.envelope))) {
-      builder.addOperation(
-        Operation.manageData({ name, value: Buffer.from(value), source: params.controlAddress }),
-      );
+    for (const op of accountSetupOps(params.controlAddress, params.envelope, params.extraSigners)) {
+      builder.addOperation(op);
     }
 
     return builder.setTimeout(TX_TIMEOUT).build();
@@ -211,7 +215,8 @@ export class StellarAdapter {
   async buildSponsoredCreateTx(params: {
     relayer: string;
     controlAddress: string;
-    envelope: AccountEnvelope;
+    envelope?: AccountEnvelope;
+    extraSigners?: string[];
   }): Promise<Transaction> {
     const relayerAccount = await this.server().loadAccount(params.relayer);
     const builder = new TransactionBuilder(relayerAccount, {
@@ -225,10 +230,8 @@ export class StellarAdapter {
     builder.addOperation(
       Operation.createAccount({ destination: params.controlAddress, startingBalance: "0", source: params.relayer }),
     );
-    for (const [name, value] of Object.entries(toDataEntries(params.envelope))) {
-      builder.addOperation(
-        Operation.manageData({ name, value: Buffer.from(value), source: params.controlAddress }),
-      );
+    for (const op of accountSetupOps(params.controlAddress, params.envelope, params.extraSigners)) {
+      builder.addOperation(op);
     }
     builder.addOperation(Operation.endSponsoringFutureReserves({ source: params.controlAddress }));
 
@@ -544,21 +547,56 @@ function isNotFound(e: unknown): boolean {
  */
 function rotationOps(rotation?: ControlRotation, source?: string) {
   if (!rotation) return [];
-  return [
-    Operation.setOptions({
-      source,
-      signer: { ed25519PublicKey: rotation.newControl, weight: 1 },
-    }),
-    // Stellar rejects a signer entry for the account's own master key, so the
-    // FIRST control key — which is the account — is retired with masterWeight
-    // instead. Later control keys are ordinary signers.
-    rotation.oldControl === source
-      ? Operation.setOptions({ source, masterWeight: 0, lowThreshold: 1, medThreshold: 1, highThreshold: 1 })
-      : Operation.setOptions({
-          source,
-          signer: { ed25519PublicKey: rotation.oldControl, weight: 0 },
-        }),
-  ];
+  const ops = [];
+  if (rotation.newControl) {
+    ops.push(
+      Operation.setOptions({
+        source,
+        signer: { ed25519PublicKey: rotation.newControl, weight: 1 },
+      }),
+    );
+  }
+  if (rotation.oldControl) {
+    ops.push(
+      rotation.oldControl === source
+        ? Operation.setOptions({ source, masterWeight: 0, lowThreshold: 1, medThreshold: 1, highThreshold: 1 })
+        : Operation.setOptions({
+            source,
+            signer: { ed25519PublicKey: rotation.oldControl, weight: 0 },
+          }),
+    );
+  }
+  return ops;
+}
+
+function accountSetupOps(
+  controlAddress: string,
+  envelope?: AccountEnvelope,
+  extraSigners?: string[],
+) {
+  const ops = [];
+  if (envelope) {
+    for (const [name, value] of Object.entries(toDataEntries(envelope))) {
+      ops.push(Operation.manageData({ name, value: Buffer.from(value), source: controlAddress }));
+    }
+  } else {
+    ops.push(
+      Operation.manageData({
+        name: STELLAR_MODEL_DATA_KEY,
+        value: Buffer.from("1"),
+        source: controlAddress,
+      }),
+    );
+  }
+  for (const signer of extraSigners ?? []) {
+    ops.push(
+      Operation.setOptions({
+        source: controlAddress,
+        signer: { ed25519PublicKey: signer, weight: 1 },
+      }),
+    );
+  }
+  return ops;
 }
 
 function horizonError(e: unknown): string {

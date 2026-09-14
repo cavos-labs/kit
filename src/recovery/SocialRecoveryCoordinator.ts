@@ -1,5 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 import type { CavosWallet, NetworkEnv } from "../Cavos";
+import type { CavosStellar } from "../chains/stellar/CavosStellar";
 import { bigIntTo32Bytes, hexToBytes } from "../crypto/encoding";
 import { compressedPubkey } from "../chains/solana/SolanaAdapter";
 import { STARKNET_NETWORKS } from "../chains/starknet/constants";
@@ -39,7 +40,6 @@ interface SolanaSignedAuthorization {
 interface RecoveryResult extends SocialRecoveryResult {
   result: "recovered";
   authorizations?: (StarknetSignedAuthorization | SolanaSignedAuthorization)[];
-  stellar_device_wrap_b64?: string;
 }
 
 export interface CoordinatedRecoveryResult {
@@ -52,12 +52,23 @@ export interface CoordinatedRecoveryResult {
 
 /**
  * Enrol the TEE-generated authority in the chain-native recovery mechanism.
- * Stellar is intentionally different: the enclave seals only the DEK, while
- * Starknet/Solana enforce the recovery authority and timelock on-chain.
+ * Starknet and Solana enforce a P-256 recovery authority and timelock on-chain.
+ * Classic Stellar does not use the enclave — a new device is authorized with a
+ * passkey or recovery code. Contract accounts (`C…`) are a later path.
  */
 export interface AgreedRecoveryAuthority {
   sessionId: string;
   result: EnrollmentResult;
+}
+
+function refuseClassicStellar(
+  wallet: CavosWallet,
+): asserts wallet is Exclude<CavosWallet, CavosStellar> {
+  if (wallet.chain === "stellar") {
+    throw new Error(
+      "kit/social-recovery: classic Stellar does not use the enclave; authorize a new device with a passkey or recovery code",
+    );
+  }
 }
 
 /**
@@ -82,10 +93,10 @@ export async function agreeRecoveryAuthority(params: {
   credential: SocialRecoveryCredential;
 }): Promise<AgreedRecoveryAuthority> {
   const { client, wallet, credential } = params;
+  refuseClassicStellar(wallet);
   const enrollment = await client.enroll({
     walletAddress: wallet.address,
     credential,
-    ...(wallet.chain === "stellar" ? { stellarDek: wallet.socialRecoveryDek() } : {}),
   });
   const result = enrollment.result as EnrollmentResult;
   assertEnrollmentResult(result);
@@ -103,13 +114,8 @@ export async function writeRecoveryAuthority(params: {
   delaySeconds: number;
 }): Promise<{ sessionId: string; transactionHash?: string }> {
   const { client, wallet, delaySeconds } = params;
+  refuseClassicStellar(wallet);
   const { sessionId, result } = params.authority;
-
-  if (wallet.chain === "stellar") {
-    // There is no restricted recovery authority on Stellar classic. The server
-    // activates this KMS-sealed DEK record atomically when the enclave completes.
-    return { sessionId };
-  }
 
   let transactionHash: string;
   if (wallet.chain === "starknet") {
@@ -153,6 +159,7 @@ export async function recoverHardwareIsolatedDevice(params: {
   delaySeconds: number;
 }): Promise<CoordinatedRecoveryResult> {
   const { client, wallet, credential, network, delaySeconds } = params;
+  refuseClassicStellar(wallet);
   const now = Math.floor(Date.now() / 1000);
 
   // Resume before re-authorizing. Scheduling and finalizing are two separate
@@ -178,7 +185,6 @@ export async function recoverHardwareIsolatedDevice(params: {
 
   const expiresAt = now + Math.max(delaySeconds + 3600, 3600);
   let authorizations: ChainAuthorization[] | undefined;
-  let stellarRecipientPublicKey: Uint8Array | undefined;
 
   if (wallet.chain === "starknet") {
     const nonce = await wallet.socialRecoveryNonce();
@@ -201,33 +207,16 @@ export async function recoverHardwareIsolatedDevice(params: {
       recovery_nonce: nonce.toString(),
       expires_at: expiresAt,
     }];
-  } else {
-    stellarRecipientPublicKey = wallet.socialRecoveryRecipientPublicKey();
   }
 
   const recovered = await client.recover({
     walletAddress: wallet.address,
     credential,
     ...(authorizations ? { authorizations } : {}),
-    ...(stellarRecipientPublicKey ? { stellarRecipientPublicKey } : {}),
   });
   const result = recovered.result as RecoveryResult;
   if (result.result !== "recovered") {
     throw new Error("kit/social-recovery: enclave returned the wrong result");
-  }
-
-  if (wallet.chain === "stellar") {
-    if (!result.stellar_device_wrap_b64) {
-      throw new Error("kit/social-recovery: Stellar device wrap is missing");
-    }
-    const transactionHash = await wallet.approveThisDeviceWithSocialWrap(
-      fromB64(result.stellar_device_wrap_b64),
-    );
-    return {
-      finalized: true,
-      readyAt: now,
-      finalizeTransaction: transactionHash,
-    };
   }
 
   if (wallet.chain === "starknet") {

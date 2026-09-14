@@ -16,10 +16,31 @@ describe("how a new device gets authorized", () => {
     );
   });
 
-  it("uses the enclave when the app chose the enclave", () => {
-    expect(resolveDeviceAuthorization({ approval: "enclave", socialCredential: true })).toBe(
-      "enclave",
-    );
+  it("uses passkeys on classic Stellar even when the app chose the enclave", () => {
+    expect(
+      resolveDeviceAuthorization({
+        approval: "enclave",
+        socialCredential: true,
+        chain: "stellar",
+      }),
+    ).toBe("passkey");
+  });
+
+  it("still uses the enclave on Starknet and Solana in that same app", () => {
+    expect(
+      resolveDeviceAuthorization({
+        approval: "enclave",
+        socialCredential: true,
+        chain: "starknet",
+      }),
+    ).toBe("enclave");
+    expect(
+      resolveDeviceAuthorization({
+        approval: "enclave",
+        socialCredential: true,
+        chain: "solana",
+      }),
+    ).toBe("enclave");
   });
 
   it("asks for a fresh sign-in when the enclave's proof is gone", () => {

@@ -75,10 +75,9 @@ interface StartedSession {
 /**
  * Talks to the Cavos recovery enclave.
  *
- * The OIDC credential and (for Stellar enrolment) DEK are encrypted in-browser
- * to a P-256 key held only by an AWS Nitro Enclave whose measurement this build
- * pins. The Cavos API and the enclave's parent instance relay ciphertext and
- * are not trusted with any of it.
+ * The OIDC credential is encrypted in-browser to a P-256 key held only by an
+ * AWS Nitro Enclave whose measurement this build pins. The Cavos API and the
+ * enclave's parent instance relay ciphertext and are not trusted with any of it.
  *
  * Two round trips, both synchronous: start a session, then run the job. The
  * previous Confidential Space transport had to prewarm a VM before login and
@@ -90,7 +89,6 @@ export class SocialRecoveryClient {
   async enroll(params: {
     walletAddress: string;
     credential: SocialRecoveryCredential;
-    stellarDek?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
     const session = await this.start(
       params.walletAddress,
@@ -115,7 +113,6 @@ export class SocialRecoveryClient {
         token_fingerprint: params.credential.tokenFingerprint,
       },
       policy: session.policy,
-      stellar_dek_b64: params.stellarDek ? toB64(params.stellarDek) : undefined,
     });
     return { sessionId: session.session_id, result };
   }
@@ -124,7 +121,6 @@ export class SocialRecoveryClient {
     walletAddress: string;
     credential: SocialRecoveryCredential;
     authorizations?: ChainAuthorization[];
-    stellarRecipientPublicKey?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
     const session = await this.start(
       params.walletAddress,
@@ -150,9 +146,6 @@ export class SocialRecoveryClient {
       },
       sealed_record_b64: session.sealed_record_b64,
       authorizations: params.authorizations ?? [],
-      stellar_recipient_pubkey_b64: params.stellarRecipientPublicKey
-        ? toB64(params.stellarRecipientPublicKey)
-        : undefined,
     });
     return { sessionId: session.session_id, result };
   }

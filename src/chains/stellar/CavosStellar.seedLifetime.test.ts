@@ -88,7 +88,7 @@ describe("CavosStellar seed lifetime (security)", () => {
     }
   });
 
-  it("does not have a _controlSeed field on an undeployed wallet", () => {
+  it("does not have a _controlSeed field on an undeployed wallet", async () => {
     const { keypair: control } = generateControlKey();
     const wallet = makeUndeployedWallet(control);
 

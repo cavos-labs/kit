@@ -33,11 +33,17 @@ export interface DeviceAuthorizationInput {
   approval: DeviceApproval;
   /** Whether a fresh login proof is available this session. */
   socialCredential: boolean;
+  /**
+   * Classic Stellar (`G…`) cannot protocol-restrict a recovery signer, so it
+   * never uses the enclave. Contract accounts (`C…`) are a later path.
+   */
+  chain?: "starknet" | "solana" | "stellar";
 }
 
 export function resolveDeviceAuthorization(
   input: DeviceAuthorizationInput,
 ): DeviceAuthorizationMethod {
+  if (input.chain === "stellar") return "passkey";
   if (input.approval === "passkey") return "passkey";
   return input.socialCredential ? "enclave" : "enclave-needs-login";
 }
