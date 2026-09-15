@@ -194,7 +194,7 @@ if (wallet.status === "undeployed") {
 | `appSalt` | Names this app's **device-key slot**, so the same user in two apps gets two device keys. Does **not** name the address (the registry does). |
 | `status` | `"undeployed"` (first execute deploys), `"ready"` (deployed + authorized), `"needs-device-approval"` (deployed, device not authorized). |
 | `StarknetAdapter` / `SolanaAdapter` | Per-chain: compute the address a new user's first device claims, build deploy/add/remove calls, serialize signatures. |
-| `CavosStellar` / `StellarAdapter` | Classic Stellar `G…` accounts named by the first control key, encrypted control-key envelope, device/passkey/recovery unlock. |
+| `CavosStellar` / `StellarAdapter` | Classic Stellar `G…` accounts named by the first device's ed25519 key; extra devices, passkey, and recovery are Horizon signers. |
 | `WebCryptoSigner` | Browser silent device signer: non-extractable P-256 key in IndexedDB, no UI on sign. |
 | `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` / `StellarRelayer` | Cavos gasless sponsor: co-signs as fee payer so the integrator holds no keypair. |
@@ -284,16 +284,17 @@ if (wallet.chain === "solana") {
 
 `CavosStellar` creates or loads a classic Stellar `G…` account. The address is
 named by the first device's control key (a random Ed25519 keypair whose public
-key IS the `G…` address). On a known device, the control key is unlocked
-silently from the encrypted on-chain envelope.
+key IS the `G…` address). On a known device, that key is loaded from local
+storage and signs silently.
 
-**Key model (pending control):**
+**Key model:**
 
 1. On a **new user**, the first device generates a random Ed25519 control key.
-   Its public key becomes the `G…` address. The private key is wrapped with a
-   device-bound P-256 key and sealed into the account's data entries.
-2. On a **returning user**, the device unwraps the control key from the on-chain
-   envelope using its P-256 key.
+   Its public key becomes the `G…` address. The private key never leaves the
+   device (non-extractable WebCrypto in the browser).
+2. On a **returning user**, the device loads its local control key. Extra
+   devices, a passkey, and a recovery code are additional weight-1 Horizon
+   signers — not wraps of a shared seed.
 3. Until the account is created on-chain, the control key is held **pending**
    locally — `signMessage` works, but nothing is on Stellar yet.
 
@@ -384,18 +385,16 @@ signer.
 with the Cavos program instruction. The fee payer is not bound by the device
 signature, so the relayer co-signs without re-authorizing the action.
 
-**Stellar:** The control key is an Ed25519 keypair recovered from an encrypted
-account envelope. The device's P-256 key is used for ECIES unwrapping, not as
-the Stellar transaction signature. The control key signs the actual Stellar
-transaction. Protection varies by runtime:
+**Stellar:** Each device signs with its own Ed25519 Horizon signer. The first
+device's public key *is* the `G…` address. A passkey or recovery code derives
+an extra signer that can add a new device. Protection varies by runtime:
 
-- **Browser (WebCrypto):** The control seed is imported as a non-extractable
-  `CryptoKey`. XSS cannot call `exportKey` on it. XSS can still call `sign` or
-  `execute` while the tab is unlocked.
-- **React Native iOS:** `unwrapControlAndSign` keeps the seed inside the native
-  module. Only the signature crosses the JS bridge.
-- **Node / custom `LocalDeviceUnwrapKey`:** The caller handles the raw scalar;
-  no WebCrypto isolation.
+- **Browser (WebCrypto):** The control key is a non-extractable `CryptoKey`.
+  XSS cannot call `exportKey` on it. XSS can still call `sign` or `execute`
+  while the tab is unlocked.
+- **React Native iOS:** Signing stays inside the native module when that path
+  is used.
+- **Node:** The caller handles the raw key; no WebCrypto isolation.
 
 **Security model:** Starknet and Solana device keys are non-extractable P-256
 keys in WebCrypto (browser) or Secure Enclave/Keystore (mobile). Stellar browser
@@ -549,8 +548,8 @@ the application also creates a new device that must be approved or recovered.
 ### Stellar
 
 - ✅ `CavosStellar` — classic `G…` account, address named by first control key.
-- ✅ Encrypted on-chain control-key envelope with device-bound P-256 ECIES
-  unlock, passkey PRF recovery, and offline recovery-code support.
+- ✅ Per-device Horizon signers: local ed25519 on each device, plus passkey PRF
+  and recovery-code extra signers for device approval and recovery.
 - ✅ **WebCrypto non-extractable control key:** The Ed25519 control key is
   non-extractable in WebCrypto environments. XSS cannot call `exportKey` on the
   control key; signing remains available while the tab is open.
