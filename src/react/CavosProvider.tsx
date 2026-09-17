@@ -260,7 +260,7 @@ export interface CavosContextValue {
    * Sign an arbitrary message off-chain with the wallet's signing key. Chain-
    * agnostic (uniform `MessageSignature` return); delegates to
    * `wallet.signMessage` after narrowing on `wallet.chain`. See
-   * [After sign-in](https://docs.cavos.xyz/docs/post-login) for per-chain formats
+   * [Signing](https://docs.cavos.xyz/docs/signing) for per-chain formats
    * and verification.
    */
   signMessage: (message: string | Uint8Array) => Promise<MessageSignature>;
