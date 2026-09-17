@@ -4,7 +4,8 @@ import { utf8ToBytes } from "./crypto/encoding";
 
 /**
  * The account address is named by the FIRST device signer: its pubkey goes into
- * the constructor calldata (Starknet) or the PDA seeds (Solana), so nobody who
+ * the constructor calldata (Starknet). Native Solana and Stellar addresses
+ * are derived from the MasterDEK, not from this namespace.
  * lacks that key can land on the address. The app namespace below is the second
  * half of the derivation — it keeps two apps from sharing an address when the
  * same device key is used in both.

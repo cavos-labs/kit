@@ -70,7 +70,10 @@ export class HttpWalletRegistry implements WalletRegistry {
         }))
       : undefined;
 
-    return { address: data.address, devices };
+    return {
+      address: data.address,
+      devices,
+    };
   }
 
   async register(params: {

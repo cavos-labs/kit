@@ -21,7 +21,10 @@ export interface CavosConfigProblem {
  */
 export function validateCavosConfig(config: CavosConfig): CavosConfigProblem[] {
   const problems: CavosConfigProblem[] = [];
-  const chain = config.chain ?? "starknet";
+  const chains = config.chains?.length
+    ? config.chains
+    : [config.defaultChain ?? config.chain ?? "starknet"];
+  const usesStarknet = chains.includes("starknet");
 
   if (!config.appSalt) {
     problems.push({
@@ -44,7 +47,7 @@ export function validateCavosConfig(config: CavosConfig): CavosConfigProblem[] {
     });
   }
 
-  if (chain === "starknet" && !config.paymasterApiKey) {
+  if (usesStarknet && !config.paymasterApiKey) {
     problems.push({
       code: "missing-paymaster-key",
       level: "error",
@@ -53,11 +56,11 @@ export function validateCavosConfig(config: CavosConfig): CavosConfigProblem[] {
     });
   }
 
-  if (chain !== "starknet" && config.paymasterApiKey) {
+  if (!usesStarknet && config.paymasterApiKey) {
     problems.push({
       code: "unused-paymaster-key",
       level: "warning",
-      message: `\`paymasterApiKey\` is ignored on ${chain} — gas is sponsored by the Cavos relayer, enabled by \`appId\`. Remove it so a Starknet key is not shipped where it is not needed.`,
+      message: `\`paymasterApiKey\` is ignored on ${chains.join(", ")} — gas is sponsored by the Cavos relayer, enabled by \`appId\`. Remove it so a Starknet key is not shipped where it is not needed.`,
     });
   }
 

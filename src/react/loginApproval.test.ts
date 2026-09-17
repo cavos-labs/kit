@@ -4,33 +4,31 @@ import { resolveDeviceAuthorization } from "./deviceAuthorization";
 /**
  * When a new device gets authorized, per method.
  *
- * Authorization was moved off the login deliberately: the enclave takes
- * seconds, can fail, and asking during sign-in broke onboarding for a wallet
- * the user could otherwise already see. A passkey has none of that — local,
- * instant, and the gesture is the one the user already associates with proving
- * it is them — so waiting buys nothing and leaves a session that cannot sign.
+ * Asking during sign-in — for the enclave or a passkey — is the app's call,
+ * not the SDK's. Login returns a session; `enrollPasskeyDefault` /
+ * `approveDeviceWithPasskey` are what prompt WebAuthn, when the integrator
+ * decides to.
  */
-describe("asking at login", () => {
-  const asksAtLogin = (input: Parameters<typeof resolveDeviceAuthorization>[0]) =>
-    resolveDeviceAuthorization(input) === "passkey";
+describe("the approval method is the app's choice", () => {
+  const method = (input: Parameters<typeof resolveDeviceAuthorization>[0]) =>
+    resolveDeviceAuthorization(input);
 
-  it("asks when the app chose passkeys", () => {
-    expect(asksAtLogin({ approval: "passkey", socialCredential: false })).toBe(true);
+  it("names passkey when the app chose passkeys", () => {
+    expect(method({ approval: "passkey", socialCredential: false })).toBe("passkey");
   });
 
-  it("does not ask when the app runs the enclave", () => {
-    // The reason the login was left alone in the first place.
-    expect(asksAtLogin({ approval: "enclave", socialCredential: true })).toBe(false);
+  it("names enclave when the app runs the enclave", () => {
+    expect(method({ approval: "enclave", socialCredential: true })).toBe("enclave");
   });
 
-  it("asks on classic Stellar even when the app runs the enclave", () => {
-    expect(
-      asksAtLogin({ approval: "enclave", socialCredential: true, chain: "stellar" }),
-    ).toBe(true);
+  it("names enclave on native Stellar", () => {
+    expect(method({ approval: "enclave", socialCredential: true, chain: "stellar" })).toBe(
+      "enclave",
+    );
   });
 
-  it("does not ask when the enclave is waiting on a fresh sign-in", () => {
-    expect(asksAtLogin({ approval: "enclave", socialCredential: false })).toBe(false);
+  it("asks for a fresh sign-in when the enclave proof is missing", () => {
+    expect(method({ approval: "enclave", socialCredential: false })).toBe("enclave-needs-login");
   });
 });
 
@@ -54,10 +52,10 @@ describe("which recovery machinery runs", () => {
     expect(enclaveRuns({ approval: "enclave", socialCredential: true })).toBe(true);
   });
 
-  it("does not run it on classic Stellar", () => {
+  it("runs it on native Stellar", () => {
     expect(
       enclaveRuns({ approval: "enclave", socialCredential: true, chain: "stellar" }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("still runs it when the login proof is missing, so it can ask for one", () => {

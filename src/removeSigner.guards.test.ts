@@ -1,5 +1,4 @@
 import { Cavos } from "./Cavos";
-import { CavosSolana } from "./chains/solana/CavosSolana";
 import type { DevicePublicKey } from "./signer/DeviceSigner";
 
 /**
@@ -21,7 +20,6 @@ function fakeStarknet(overrides: {
   execute?: jest.Mock;
 }): Cavos {
   const wallet = Object.create(Cavos.prototype) as Cavos & Record<string, unknown>;
-  // status is now a getter, so we need to set statusValue
   wallet.statusValue = overrides.status;
   wallet.address = "0xacc";
   wallet.devicePubkey = self;
@@ -35,24 +33,6 @@ function fakeStarknet(overrides: {
   };
   wallet.execute = overrides.execute ?? jest.fn(async () => ({ transactionHash: "0xtx" }));
   return wallet as Cavos;
-}
-
-function fakeSolana(overrides: {
-  status: string;
-  isAuthorizedSigner?: () => Promise<boolean>;
-  send?: jest.Mock;
-}): CavosSolana {
-  const wallet = Object.create(CavosSolana.prototype) as CavosSolana & Record<string, unknown>;
-  // status is now a getter, so we need to set statusValue
-  wallet.statusValue = overrides.status;
-  wallet.address = "acc";
-  wallet.devicePubkey = self;
-  wallet.adapter = {
-    buildRemoveSigner: async () => ["ix"],
-    isAuthorizedSigner: overrides.isAuthorizedSigner ?? (async () => true),
-  };
-  wallet.send = overrides.send ?? jest.fn(async () => "sig");
-  return wallet as CavosSolana;
 }
 
 describe("removeSigner guards", () => {
@@ -85,22 +65,5 @@ describe("removeSigner guards", () => {
       [{ contractAddress: "0xacc", entrypoint: "remove_signer", calldata: ["3", "4"] }],
       undefined,
     );
-  });
-
-  it("solana: applies the same guards", async () => {
-    const send = jest.fn(async () => "sig");
-    await expect(fakeSolana({ status: "ready", send }).removeSigner(self)).rejects.toThrow(
-      /cannot revoke the device you are signing with/,
-    );
-    await expect(fakeSolana({ status: "needs-device-approval", send }).removeSigner(other)).rejects.toThrow(
-      /already an authorized signer/,
-    );
-    await expect(
-      fakeSolana({ status: "ready", send, isAuthorizedSigner: async () => false }).removeSigner(other),
-    ).rejects.toThrow(/not an authorized signer of this wallet/);
-    expect(send).not.toHaveBeenCalled();
-
-    await expect(fakeSolana({ status: "ready", send }).removeSigner(other)).resolves.toBe("sig");
-    expect(send).toHaveBeenCalledWith(["ix"]);
   });
 });

@@ -1,21 +1,17 @@
 import type { DevicePublicKey } from "../signer/DeviceSigner";
 
 /**
- * The source of truth for "this user + this app + this chain -> this address".
- *
- * The address is named by the first device's pubkey, so it cannot be derived
- * from identity: connect LOOKS IT UP here first and only computes an address
- * when the user has none yet. Cavos holds this map and nothing else — it cannot
- * spend, and a device that has cached its address can sign without it.
+ * First-write claim of a derived address. Native Ed25519 addresses come from
+ * the MasterDEK, not from this map. Cavos records the claim for billing and
+ * so two first devices cannot publish two different accounts for one login.
  */
 export interface WalletRegistry {
   /** The user's existing wallet, or null if they don't have one yet. */
   lookup(userId: string): Promise<RegisteredWallet | null>;
 
   /**
-   * Claim the address this device computed. Insert-only: if another device got
-   * there first, the returned address is THAT one, and this device is not the
-   * owner-by-first-write (it needs device approval).
+   * Claim the address this device derived. Insert-only: if another device got
+   * there first, the returned address is THAT one.
    */
   register(params: {
     userId: string;

@@ -66,7 +66,7 @@ export function CavosAuthModal({ open, onClose, config }: CavosAuthModalProps) {
 
         {ready && !busy ? <View style={styles.stack}>
           <Text style={styles.body}>Wallet ready: {cavos.address}</Text>
-          {config.secureStep !== "off" && cavos.walletStatus.isNewAccount ? <>
+          { (config.secureStep === "optional" || config.secureStep === "required") && cavos.walletStatus.isNewAccount ? <>
             {cavos.capabilities?.passkey ? <Button color={color} label="Secure with passkey" onPress={() => run(cavos.enrollPasskeyDefault)} /> : null}
             <Button color={color} label="Create recovery code" onPress={() => run(async () => setGeneratedRecoveryCode(await cavos.setupRecovery()))} />
             {generatedRecoveryCode ? <Text selectable style={styles.recovery}>{generatedRecoveryCode}</Text> : null}

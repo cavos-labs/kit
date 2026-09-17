@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.14
+
+### Native Ed25519 + enclave MasterDEK
+
+Solana is a native system account (Ed25519), not a PDA. Spend signs the chain
+message; the relayer is only the fee payer. The same MasterDEK derives Solana
+and Stellar keys, so one enclave enroll covers a multi-chain session.
+
+- **Connect does not prompt for a passkey.** Passkey is opt-in:
+  `enrollPasskeyDefault()` after login, `approveDeviceWithPasskey()` on a new
+  device (`connect(id, { passkey: true })`).
+- **Enclave enroll is no longer skipped** when this device already has a local
+  wrap. A previous connect that claimed the address and then failed to seal left
+  the Mac able to spend and a new phone with `not_enrolled`. Reconnect reseals;
+  enroll is idempotent once the wrap exists.
+- **Identity lookup** (`provider` + `subject`) finds a `dek_sealed` enrollment
+  so a second chain or device unwraps instead of minting another DEK.
+- **Native Stellar** matches Solana: `approveDeviceWithPasskey()` reconnects
+  with `{ passkey: true }`. `setupRecovery` is a no-op; `approveThisDeviceWithPasskey`
+  / `approveThisDeviceWithRecovery` throw. Grandfathered Horizon extras still
+  load for older wallets.
+
 ## 0.1.12
 
 ### Seed-lifetime hardening

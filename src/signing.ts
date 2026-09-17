@@ -20,7 +20,7 @@ export type SignatureCurve = "secp256r1" | "ed25519";
  * the raw message bytes for the ed25519 control key (Stellar). `publicKey` is
  * the string a verifier needs to confirm ownership:
  *  - Starknet: uncompressed hex `04‖x‖y` of the device P-256 key.
- *  - Solana: compressed hex (33 bytes) of the device P-256 key.
+ *  - Solana: the system-account address (ed25519).
  *  - Stellar: the `G…` control address (ed25519).
  *
  * Check `curve` to know which verification path to use.
@@ -74,20 +74,16 @@ export interface StellarSignedTransaction {
 }
 
 /**
- * Solana device signature over the secp256r1-precompile message. **This is NOT
- * a signed Solana transaction** — the device P-256 key never signs the Solana
- * transaction itself (it signs a domain-tagged message verified on-chain by the
- * native secp256r1 precompile). A relayer/feePayer must assemble the full
- * transaction (adding the feePayer signature + a recent blockhash) and submit
- * it; this triple is what the device contributes.
+ * Solana device signature over the serialized transaction message. The spend
+ * key is the native Ed25519 of the system account.
  */
 export interface SolanaSignedTransaction {
   chain: "solana";
-  /** The domain-tagged message bytes the device signed. */
+  /** Serialized Solana message the spend key signed. */
   message: Uint8Array;
-  /** 64-byte low-S `r‖s` P-256 signature over `sha256(message)`. */
+  /** 64-byte Ed25519 signature. */
   signature: Uint8Array;
-  /** 33-byte compressed P-256 public key of the device signer. */
+  /** 32-byte Ed25519 public key. */
   publicKey: Uint8Array;
 }
 

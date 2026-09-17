@@ -16,11 +16,14 @@ import type { ChainCall, ExecuteOptions, ComputeAddressParams } from "./chains/C
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 import { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
+import { deviceFactorFromUnwrapKey } from "./secret/factor";
 import type { RecoveryClient } from "./recovery/RecoveryClient";
+import type { SocialRecoveryClient } from "./recovery/SocialRecoveryClient";
+import type { SocialRecoveryCredential } from "./recovery/SocialRecoveryCredential";
 import { BackupSigner, deriveBackupKey } from "./recovery/BackupSigner";
 import { appNamespace } from "./identity";
 import { resolveAddress } from "./registry/resolveAddress";
-import type { PasskeyApprover, PasskeyEnrollParams } from "./signer/PasskeyProvider";
+import type { PasskeyApprover, PasskeyEnrollParams, PasskeyPrfProvider } from "./signer/PasskeyProvider";
 import { webauthnDigest, recoverCandidatePublicKeys, batchChallenge } from "./crypto/webauthn";
 import type { PasskeyAssertion } from "./crypto/webauthn";
 import { bytesToHex, bigIntTo32Bytes, utf8ToBytes } from "./crypto/encoding";
@@ -181,12 +184,17 @@ export interface ConnectOptions {
   classHash?: string;
 
   // --- Solana-only ---
-  /** Cavos device-account program id override. */
-  programId?: string;
   /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
   relayer?: SolanaRelayer;
   /** Self-funded fee-payer fallback when no relayer is configured. */
   feePayer?: Keypair;
+  socialRecovery?: SocialRecoveryClient;
+  socialRecoveryCredential?: SocialRecoveryCredential;
+  /**
+   * When the app is not using the enclave, a synced passkey derives the
+   * MasterDEK. The same credential on a new device produces the same address.
+   */
+  passkeyPrf?: PasskeyPrfProvider;
 
   // --- Stellar-only (classic `G…` multisig) ---
   /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
@@ -452,6 +460,9 @@ export class Cavos {
     opts: ConnectOptions & { identity: Identity },
   ): Promise<CavosWallet> {
     if (chain === "solana") {
+      const keyId = `${opts.identity.userId}:${opts.appSalt}`;
+      const unwrapKey = opts.stellarDeviceKey
+        ?? (opts.createStellarDeviceKey ? await opts.createStellarDeviceKey(keyId) : undefined);
       return CavosSolana.connect({
         network: SOLANA_ENV[opts.network],
         identity: opts.identity,
@@ -463,10 +474,12 @@ export class Cavos {
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
         ...(opts.registry ? { registry: opts.registry } : {}),
         ...(rpcFor('solana', opts) ? { rpcUrl: rpcFor('solana', opts)! } : {}),
-        ...(opts.programId ? { programId: opts.programId } : {}),
-        ...(opts.createSigner ? { createSigner: opts.createSigner } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
         ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
+        ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
+        ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
+        ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),
+        ...(unwrapKey ? { factor: deviceFactorFromUnwrapKey(unwrapKey) } : {}),
       });
     }
     if (chain === "stellar") {
@@ -486,6 +499,9 @@ export class Cavos {
         ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
         ...(opts.stellarRelayer ? { relayer: opts.stellarRelayer } : {}),
         ...(opts.stellarSourceKeypair ? { sourceKeypair: opts.stellarSourceKeypair } : {}),
+        ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
+        ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
+        ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),
       });
     }
     // Starknet
@@ -1368,10 +1384,10 @@ async function isDeployed(provider: RpcProvider, address: string): Promise<boole
   }
 }
 
-/** A chain wallet that can approve THIS device via a batched WebAuthn assertion
- * (implemented by `Cavos` and `CavosSolana`). Classic Stellar uses a WebAuthn PRF
- * factor instead (`CavosStellar.approveThisDeviceWithPasskey`), so it is
- * not part of this batch. */
+/** A Starknet wallet that can approve THIS device via a batched WebAuthn
+ * assertion (`Cavos`). Native Solana/Stellar restore by connecting with the
+ * same passkey; they are not part of this batch. Classic Stellar also has
+ * `CavosStellar.approveThisDeviceWithPasskey` for the extra-signer path. */
 export interface PasskeyApprovable {
   readonly chain: string;
   readonly status: string;
@@ -1391,7 +1407,7 @@ export interface PasskeyApprovable {
  * for all of them. Only wallets whose status is `needs-device-approval` are
  * touched. Returns the per-chain tx hashes.
  *
- *   await approveDeviceEverywhere([starknet, solana], passkey);
+ *   await approveDeviceEverywhere([starknet], passkey);
  */
 export async function approveDeviceEverywhere(
   wallets: PasskeyApprovable[],

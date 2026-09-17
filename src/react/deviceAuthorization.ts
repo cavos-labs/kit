@@ -34,8 +34,9 @@ export interface DeviceAuthorizationInput {
   /** Whether a fresh login proof is available this session. */
   socialCredential: boolean;
   /**
-   * Classic Stellar (`G…`) cannot protocol-restrict a recovery signer, so it
-   * never uses the enclave. Contract accounts (`C…`) are a later path.
+   * Classic Stellar (`G…`) used to force passkey because Horizon extras the
+   * enclave held could spend immediately. Native Ed25519 now unwraps a DEK
+   * instead, so Stellar follows the app's approval method like Solana.
    */
   chain?: "starknet" | "solana" | "stellar";
 }
@@ -43,7 +44,6 @@ export interface DeviceAuthorizationInput {
 export function resolveDeviceAuthorization(
   input: DeviceAuthorizationInput,
 ): DeviceAuthorizationMethod {
-  if (input.chain === "stellar") return "passkey";
   if (input.approval === "passkey") return "passkey";
   return input.socialCredential ? "enclave" : "enclave-needs-login";
 }

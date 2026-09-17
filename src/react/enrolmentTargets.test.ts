@@ -14,6 +14,7 @@ describe("choosing which wallets to enrol", () => {
     wallets: { chain: string; address: string; status: Parameters<typeof decideSocialRecovery>[0] }[],
   ) =>
     wallets
+      .filter((w) => w.chain === "starknet")
       .filter(
         (w) => decideSocialRecovery(w.status, enrolled.has(`${w.chain}:${w.address}`)).action === "enroll",
       )
@@ -25,12 +26,12 @@ describe("choosing which wallets to enrol", () => {
     { chain: "stellar", address: "G1", status: "undeployed" as const },
   ];
 
-  it("takes every deployed wallet, not just the visible one", () => {
-    expect(targets(session)).toEqual(["starknet", "solana"]);
+  it("takes every deployed Starknet wallet, not just the visible one", () => {
+    expect(targets(session)).toEqual(["starknet"]);
   });
 
-  it("leaves an undeployed wallet for its own first transaction", () => {
-    // There is no account on-chain yet to enrol an authority against.
+  it("leaves native Ed25519 wallets for connect-time DEK enrollment", () => {
+    expect(targets(session)).not.toContain("solana");
     expect(targets(session)).not.toContain("stellar");
   });
 
@@ -38,7 +39,7 @@ describe("choosing which wallets to enrol", () => {
     // The case that hid the bug: Starknet enrolled on an earlier login, so the
     // one wallet the old code looked at had nothing to do and it stopped there.
     enrolled.add("starknet:0x1");
-    expect(targets(session)).toEqual(["solana"]);
+    expect(targets(session)).toEqual([]);
     enrolled.clear();
   });
 });

@@ -41,6 +41,25 @@ describe("validateCavosConfig", () => {
     );
   });
 
+  it("keeps a paymaster key when Starknet is one of several chains", () => {
+    expect(
+      codes({
+        ...base,
+        chain: "solana",
+        chains: ["starknet", "solana", "stellar"],
+        defaultChain: "solana",
+        paymasterApiKey: "k",
+      }),
+    ).not.toContain("unused-paymaster-key");
+    expect(
+      codes({
+        ...base,
+        chains: ["starknet", "solana", "stellar"],
+        defaultChain: "solana",
+      }),
+    ).toContain("missing-paymaster-key");
+  });
+
   it("separates what breaks from what is merely suspect", () => {
     const problems = validateCavosConfig({ ...base, appId: undefined });
     expect(problems.every((p) => p.level === "warning")).toBe(true);
