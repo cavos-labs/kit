@@ -59,13 +59,13 @@ and can sign without Cavos once it has cached the address.
 For apps that only need one chain, pass `chain`:
 
 ```ts
-import { Cavos, StaticIdentity } from "@cavos/kit";
+import { Cavos } from "@cavos/kit";
 
 const wallet = await Cavos.connect({
   chain: "solana",                   // "starknet" | "solana" | "stellar"
   network: "testnet",                // "testnet" | "mainnet"
   appSalt: "my-app",
-  auth: new StaticIdentity({ userId: user.id, email: user.email }),
+  identity: { userId: user.id, email: user.email },
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
@@ -76,6 +76,16 @@ console.log(wallet.status);          // "undeployed" | "ready" | "needs-device-a
 if (wallet.status === "undeployed" || wallet.status === "ready") {
   await wallet.execute(1_000_000n, recipient); // deploys if needed, then sends
 }
+```
+
+`identity` is the canonical way to pass the signed-in user. If you'd rather hand
+the kit an auth provider that resolves the user itself, pass `auth` instead —
+`StaticIdentity` wraps a known user, and any `AuthProvider` implementation works:
+
+```ts
+import { StaticIdentity } from "@cavos/kit";
+
+auth: new StaticIdentity({ userId: user.id, email: user.email }),
 ```
 
 ### Multi-chain sessions
@@ -89,7 +99,7 @@ const session = await Cavos.connect({
   defaultChain: "stellar",           // must be in chains
   network: "testnet",
   appSalt: "my-app",
-  auth: new StaticIdentity({ userId: user.id }),
+  identity: { userId: user.id },
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
@@ -225,13 +235,13 @@ Native Solana has no on-chain approver and no recovery-code `add_signer`.
 ## Quickstart — Starknet
 
 ```ts
-import { Cavos, StaticIdentity } from "@cavos/kit";
+import { Cavos } from "@cavos/kit";
 
 const wallet = await Cavos.connect({
   chain: "starknet",
   network: "testnet",                // "testnet" (sepolia) | "mainnet"
   appSalt: "my-app",
-  auth: new StaticIdentity({ userId: user.id, email: user.email }),
+  identity: { userId: user.id, email: user.email },
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
   paymasterApiKey: process.env.NEXT_PUBLIC_CAVOS_PAYMASTER_API_KEY!, // required
 });
@@ -250,13 +260,13 @@ P-256 program account. Gas is sponsored by the Cavos relayer (`appId`) — the
 relayer is only the fee payer.
 
 ```ts
-import { Cavos, StaticIdentity } from "@cavos/kit";
+import { Cavos } from "@cavos/kit";
 
 const wallet = await Cavos.connect({
   chain: "solana",
   network: "testnet",                // -> solana-devnet ("mainnet" -> solana-mainnet)
   appSalt: "my-app",                 // part of HKDF; never change it
-  auth: new StaticIdentity({ userId: user.id, email: user.email }),
+  identity: { userId: user.id, email: user.email },
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
@@ -297,13 +307,13 @@ minted a random control key whose public key *is* the `G…`. Extra devices stil
 need a passkey or recovery code as additional weight-1 Horizon signers.
 
 ```ts
-import { Cavos, StaticIdentity } from "@cavos/kit";
+import { Cavos } from "@cavos/kit";
 
 const wallet = await Cavos.connect({
   chain: "stellar",
   network: "testnet",                // "testnet" | "mainnet"
   appSalt: "my-app",
-  auth: new StaticIdentity({ userId: user.id }),
+  identity: { userId: user.id },
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID, // optional sponsored relayer
 });
 
