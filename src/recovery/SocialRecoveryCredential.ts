@@ -60,14 +60,24 @@ export function socialRecoveryProvider(
  * selects which policy to ask for, and the enclave then verifies the token
  * against that policy in full.
  */
+export function readTokenSubject(idToken: string): string {
+  const subject = readPayload(idToken).sub;
+  if (typeof subject !== "string" || !subject || subject.length > 256) {
+    throw new Error("kit/auth: social recovery credential has no subject");
+  }
+  return subject;
+}
+
 function readIssuer(idToken: string): unknown {
+  return readPayload(idToken).iss;
+}
+
+function readPayload(idToken: string): { iss?: unknown; sub?: unknown } {
   const payload = idToken.split(".")[1];
   if (!payload) throw new Error("kit/auth: malformed social recovery credential");
   const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
   try {
-    return JSON.parse(
-      Buffer.from(padded, "base64").toString("utf8"),
-    )?.iss;
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
   } catch {
     throw new Error("kit/auth: malformed social recovery credential");
   }

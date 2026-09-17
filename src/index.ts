@@ -1,11 +1,8 @@
 /**
- * @cavos/kit — device-native verifiable smart accounts.
+ * @cavos/kit — device-native accounts on Starknet, Solana, and Stellar.
  *
- * Phase 1: Starknet silent device signers (secp256r1). The device key lives on
- * the device (non-extractable WebCrypto key on web, Secure Enclave on native)
- * and signs invisibly — no passkey, no biometrics. OAuth / email only derive the
- * account address. The API is chain-configurable so Stellar and Solana adapters
- * slot in later behind the same `ChainAdapter` interface.
+ * Starknet: silent secp256r1 DeviceAccount. Solana/Stellar: native Ed25519
+ * whose spend key is HKDF of a MasterDEK (enclave seal or passkey PRF).
  */
 
 // High-level entry point (Privy-like: log in -> ready, deployed, gasless wallet)
@@ -105,23 +102,10 @@ export {
   DEVICE_ACCOUNT_CLASS_HASH,
 } from "./chains/starknet/constants";
 export type { StarknetNetwork } from "./chains/starknet/constants";
-export {
-  SolanaAdapter,
-  serializeInstructions,
-  compressedPubkey,
-  encodeLowSSignature,
-  buildSecp256r1Instruction,
-  anchorDiscriminator,
-} from "./chains/solana/SolanaAdapter";
-export type { SolanaAdapterOptions, InstructionData, InstructionAccount } from "./chains/solana/SolanaAdapter";
-export {
-  DEVICE_ACCOUNT_PROGRAM_ID,
-  SECP256R1_PROGRAM_ID,
-  SOLANA_NETWORKS,
-} from "./chains/solana/constants";
+export { SOLANA_NETWORKS } from "./chains/solana/constants";
 export type { SolanaNetwork } from "./chains/solana/constants";
 export { CavosSolana } from "./chains/solana/CavosSolana";
-export type { ConnectSolanaOptions, RecoverSolanaOptions } from "./chains/solana/CavosSolana";
+export type { ConnectSolanaOptions, RecoverSolanaOptions, InstructionData, InstructionAccount } from "./chains/solana/CavosSolana";
 export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 

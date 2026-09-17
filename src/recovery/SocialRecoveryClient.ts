@@ -86,16 +86,54 @@ interface StartedSession {
 export class SocialRecoveryClient {
   constructor(private readonly opts: SocialRecoveryClientOptions) {}
 
+  async lookupDekEnrollment(params: {
+    provider: SocialRecoveryCredential["provider"];
+    subject: string;
+  }): Promise<{ wallet_address: string } | null> {
+    const query = new URLSearchParams({
+      app_id: this.opts.appId,
+      provider: params.provider,
+      subject: params.subject,
+    });
+    if (this.opts.environment) query.set("environment", this.opts.environment);
+    let row: { enrolled?: unknown; wallet_address?: unknown } | null = null;
+    const url = new URL("/api/recovery/social/enrollment", this.opts.baseUrl);
+    url.search = query.toString();
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) return null;
+      row = await response.json();
+    } catch {
+      return null;
+    }
+    if (!row?.enrolled || typeof row.wallet_address !== "string" || !row.wallet_address) {
+      return null;
+    }
+    return { wallet_address: row.wallet_address };
+  }
+
   async enroll(params: {
     walletAddress: string;
     credential: SocialRecoveryCredential;
+    dek?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
     const session = await this.start(
       params.walletAddress,
       "enroll",
       params.credential,
+      Boolean(params.dek),
     );
     if (session.resume_result?.result === "enrolled") {
+      if (params.dek) {
+        return {
+          sessionId: session.session_id,
+          result: {
+            result: "enrolled",
+            already_enrolled: true,
+            wallet_address: params.walletAddress,
+          },
+        };
+      }
       return { sessionId: session.session_id, result: session.resume_result };
     }
 
@@ -113,6 +151,7 @@ export class SocialRecoveryClient {
         token_fingerprint: params.credential.tokenFingerprint,
       },
       policy: session.policy,
+      ...(params.dek ? { stellar_dek_b64: toB64(params.dek) } : {}),
     });
     return { sessionId: session.session_id, result };
   }
@@ -121,6 +160,7 @@ export class SocialRecoveryClient {
     walletAddress: string;
     credential: SocialRecoveryCredential;
     authorizations?: ChainAuthorization[];
+    recipientPublicSec1?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
     const session = await this.start(
       params.walletAddress,
@@ -146,6 +186,9 @@ export class SocialRecoveryClient {
       },
       sealed_record_b64: session.sealed_record_b64,
       authorizations: params.authorizations ?? [],
+      ...(params.recipientPublicSec1
+        ? { stellar_recipient_pubkey_b64: toB64(params.recipientPublicSec1) }
+        : {}),
     });
     return { sessionId: session.session_id, result };
   }
@@ -161,6 +204,7 @@ export class SocialRecoveryClient {
     walletAddress: string,
     action: SocialRecoveryAction,
     credential: SocialRecoveryCredential,
+    dekEnroll = false,
   ): Promise<StartedSession> {
     return this.fetchJson("/api/recovery/social/sessions", {
       method: "POST",
@@ -174,6 +218,7 @@ export class SocialRecoveryClient {
         // fall back to the environment's single configured provider.
         provider: credential.provider,
         auth_challenge: credential.tokenFingerprint,
+        ...(dekEnroll ? { dek_enroll: true } : {}),
       }),
     });
   }

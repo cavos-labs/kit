@@ -17,6 +17,11 @@ import {
 import type { Transaction } from "@stellar/stellar-sdk";
 import { utf8ToBytes } from "../../crypto/encoding";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
+import type { SocialRecoveryClient } from "../../recovery/SocialRecoveryClient";
+import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCredential";
+import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
+import { InMemoryWalletRegistry, type WalletRegistry } from "../../registry/WalletRegistry";
+import { resolveNativeStellar } from "./nativeConnect";
 import {
   prefixedMessageBytes,
   type MessageSignature,
@@ -28,6 +33,7 @@ import {
   signTransactionWithControlKey,
   createSorobanSigner,
 } from "./WebCryptoControlKey";
+import type { PasskeyPrfProvider } from "../../signer/PasskeyProvider";
 import { importPasskeySigner, importRecoverySigner } from "./derivedSigner";
 
 /** Default starting balance (stroops) for a new account: covers the 1 XLM base
@@ -70,6 +76,13 @@ export interface ConnectStellarOptions {
   horizonUrl?: string;
   /** Starting balance for a fresh account, in stroops. */
   startingBalance?: bigint;
+  credential?: SocialRecoveryCredential;
+  socialRecovery?: SocialRecoveryClient;
+  recovery?: EnclaveDekPort;
+  factor?: DeviceFactor;
+  wrapStore?: WrapStore;
+  registry?: WalletRegistry;
+  passkey?: PasskeyPrfProvider;
 }
 
 /**
@@ -114,6 +127,11 @@ export class CavosStellar {
   // now (the Soroban `C…` path was removed), so this is "stellar".
   readonly chain = "stellar" as const;
   isNewAccount = false;
+  /**
+   * Native MasterDEK wallet. A synced passkey unwraps the DEK onto this device;
+   * it is not added as a Horizon extra signer.
+   */
+  nativeDek = false;
   private statusValue: StellarConnectStatus;
 
   /** Track whether account is created on-chain (for lazy deploy). */
@@ -194,19 +212,51 @@ export class CavosStellar {
       sourceKeypair: opts.sourceKeypair,
     };
 
-    // The registry names the wallet. On a miss this device generates the control
-    // key and its public key BECOMES the `G…` — the first device names the
-    // account here exactly as the constructor does on Starknet.
-    const registry = opts.appId
-      ? new HttpWalletRegistry({
-          baseUrl: backendUrl,
-          appId: opts.appId,
-          network: opts.network,
-          ...(opts.environment ? { environment: opts.environment } : {}),
-          authToken: () => opts.auth?.getAuthToken?.() ?? null,
-        })
-      : null;
+    const registry: WalletRegistry | null =
+      opts.registry ??
+      (opts.appId
+        ? new HttpWalletRegistry({
+            baseUrl: backendUrl,
+            appId: opts.appId,
+            network: opts.network,
+            ...(opts.environment ? { environment: opts.environment } : {}),
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          })
+        : null);
 
+    if (opts.recovery || opts.socialRecovery || opts.passkey) {
+      const native = await resolveNativeStellar({
+        identity,
+        appSalt: opts.appSalt,
+        registry: registry ?? new InMemoryWalletRegistry(),
+        credential: opts.credential,
+        socialRecovery: opts.socialRecovery,
+        recovery: opts.recovery,
+        factor: opts.factor,
+        store: opts.wrapStore,
+        passkey: opts.passkey,
+      });
+      const deployed = await adapter.isDeployed(native.address);
+      const wallet = new CavosStellar(
+        identity,
+        native.address,
+        native.control ? (deployed ? "ready" : "undeployed") : "needs-device-approval",
+        opts.network,
+        adapter,
+        opts.deviceKey,
+        native.control,
+        undefined,
+        relayer,
+        buildOpts,
+      );
+      wallet.isNewAccount = native.isNewAccount;
+      wallet.nativeDek = true;
+      return wallet;
+    }
+
+    // Grandfathered path. First device named a random G that cannot be sealed
+    // into the enclave after the fact. A new device still needs a passkey or
+    // recovery code for those accounts.
     type FreshKey = { address: string; control: WebCryptoControlKey };
     const candidate = await WebCryptoControlKey.create();
     const generated: FreshKey = { address: candidate.publicAddress(), control: candidate };
@@ -405,16 +455,18 @@ export class CavosStellar {
     const extraSigners: string[] = [];
     let passkeyEntry: Uint8Array | undefined;
 
-    const passkeyPrf = this._pendingPasskeyPrf ?? (await this.passkeyFactorForCreate?.()) ?? null;
-    if (passkeyPrf) {
-      const passkey = await importPasskeySigner(passkeyPrf);
-      extraSigners.push(passkey.publicAddress());
-      passkeyEntry = utf8ToBytes(passkey.publicAddress());
-    }
+    if (!this.nativeDek) {
+      const passkeyPrf = this._pendingPasskeyPrf ?? (await this.passkeyFactorForCreate?.()) ?? null;
+      if (passkeyPrf) {
+        const passkey = await importPasskeySigner(passkeyPrf);
+        extraSigners.push(passkey.publicAddress());
+        passkeyEntry = utf8ToBytes(passkey.publicAddress());
+      }
 
-    if (this._pendingRecoveryCode) {
-      const recovery = await importRecoverySigner(this._pendingRecoveryCode);
-      extraSigners.push(recovery.publicAddress());
+      if (this._pendingRecoveryCode) {
+        const recovery = await importRecoverySigner(this._pendingRecoveryCode);
+        extraSigners.push(recovery.publicAddress());
+      }
     }
 
     const alreadyExists = await this.adapter.isDeployed(this.address);
@@ -614,6 +666,7 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
+    if (this.nativeDek) return this.address;
     if (this.statusValue === "undeployed") {
       this._pendingPasskeyPrf = prfOutput;
       await this._createAccount();

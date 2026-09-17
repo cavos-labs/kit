@@ -93,11 +93,10 @@ describe("Starknet lazy deploy behavior", () => {
   });
 });
 
-describe("Solana lazy deploy behavior", () => {
-  test("status 'undeployed' indicates PDA not initialized", () => {
-    const isUndeployed = (status: string) => status === "undeployed";
-    expect(isUndeployed("undeployed")).toBe(true);
-    expect(isUndeployed("ready")).toBe(false);
+describe("Solana native account", () => {
+  test("connect is ready without a program initialize", () => {
+    const isReady = (status: string) => status === "ready";
+    expect(isReady("ready")).toBe(true);
   });
 });
 

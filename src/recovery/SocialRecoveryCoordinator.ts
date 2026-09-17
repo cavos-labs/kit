@@ -1,12 +1,8 @@
-import { PublicKey } from "@solana/web3.js";
 import type { CavosWallet, NetworkEnv } from "../Cavos";
-import type { CavosStellar } from "../chains/stellar/CavosStellar";
-import { bigIntTo32Bytes, hexToBytes } from "../crypto/encoding";
-import { compressedPubkey } from "../chains/solana/SolanaAdapter";
+import { bigIntTo32Bytes } from "../crypto/encoding";
 import { STARKNET_NETWORKS } from "../chains/starknet/constants";
 import {
   SocialRecoveryClient,
-  type ChainAuthorization,
   type SocialRecoveryResult,
 } from "./SocialRecoveryClient";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
@@ -28,18 +24,9 @@ interface StarknetSignedAuthorization {
   expires_at: number;
 }
 
-interface SolanaSignedAuthorization {
-  chain: "solana";
-  message_b64: string;
-  signature_b64: string;
-  recovery_pubkey_compressed_b64: string;
-  recovery_nonce: string;
-  expires_at: number;
-}
-
 interface RecoveryResult extends SocialRecoveryResult {
   result: "recovered";
-  authorizations?: (StarknetSignedAuthorization | SolanaSignedAuthorization)[];
+  authorizations?: StarknetSignedAuthorization[];
 }
 
 export interface CoordinatedRecoveryResult {
@@ -52,21 +39,21 @@ export interface CoordinatedRecoveryResult {
 
 /**
  * Enrol the TEE-generated authority in the chain-native recovery mechanism.
- * Starknet and Solana enforce a P-256 recovery authority and timelock on-chain.
- * Classic Stellar does not use the enclave — a new device is authorized with a
- * passkey or recovery code. Contract accounts (`C…`) are a later path.
+ * Starknet writes a P-256 recovery authority on-chain. Native Solana and
+ * Stellar seal a MasterDEK at connect instead. They do not add a spend signer
+ * the enclave holds.
  */
 export interface AgreedRecoveryAuthority {
   sessionId: string;
   result: EnrollmentResult;
 }
 
-function refuseClassicStellar(
+function refuseOnChainSocial(
   wallet: CavosWallet,
-): asserts wallet is Exclude<CavosWallet, CavosStellar> {
-  if (wallet.chain === "stellar") {
+): asserts wallet is Extract<CavosWallet, { chain: "starknet" }> {
+  if (wallet.chain !== "starknet") {
     throw new Error(
-      "kit/social-recovery: classic Stellar does not use the enclave; authorize a new device with a passkey or recovery code",
+      "kit/social-recovery: native Ed25519 chains enroll the DEK at connect",
     );
   }
 }
@@ -93,7 +80,7 @@ export async function agreeRecoveryAuthority(params: {
   credential: SocialRecoveryCredential;
 }): Promise<AgreedRecoveryAuthority> {
   const { client, wallet, credential } = params;
-  refuseClassicStellar(wallet);
+  refuseOnChainSocial(wallet);
   const enrollment = await client.enroll({
     walletAddress: wallet.address,
     credential,
@@ -114,24 +101,14 @@ export async function writeRecoveryAuthority(params: {
   delaySeconds: number;
 }): Promise<{ sessionId: string; transactionHash?: string }> {
   const { client, wallet, delaySeconds } = params;
-  refuseClassicStellar(wallet);
+  refuseOnChainSocial(wallet);
   const { sessionId, result } = params.authority;
-
-  let transactionHash: string;
-  if (wallet.chain === "starknet") {
-    ({ transactionHash } = await wallet.enrollSocialRecovery({
-      recoveryXHex: result.recovery_x_hex,
-      recoveryYHex: result.recovery_y_hex,
-      delaySeconds,
-      policyHashHex: result.policy_hash_hex,
-    }));
-  } else {
-    transactionHash = await wallet.enrollSocialRecovery({
-      recoveryPubkeyCompressed: fromB64(result.recovery_pubkey_compressed_b64),
-      delaySeconds,
-      policyHash: exactBytes(result.policy_hash_hex, 32, "policy hash"),
-    });
-  }
+  const { transactionHash } = await wallet.enrollSocialRecovery({
+    recoveryXHex: result.recovery_x_hex,
+    recoveryYHex: result.recovery_y_hex,
+    delaySeconds,
+    policyHashHex: result.policy_hash_hex,
+  });
   await client.confirmEnrollment(sessionId, transactionHash);
   return { sessionId, transactionHash };
 }
@@ -159,36 +136,16 @@ export async function recoverHardwareIsolatedDevice(params: {
   delaySeconds: number;
 }): Promise<CoordinatedRecoveryResult> {
   const { client, wallet, credential, network, delaySeconds } = params;
-  refuseClassicStellar(wallet);
-  const now = Math.floor(Date.now() / 1000);
-
-  // Resume before re-authorizing. Scheduling and finalizing are two separate
-  // transactions with an enclave round-trip in front of them, so a closed tab or
-  // a relay error in between leaves an authorization scheduled but not applied —
-  // and the program refuses to schedule over a live one, failing every retry with
-  // RecoveryAlreadyPending until it expires (an hour, by default).
-  //
-  // If the standing authorization is already for THIS device, it is exactly what
-  // we were about to ask the enclave for. Finalize it and skip the round-trip
-  // entirely: correct, and it turns a two-minute cold start into one transaction.
-  if (wallet.chain === "solana") {
-    const pending = await wallet.pendingSocialRecovery();
-    if (pending && now <= pending.expiresAt && (await wallet.pendingRecoveryIsForThisDevice())) {
-      if (now < pending.readyAt) {
-        // Still inside the on-chain timelock — the caller waits and finalizes.
-        return { finalized: false, readyAt: pending.readyAt };
-      }
-      const finalizeTransaction = await wallet.finalizeSocialRecovery();
-      return { finalized: true, readyAt: pending.readyAt, finalizeTransaction };
-    }
+  if (wallet.chain === "stellar" || wallet.chain === "solana") {
+    return { finalized: true, readyAt: Math.floor(Date.now() / 1000) };
   }
-
+  const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + Math.max(delaySeconds + 3600, 3600);
-  let authorizations: ChainAuthorization[] | undefined;
-
-  if (wallet.chain === "starknet") {
-    const nonce = await wallet.socialRecoveryNonce();
-    authorizations = [{
+  const nonce = await wallet.socialRecoveryNonce();
+  const recovered = await client.recover({
+    walletAddress: wallet.address,
+    credential,
+    authorizations: [{
       chain: "starknet",
       chain_id_hex:
         STARKNET_NETWORKS[network === "mainnet" ? "mainnet" : "sepolia"].chainId,
@@ -197,93 +154,38 @@ export async function recoverHardwareIsolatedDevice(params: {
       new_y_hex: toHex32(wallet.publicKey.y),
       recovery_nonce: nonce.toString(),
       expires_at: expiresAt,
-    }];
-  } else if (wallet.chain === "solana") {
-    const nonce = await wallet.socialRecoveryNonce();
-    authorizations = [{
-      chain: "solana",
-      account_b58_bytes_b64: toB64(new PublicKey(wallet.address).toBytes()),
-      new_pubkey_b64: toB64(compressedPubkey(wallet.publicKey)),
-      recovery_nonce: nonce.toString(),
-      expires_at: expiresAt,
-    }];
-  }
-
-  const recovered = await client.recover({
-    walletAddress: wallet.address,
-    credential,
-    ...(authorizations ? { authorizations } : {}),
+    }],
   });
   const result = recovered.result as RecoveryResult;
   if (result.result !== "recovered") {
     throw new Error("kit/social-recovery: enclave returned the wrong result");
   }
 
-  if (wallet.chain === "starknet") {
-    const signed = result.authorizations?.find(
-      (authorization): authorization is StarknetSignedAuthorization =>
-        authorization.chain === "starknet",
-    );
-    if (!signed) throw new Error("kit/social-recovery: Starknet authorization is missing");
-    const scheduled = await wallet.scheduleSocialRecovery({
-      nonce: BigInt(signed.recovery_nonce),
-      expiresAt: BigInt(signed.expires_at),
-      rHex: signed.r_hex,
-      sHex: signed.s_hex,
-      yParity: signed.y_parity,
-    });
-    if (delaySeconds > 0) {
-      return {
-        finalized: false,
-        readyAt: now + delaySeconds,
-        scheduleTransaction: scheduled.transactionHash,
-      };
-    }
-    const finalized = await wallet.finalizeSocialRecovery();
-    return {
-      finalized: true,
-      readyAt: now,
-      scheduleTransaction: scheduled.transactionHash,
-      finalizeTransaction: finalized.transactionHash,
-    };
-  }
-
   const signed = result.authorizations?.find(
-    (authorization): authorization is SolanaSignedAuthorization =>
-      authorization.chain === "solana",
+    (authorization): authorization is StarknetSignedAuthorization =>
+      authorization.chain === "starknet",
   );
-  if (!signed) throw new Error("kit/social-recovery: Solana authorization is missing");
-  const authorization = {
-    expiresAt: signed.expires_at,
-    message: fromB64(signed.message_b64),
-    signature: fromB64(signed.signature_b64),
-    recoveryPubkeyCompressed: fromB64(signed.recovery_pubkey_compressed_b64),
-  };
-
-  // With no timelock there is nothing to wait for between scheduling and
-  // finalizing, so both go in one transaction — one relay round trip and one
-  // confirmation instead of two. That is roughly half the wall-clock time of
-  // adding a device, and the enclave itself only accounts for about a second
-  // of it.
-  //
-  // The program still enforces the delay: it computes `ready_at` from its own
-  // clock and refuses to finalize before it, so batching cannot skip a delay
-  // that exists. It simply removes a wait that does not.
-  if (delaySeconds === 0) {
-    const transaction = await wallet.scheduleAndFinalizeSocialRecovery(authorization);
+  if (!signed) throw new Error("kit/social-recovery: Starknet authorization is missing");
+  const scheduled = await wallet.scheduleSocialRecovery({
+    nonce: BigInt(signed.recovery_nonce),
+    expiresAt: BigInt(signed.expires_at),
+    rHex: signed.r_hex,
+    sHex: signed.s_hex,
+    yParity: signed.y_parity,
+  });
+  if (delaySeconds > 0) {
     return {
-      finalized: true,
-      readyAt: now,
-      scheduleTransaction: transaction,
-      finalizeTransaction: transaction,
+      finalized: false,
+      readyAt: now + delaySeconds,
+      scheduleTransaction: scheduled.transactionHash,
     };
   }
-
-  const scheduleTransaction = await wallet.scheduleSocialRecovery(authorization);
+  const finalized = await wallet.finalizeSocialRecovery();
   return {
-    finalized: false,
-    readyAt: now + delaySeconds,
-    scheduleTransaction,
+    finalized: true,
+    readyAt: now,
+    scheduleTransaction: scheduled.transactionHash,
+    finalizeTransaction: finalized.transactionHash,
   };
 }
 
@@ -299,28 +201,8 @@ function assertEnrollmentResult(result: EnrollmentResult): void {
   }
 }
 
-function exactBytes(value: string, length: number, label: string): Uint8Array {
-  const bytes = hexToBytes(value);
-  if (bytes.length !== length) {
-    throw new Error(`kit/social-recovery: malformed ${label}`);
-  }
-  return bytes;
-}
-
 function toHex32(value: bigint): string {
   return `0x${Array.from(bigIntTo32Bytes(value), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
-}
-
-function toB64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function fromB64(value: string): Uint8Array {
-  const normal = value.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(normal.padEnd(Math.ceil(normal.length / 4) * 4, "="));
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }

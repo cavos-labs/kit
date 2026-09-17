@@ -8,11 +8,11 @@ Touch ID prompts). OAuth / email authenticates the user; the registry names the
 wallet; the device key signs.
 
 **Chains:** **Starknet, Solana, and Stellar** are implemented today. Starknet
-and Solana use on-chain device-signer accounts. Stellar uses a classic `G…`
-account whose control key is encrypted in the account's own data entries and
-unlocked by an enrolled device, passkey, or recovery factor. All three are
-available through the unified `Cavos.connect({ chains, defaultChain, network })`
-entry point.
+uses an on-chain Cairo `DeviceAccount` authorized by a silent P-256 device
+signer. Solana and Stellar use **native Ed25519** accounts (a system account
+and a classic `G…`) whose spend key is HKDF of one MasterDEK. A passkey or the
+attested enclave restores that DEK on a new device. All three are available
+through `Cavos.connect({ chains, defaultChain, network })`.
 
 **Direction:** Cavos is an every-chain wallet layer. These three adapters are
 the current implementation set, not the boundary of the product. New chains
@@ -191,31 +191,32 @@ if (wallet.status === "undeployed") {
 |-------|------|
 | `Cavos.connect` | Unified entry: auth → registry lookup/claim → device key → lazy deploy on first execute. |
 | `WalletRegistry` | `(userId, appId, chain) → address`. Source of truth. Cavos holds the map; cannot spend. The device holds the key and can sign without Cavos once it has cached the address. |
-| `appSalt` | Names this app's **device-key slot**, so the same user in two apps gets two device keys. Does **not** name the address (the registry does). |
+| `appSalt` | Device-key slot **and**, on Solana/Stellar native, HKDF salt for the spend key. Never change it. The registry key is still `(userId, appId, chain, network)`. |
 | `status` | `"undeployed"` (first execute deploys), `"ready"` (deployed + authorized), `"needs-device-approval"` (deployed, device not authorized). |
-| `StarknetAdapter` / `SolanaAdapter` | Per-chain: compute the address a new user's first device claims, build deploy/add/remove calls, serialize signatures. |
-| `CavosStellar` / `StellarAdapter` | Classic Stellar `G…` accounts named by the first device's ed25519 key; extra devices, passkey, and recovery are Horizon signers. |
+| `StarknetAdapter` | Computes the DeviceAccount address a first device claims, and builds deploy/add/remove calls. |
+| `CavosSolana` | Native Ed25519 system account. Address is HKDF of the MasterDEK. Relayer is fee payer only. |
+| `CavosStellar` / `StellarAdapter` | Classic `G…` account. With enclave or passkey, the same MasterDEK as Solana. Grandfathered accounts still use extra Horizon signers. |
 | `WebCryptoSigner` | Browser silent device signer: non-extractable P-256 key in IndexedDB, no UI on sign. |
 | `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` / `StellarRelayer` | Cavos gasless sponsor: co-signs as fee payer so the integrator holds no keypair. |
-| `RecoveryClient` | Interface to the backend for the email-approval multi-device flow (Starknet/Solana). |
+| `RecoveryClient` | Email-approval multi-device relay (**Starknet**). Native Solana/Stellar restore the MasterDEK instead. |
 | `SocialRecoveryClient` | Verifies hardware attestation, binds a provider token to one session, encrypts directly to the enclave. |
 
 ## Enroll factors before deploy
 
-Passkey and recovery enrollment can happen before the first deploy. The factors
-are stored locally and included in the first deployment transaction:
+On **Starknet**, passkey and recovery enrollment can happen before the first
+deploy. The factors are stored locally and included in the first transaction:
 
 ```ts
 const wallet = await Cavos.connect({ chain: "starknet", ... });
-
-// Status is "undeployed" — no on-chain account yet
-await wallet.enrollPasskey(passkey, params); // stores pending, no tx
-await wallet.setupRecovery(code);            // stores pending, no tx
-
-// First execute deploys + initializes + adds pending factors atomically
-await wallet.execute(calls); // one sponsored transaction does it all
+await wallet.enrollPasskey(passkey, params);
+await wallet.setupRecovery(code);
+await wallet.execute(calls);
 ```
+
+On **Solana and Stellar**, login does not prompt for a passkey. After connect,
+call `enrollPasskeyDefault()` from `useCavos()` when you want the PRF credential.
+Native Solana has no on-chain approver and no recovery-code `add_signer`.
 
 ## Quickstart — Starknet
 
@@ -239,8 +240,10 @@ if (wallet.chain === "starknet") {
 
 ## Quickstart — Solana
 
-Same unified entry point; pass `chain: "solana"`. Gas is sponsored by the Cavos
-relayer (activated by `appId`) — no `paymasterApiKey` and no fee-payer keypair.
+The address **is** an Ed25519 system account (Phantom-shaped). The spend key is
+HKDF of a MasterDEK (`cavos-ed25519-solana-v1`); it is not a PDA and not a
+P-256 program account. Gas is sponsored by the Cavos relayer (`appId`) — the
+relayer is only the fee payer.
 
 ```ts
 import { Cavos, StaticIdentity } from "@cavos/kit";
@@ -248,55 +251,46 @@ import { Cavos, StaticIdentity } from "@cavos/kit";
 const wallet = await Cavos.connect({
   chain: "solana",
   network: "testnet",                // -> solana-devnet ("mainnet" -> solana-mainnet)
-  appSalt: "my-app",
+  appSalt: "my-app",                 // part of HKDF; never change it
   auth: new StaticIdentity({ userId: user.id, email: user.email }),
-  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID, // activates the gasless relayer
+  appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID,
 });
 
 if (wallet.chain === "solana") {
   const signature = await wallet.execute(1_000_000n, recipient); // lamports
-  console.log(signature);
+  console.log(signature);            // the user's Ed25519 signed the message
 }
 ```
 
-On Solana every guarded action (initialize, add/remove signer, execute) pairs
-Solana's **native secp256r1 precompile** with the Cavos `cavos-device-account`
-program instruction. The address is a PDA of
-`[b"cavos-account", app_namespace, first_device_pubkey_x]`, so `initialize` with
-any other key derives a different account and cannot claim this one.
+`connect` does not create the account on-chain. The address is `ready` on this
+device as soon as the spend key is unwrapped. The account exists on Solana once
+it holds lamports (fund it, then spend). There is no `initialize` instruction
+and no `add_signer`.
 
 ```ts
-// Arbitrary program calls (SPL transfers, swaps, staking):
 import type { InstructionData } from "@cavos/kit";
 
 if (wallet.chain === "solana") {
-  const instructions: InstructionData[] = [/* … SPL/swap instructions … */];
-  await wallet.executeInstructions(instructions); // CPIs run with the PDA signing
+  const instructions: InstructionData[] = [/* SPL / swap ixs; user is the signer */];
+  await wallet.executeInstructions(instructions);
 }
 ```
 
-> **Note:** `execute(amount, destination)` moves **lamports** (SOL); use
-> `executeInstructions(instructions)` for arbitrary program calls. Sponsored
-> `executeInstructions` is gated by the app's Solana program allowlist (dashboard
-> → Solana Programs); targets outside the allowlist + safe set are rejected.
+> **Note:** `execute(amount, destination)` moves **lamports**. Sponsored
+> `executeInstructions` is gated by the app's Solana program allowlist
+> (dashboard → Solana Programs) plus System / SPL Token / Token-2022 / ATA.
 
 ## Quickstart — Stellar
 
-`CavosStellar` creates or loads a classic Stellar `G…` account. The address is
-named by the first device's control key (a random Ed25519 keypair whose public
-key IS the `G…` address). On a known device, that key is loaded from local
-storage and signs silently.
+`CavosStellar` creates or loads a classic Stellar `G…` account.
 
-**Key model:**
+**With `deviceApproval: "enclave"` or a passkey** (the current path): the `G…`
+address is HKDF of the same MasterDEK as Solana (`cavos-ed25519-stellar-v1`).
+A new device unwraps that DEK; it does not add a second Horizon signer.
 
-1. On a **new user**, the first device generates a random Ed25519 control key.
-   Its public key becomes the `G…` address. The private key never leaves the
-   device (non-extractable WebCrypto in the browser).
-2. On a **returning user**, the device loads its local control key. Extra
-   devices, a passkey, and a recovery code are additional weight-1 Horizon
-   signers — not wraps of a shared seed.
-3. Until the account is created on-chain, the control key is held **pending**
-   locally — `signMessage` works, but nothing is on Stellar yet.
+**Grandfathered accounts** (no enclave, no passkey at connect): the first device
+minted a random control key whose public key *is* the `G…`. Extra devices still
+need a passkey or recovery code as additional weight-1 Horizon signers.
 
 ```ts
 import { Cavos, StaticIdentity } from "@cavos/kit";
@@ -381,13 +375,12 @@ s_high, y_parity]` — what `DeviceAccount.__validate__` decodes. The contract
 recomputes `sha256(tx_hash)`, normalizes high-s, and recovers the secp256r1
 signer.
 
-**Solana:** Each guarded action pairs the native `Secp256r1SigVerify` precompile
-with the Cavos program instruction. The fee payer is not bound by the device
-signature, so the relayer co-signs without re-authorizing the action.
+**Solana:** The spend key is Ed25519. It signs the Solana transaction message.
+The relayer co-signs only as fee payer.
 
-**Stellar:** Each device signs with its own Ed25519 Horizon signer. The first
-device's public key *is* the `G…` address. A passkey or recovery code derives
-an extra signer that can add a new device. Protection varies by runtime:
+**Stellar:** The control key is Ed25519. On the native-DEK path it is derived
+from the MasterDEK; on grandfathered accounts it is the first device's random
+key. Protection varies by runtime:
 
 - **Browser (WebCrypto):** The control key is a non-extractable `CryptoKey`.
   XSS cannot call `exportKey` on it. XSS can still call `sign` or `execute`
@@ -396,12 +389,10 @@ an extra signer that can add a new device. Protection varies by runtime:
   is used.
 - **Node:** The caller handles the raw key; no WebCrypto isolation.
 
-**Security model:** Starknet and Solana device keys are non-extractable P-256
-keys in WebCrypto (browser) or Secure Enclave/Keystore (mobile). Stellar browser
-uses a non-extractable Ed25519 `CryptoKey`; React Native iOS keeps the seed
-native-side; Node callers handle scalars directly. Signing is silent — no
-per-signature user-verification gate (unlike a biometric passkey). Multi-device
-and the non-custodial recovery relay cover device loss.
+**Security model:** Starknet device keys are non-extractable P-256. Solana and
+Stellar spend keys are non-extractable Ed25519 (`CryptoKey` in the browser).
+Signing is silent. A new device restores the MasterDEK with the enclave or a
+passkey PRF — login itself never prompts for a passkey.
 
 ## Hardware-isolated social recovery
 
@@ -415,8 +406,9 @@ the package (`DEFAULT_SOCIAL_RECOVERY_ATTESTATION`). The enclave:
 - Runs inside a Nitro VM with no persistent storage, no SSH, no operator access.
 - Verifies that the provider token (Google/Apple/email) was minted for this user
   within the last 5 minutes.
-- Schedules a signer-addition on-chain; the account's timelock + cancellation
-  logic is the final gate.
+- On **Solana and Stellar**, seals or unwraps the MasterDEK. It does not sign
+  spends.
+- On **Starknet**, schedules a restricted on-chain signer-addition.
 
 With React, provide independently pinned measurements if you run your own
 enclave (otherwise the shipped constants are used):
@@ -441,12 +433,19 @@ enclave (otherwise the shipped constants are used):
 </CavosProvider>
 ```
 
-The provider automatically enrolls ready **Starknet and Solana** wallets after a
-fresh login and recovers an unregistered device on those chains with the same
-configured provider. Those two chains restrict the enclave authority on-chain to
-scheduling one exact signer, with nonce, expiry, cancellation, and optional
-timelock. Classic Stellar (`G…`) is not enrolled: a new device uses a passkey or
-a recovery code. Contract accounts (`C…`) will use the enclave later.
+Set `deviceApproval: "enclave"` (or `socialRecovery: true`) for Google/Apple/
+email restore. The enclave **seals the MasterDEK**. Solana and Stellar unwrap it
+on a new device; they do not add an on-chain recovery signer. Starknet still
+registers a restricted recovery authority that can only schedule `add_signer`.
+
+`deviceApproval: "passkey"` is **one chain**. The passkey's WebAuthn PRF is a
+KDF of the MasterDEK (`cavos-master-dek-passkey-v1`). Anyone with that synced
+credential can spend on Solana/Stellar. Login never asks for it — call
+`enrollPasskeyDefault()` after signup and `approveDeviceWithPasskey()` on a new
+device.
+
+`secureStep` defaults to `'off'`. Set `'optional'` / `'required'` only if you
+want the modal's built-in "Secure your account" screen.
 
 This is **hardware-isolated, non-custodial recovery**, not trustless recovery.
 The approved workload digest, AWS Nitro/KMS, and image-upgrade policy remain in
@@ -536,20 +535,18 @@ the application also creates a new device that must be approved or recovered.
 
 ### Solana
 
-- ✅ `SolanaAdapter` — PDA derivation, `[secp256r1 precompile, program]`
-  instruction builders, low-S normalization.
-- ✅ `CavosSolana` high-level client — `connect`, `execute(amount, destination)`,
-  `executeInstructions(instructions)`, `addSigner`, `setupRecovery`, static
-  `recover`; gasless by default via the relayer.
-- ✅ Registry-based address resolution; first device names the wallet.
-- ✅ `SolanaRelayer` — co-signs as fee payer for seedless/gasless execution.
-- ✅ Hardware-isolated social recovery via Nitro enclave.
+- ✅ Native Ed25519 system account. Address = HKDF(MasterDEK, appSalt).
+- ✅ `CavosSolana` — `connect`, `execute(amount, destination)`,
+  `executeInstructions(instructions)`, `signMessage` (`curve: "ed25519"`).
+- ✅ `SolanaRelayer` — fee payer only. No device-account program, no PDA.
+- ✅ New device: enclave unwrap or passkey PRF. `addSigner` / `CavosSolana.recover`
+  are not used.
 
 ### Stellar
 
-- ✅ `CavosStellar` — classic `G…` account, address named by first control key.
-- ✅ Per-device Horizon signers: local ed25519 on each device, plus passkey PRF
-  and recovery-code extra signers for device approval and recovery.
+- ✅ `CavosStellar` — classic `G…` account.
+- ✅ Native MasterDEK path (enclave / passkey) shares the DEK with Solana.
+- ✅ Grandfathered per-device Horizon signers still load for older wallets.
 - ✅ **WebCrypto non-extractable control key:** The Ed25519 control key is
   non-extractable in WebCrypto environments. XSS cannot call `exportKey` on the
   control key; signing remains available while the tab is open.

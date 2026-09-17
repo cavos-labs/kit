@@ -14,6 +14,20 @@ export function bytesToUtf8(value: Uint8Array): string {
   return Buffer.from(value).toString("utf8");
 }
 
+export function bytesToBase64Url(bytes: Uint8Array): string {
+  return Buffer.from(bytes)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+export function base64UrlToBytes(value: string): Uint8Array {
+  const normal = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normal.padEnd(Math.ceil(normal.length / 4) * 4, "=");
+  return new Uint8Array(Buffer.from(padded, "base64"));
+}
+
 export function secureRandomBytes(length: number): Uint8Array {
   if (!globalThis.crypto?.getRandomValues) throw new Error("kit: secure random source unavailable");
   const out = new Uint8Array(length);

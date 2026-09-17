@@ -82,12 +82,12 @@ describe("the two halves of enrolment", () => {
     expect(enroll).not.toHaveBeenCalled();
   });
 
-  it("refuses classic Stellar — the enclave is for Starknet and Solana", async () => {
+  it("does not write an on-chain authority for native Stellar", async () => {
     const wallet = stellarWallet();
     const enroll = jest.fn(async () => ({ sessionId: "s1", result }));
     await expect(
       agreeRecoveryAuthority({ client: clientWith(enroll), wallet, credential }),
-    ).rejects.toThrow(/classic Stellar does not use the enclave/);
+    ).rejects.toThrow(/enroll the DEK at connect/);
     expect(enroll).not.toHaveBeenCalled();
     expect(wallet.enrollSocialRecovery).not.toHaveBeenCalled();
   });
@@ -102,21 +102,22 @@ describe("the two halves of enrolment", () => {
         authority: { sessionId: "s1", result: result as never },
         delaySeconds: 0,
       }),
-    ).rejects.toThrow(/classic Stellar does not use the enclave/);
+    ).rejects.toThrow(/enroll the DEK at connect/);
     expect(wallet.enrollSocialRecovery).not.toHaveBeenCalled();
   });
 
-  it("does not recover a classic Stellar device through the enclave either", async () => {
+  it("does not recover a native Stellar device by adding a Horizon signer", async () => {
     const enroll = jest.fn();
-    await expect(
-      recoverHardwareIsolatedDevice({
-        client: clientWith(enroll),
-        wallet: stellarWallet(),
-        credential,
-        network: "testnet",
-        delaySeconds: 0,
-      }),
-    ).rejects.toThrow(/classic Stellar does not use the enclave/);
+    const recover = jest.fn();
+    const outcome = await recoverHardwareIsolatedDevice({
+      client: { enroll, recover, confirmEnrollment: jest.fn() } as unknown as SocialRecoveryClient,
+      wallet: stellarWallet(),
+      credential,
+      network: "testnet",
+      delaySeconds: 0,
+    });
+    expect(outcome.finalized).toBe(true);
     expect(enroll).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
   });
 });

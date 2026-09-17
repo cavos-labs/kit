@@ -37,11 +37,9 @@ export interface CavosAuthModalProps {
    */
   inline?: boolean;
   /**
-   * Controls the one-time "secure your account" step shown after a new
-   * account is created. Defaults to 'optional'.
-   *  - 'optional': show the screen with a "Skip for now" button.
-   *  - 'required': show the screen without Skip.
-   *  - 'off': skip the screen entirely.
+   * One-time "secure your account" step after a new account is created.
+   * Off by default: login never asks for a passkey. Set `'optional'` or
+   * `'required'` to use this screen, or call `enrollPasskeyDefault` yourself.
    */
   secureStep?: 'optional' | 'required' | 'off';
 }
@@ -495,7 +493,7 @@ export function CavosAuthModal({
   backgroundColor: backgroundColorProp,
   radius,
   inline = false,
-  secureStep = 'optional',
+  secureStep = 'off',
 }: CavosAuthModalProps) {
   const {
     user,
@@ -810,11 +808,10 @@ export function CavosAuthModal({
         setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (deviceAuthorization === 'passkey') {
-        // The button is the gesture. Calling WebAuthn from this effect hung
-        // Safari on iOS on "Connecting with Google" — credentials.get() without
-        // a tap is ignored, and this screen never moved.
-        setScreen('passkey-approval');
-        doneHandledRef.current = false;
+        // A passkey is added when the app calls enrollPasskeyDefault /
+        // approveDeviceWithPasskey — not as a login screen. Finish so the
+        // integrator can ask at the moment they chose.
+        if (address) triggerDone(address);
       } else if (deviceAuthorization === 'enclave-needs-login') {
         // Not an error: the proof the enclave checks is only good for one
         // session, and signing in again mints a new one. That is an action.

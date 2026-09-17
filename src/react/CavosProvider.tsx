@@ -12,8 +12,6 @@ import {
 } from 'react';
 import { Cavos } from '../Cavos';
 import type { Chain, NetworkEnv, CavosWallet, CavosSession } from '../Cavos';
-import { CavosSolana } from '../chains/solana/CavosSolana';
-import type { SolanaNetwork } from '../chains/solana/constants';
 import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
@@ -141,13 +139,11 @@ export interface CavosModalConfig {
   /** Card / button corner radius in px (card defaults to 16, buttons to 8). */
   radius?: number;
   /**
-   * Controls the one-time "secure your account" step (passkey / recovery
-   * phrase) shown after a brand-new account is created.
-   *  - 'optional' (default): show the screen with a "Skip for now" button.
-   *  - 'required': show the screen without Skip — the user must set up a
-   *    passkey or recovery phrase before finishing onboarding.
-   *  - 'off': skip the screen entirely; onboarding ends right after the
-   *    account is ready (use this to avoid interrupting your own flow).
+   * One-time "secure your account" step after a brand-new account is created.
+   * Off by default: login never asks for a passkey. The app calls
+   * `enrollPasskeyDefault` / `approveDeviceWithPasskey` when it wants that
+   * prompt, or sets this to `'optional'` / `'required'` to use the modal's
+   * built-in screen.
    */
   secureStep?: 'optional' | 'required' | 'off';
   onSuccess?: (address: string) => void;
@@ -493,11 +489,6 @@ export function CavosProvider({
   // Held in a ref so the wallets can be wired once, rather than re-subscribed
   // every time the callback identity changes.
   const authorizeDeviceRef = useRef<() => Promise<void>>(async () => {});
-  // Same reason as the one above: the wallets hold the callback, so it has to
-  // stay reachable without re-wiring them on every render.
-  const passkeyFactorRef = useRef<() => Promise<Uint8Array | null>>(async () => null);
-  /** Latest known social-enrolment answer, for the enrolment effect to consult
-   *  without waiting on a re-render. */
   /**
    * Which wallets already hold a recovery authority, keyed by chain and
    * address.
@@ -668,7 +659,7 @@ export function CavosProvider({
     // Also the FIRST request, not only a resend: connect no longer mails one on
     // sight, so this is where the email path actually begins — once the UI has
     // chosen it.
-    if (!identity || !wallet || (wallet.chain !== 'starknet' && wallet.chain !== 'solana')) return;
+    if (!identity || !wallet || wallet.chain !== 'starknet') return;
     const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
     if (!cfg.appId) return;
     const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
@@ -686,9 +677,8 @@ export function CavosProvider({
   // and the user's attention twice, so it is the floor rather than the default
   // it used to be.
   //
-  // The app's choice is one value. Classic Stellar still authorizes by passkey
-  // even when the rest of a multichain app uses the enclave — that chain cannot
-  // restrict a recovery signer, so the enclave is not offered there.
+  // The app's choice is one value. Login never asks for a passkey; that
+  // prompt is enrollPasskeyDefault / approveDeviceWithPasskey.
   const appDeviceApproval = useMemo(
     () =>
       (config.deviceApproval
@@ -718,13 +708,6 @@ export function CavosProvider({
   );
 
 
-  /**
-   * On passkeys, the modal shows the approval screen at login rather than
-   * waiting for the first action. The WebAuthn assertion itself must wait for
-   * a tap: Safari on iOS ignores `credentials.get()` from an effect, and the
-   * spinner on "Connecting with Google" never yields.
-   */
-
   // The wallet turning ready is what ends an authorization, whoever performed it.
   useEffect(() => {
     if (walletStatus.isReady) setAuthorizingDevice(false);
@@ -734,7 +717,7 @@ export function CavosProvider({
   // publish the status for the default chain. `silent` reconnects keep the
   // current screen instead of resetting to the deploying state (used right
   // after a passkey approval).
-  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean }): Promise<CavosWallet & CavosSession> => {
+  const connect = useCallback(async (id: Identity, opts?: { silent?: boolean; passkey?: boolean }): Promise<CavosWallet & CavosSession> => {
     // A wall clock on the whole thing. `fetch` has no timeout of its own, so a
     // stalled request — a phone that changed network, a tab that was
     // backgrounded, an RPC that accepted the connection and went quiet — leaves
@@ -766,6 +749,27 @@ export function CavosProvider({
         ? { chains: cfg.chains, defaultChain: cfg.defaultChain }
         : { chain: cfg.chain ?? 'starknet' as Chain };
 
+      const socialPolicy = resolveSocialRecoveryPolicy(cfg);
+      const socialClient =
+        cfg.appId && socialPolicy
+          ? new SocialRecoveryClient({
+              baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+              appId: cfg.appId,
+              environment: cfg.environment,
+              attestation: socialPolicy,
+            })
+          : undefined;
+      const socialCredential = auth.hasSocialRecoveryCredential()
+        ? auth.consumeSocialRecoveryCredential()
+        : undefined;
+      const passkeyPrf =
+        opts?.passkey
+          ? new PasskeyPrf({
+              rpName: branding.appName ?? modal?.appName ?? 'Cavos',
+              ...(cfg.rpId ? { rpId: cfg.rpId } : {}),
+            })
+          : undefined;
+
       const s = await race(Cavos.connect({
         ...connectOpts,
         network: cfg.network,
@@ -779,6 +783,9 @@ export function CavosProvider({
         ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
         ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
+        ...(socialClient ? { socialRecovery: socialClient } : {}),
+        ...(socialCredential ? { socialRecoveryCredential: socialCredential } : {}),
+        ...(passkeyPrf ? { passkeyPrf } : {}),
       }));
       setSession(s);
       setSelectedChain(s.defaultChain);
@@ -790,7 +797,7 @@ export function CavosProvider({
       // Starknet and Solana both support the email device-approval flow (both carry
       // a pendingRequestId when a returning-new-device request was filed). Stellar
       // has its own passkey-PRF device model with no email flow today.
-      const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+      const pendingRequestId = w.chain === 'starknet' ? w.pendingRequestId : null;
       let hasPasskey = false;
       if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
         // Also raced: this reads the chain, so it can stall like anything else,
@@ -821,7 +828,7 @@ export function CavosProvider({
     } finally {
       clearTimeout(timer);
     }
-  }, [modal]);
+  }, [modal, appDeviceApproval, branding.appName]);
 
   const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
     const id = await auth.handleCallback(authData, redirectUri);
@@ -840,7 +847,7 @@ export function CavosProvider({
 
     // Update wallet status for the new chain
     const w = session.wallet(chain);
-    const pendingRequestId = w.chain === 'starknet' || w.chain === 'solana' ? w.pendingRequestId : null;
+    const pendingRequestId = w.chain === 'starknet' ? w.pendingRequestId : null;
     let hasPasskey = false;
     if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
       try { hasPasskey = await w.hasPasskey(); } catch { /* leave false */ }
@@ -924,7 +931,6 @@ export function CavosProvider({
     for (const c of session.chains) {
       const w = session.wallet(c);
       w.onAuthorizationNeeded = () => authorizeDeviceRef.current();
-      if (w.chain === 'stellar') w.passkeyFactorForCreate = () => passkeyFactorRef.current();
     }
 
     return () => {
@@ -932,7 +938,6 @@ export function CavosProvider({
       for (const c of session.chains) {
         const w = session.wallet(c);
         w.onAuthorizationNeeded = undefined;
-        if (w.chain === 'stellar') w.passkeyFactorForCreate = undefined;
       }
     };
   }, [session, selectedChain]);
@@ -963,9 +968,9 @@ export function CavosProvider({
     // app on passkeys still had recovery authorities written into its accounts,
     // and had its one login credential spent doing it.
     //
-    // Use the app's choice, not the visible wallet's resolved method. Classic
-    // Stellar authorizes by passkey even in an enclave app; that must not skip
-    // enrolment on Starknet and Solana.
+    // Use the app's choice, not the visible wallet's resolved method. Native
+    // Solana and Stellar enroll the DEK at connect. This sweep only writes
+    // Starknet's on-chain recovery authority.
     if (appDeviceApproval === 'passkey') return;
     if (
       !socialRecovery?.enabled ||
@@ -978,7 +983,7 @@ export function CavosProvider({
 
     const targets = session.chains
       .map((c) => session.wallet(c))
-      .filter((w) => w.chain !== 'stellar')
+      .filter((w) => w.chain === 'starknet')
       .map((w) => ({
         wallet: w,
         action: decideSocialRecovery(
@@ -1096,7 +1101,7 @@ export function CavosProvider({
     // to use, and a device is authorized by the gesture instead. Classic
     // Stellar never uses the enclave either — passkey or recovery code.
     if (deviceAuthorization === 'passkey') return;
-    if (wallet?.chain === 'stellar') return;
+    if (wallet?.chain === 'stellar' || wallet?.chain === 'solana') return;
     if (
       !socialRecovery?.enabled ||
       !socialRecovery.provider ||
@@ -1301,7 +1306,6 @@ export function CavosProvider({
       }));
       try {
         if (wallet.chain === 'starknet') await wallet.finalizeSocialRecovery();
-        else if (wallet.chain === 'solana') await wallet.finalizeSocialRecovery();
         else return;
         await waitUntilWalletReady(wallet);
         clearPendingSocialRecovery(wallet.chain, wallet.address);
@@ -1520,9 +1524,9 @@ export function CavosProvider({
   const enrollPasskey = useCallback(
     async (passkey: PasskeyApprover, params: PasskeyEnrollParams) => {
       if (!wallet) throw new Error('Not logged in');
-      if (wallet.chain === 'stellar') {
+      if (wallet.chain === 'stellar' || wallet.chain === 'solana') {
         throw new Error(
-          'kit: on Stellar, use enrollPasskeyDefault() — the passkey factor is a WebAuthn PRF secret, not a signer object.',
+          'kit: on Solana and Stellar the passkey derives the spend key at connect; use deviceApproval: "passkey".',
         );
       }
       return wallet.enrollPasskey(passkey, params);
@@ -1531,24 +1535,6 @@ export function CavosProvider({
   );
 
   const rpName = branding.appName ?? modal?.appName ?? 'Cavos';
-
-
-  /**
-   * Stellar's factor is the PRF secret, not a public key, so it cannot be read
-   * back off any chain -- and must not be stored anywhere. It is derived from
-   * the same passkey at the moment the account is created.
-   *
-   * Gated on the *app's* choice, not the visible wallet's resolved method.
-   * Classic Stellar authorizes a later device by passkey even in an enclave
-   * app, but baking a passkey into first create would prompt for one that
-   * has never been enrolled. `_pendingPasskeyPrf` still covers an explicit
-   * enroll before the first transaction.
-   */
-  const passkeyFactorForCreate = useCallback(async (): Promise<Uint8Array | null> => {
-    if (appDeviceApproval !== 'passkey') return null;
-    return new PasskeyPrf({ rpName }).getSecret();
-  }, [appDeviceApproval, rpName]);
-  passkeyFactorRef.current = passkeyFactorForCreate;
 
   // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
   /**
@@ -1565,6 +1551,19 @@ export function CavosProvider({
    */
   const enrollPasskeyDefault = useCallback(async () => {
     if (!session || !identity) throw new Error('Not logged in');
+    const wallets = session.chains.map((c) => session.wallet(c));
+    const nativeOnly = wallets.every((w) => w.chain === 'solana' || w.chain === 'stellar');
+    if (nativeOnly) {
+      const prf = new PasskeyPrf({ rpName });
+      await prf.enroll({
+        userId: identity.userId,
+        userName: identity.email ?? identity.userId,
+        ...(identity.email ? { displayName: identity.email } : {}),
+      });
+      setWalletStatus((status) => ({ ...status, hasPasskey: true }));
+      return;
+    }
+
     const enrolled = await new PasskeySigner({ rpName }).enroll({
       userId: identity.userId,
       userName: identity.email ?? identity.userId,
@@ -1577,36 +1576,37 @@ export function CavosProvider({
     // touch; each of those picks the passkey up when it is created.
     // One chain, so there is nowhere to propagate to: register it here and the
     // account is created if it does not exist yet.
-    const wallets = session.chains.map((c) => session.wallet(c));
     for (const w of wallets) {
-      if (w.chain === 'stellar') continue;
+      if (w.chain === 'stellar' || w.chain === 'solana') continue;
       await w.addApprover(enrolled.publicKey);
     }
 
     const stellar = wallets.find((w) => w.chain === 'stellar');
     if (!stellar || stellar.chain !== 'stellar') return;
+    if (stellar.nativeDek) return;
     const secret =
       enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
     await stellar.enrollPasskey(secret);
-  }, [session, identity, rpName, selectedChain]);
+  }, [session, identity, rpName]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
   const approveDeviceWithPasskey = useCallback(async () => {
     if (!wallet || !identity) throw new Error('Not logged in');
+    if (wallet.chain === 'solana') {
+      await connect(identity, { passkey: true });
+      return;
+    }
     if (wallet.status !== 'needs-device-approval') {
-      await connect(identity);
+      await connect(identity, wallet.chain === 'stellar' ? { passkey: true } : undefined);
       return;
     }
     if (wallet.chain === 'stellar') {
       const prf = new PasskeyPrf({ rpName });
       await wallet.approveThisDeviceWithPasskey(await prf.getSecret());
-    } else if (wallet.chain === 'starknet') {
-      const passkey = new PasskeySigner({ rpName });
-      await wallet.approveThisDeviceWithPasskey({ passkey });
     } else {
       const passkey = new PasskeySigner({ rpName });
-      await wallet.approveThisDeviceWithPasskey(passkey);
+      await wallet.approveThisDeviceWithPasskey({ passkey });
     }
     // The on-chain add_signer isn't indexed the instant the tx submits — show the
     // deploying state and poll readiness (cheap, side-effect free) until it lands.
@@ -1674,8 +1674,11 @@ export function CavosProvider({
       // gesture, and only a missing login proof needs the user at all.
       switch (deviceAuthorization) {
         case 'passkey':
-          await approveDeviceWithPasskey();
-          break;
+          // Adding or asserting a passkey is the app's call, not something
+          // login (or the first send) decides for them.
+          throw new Error(
+            'kit: call approveDeviceWithPasskey() to restore this device. Login does not ask for a passkey.',
+          );
         case 'enclave': {
           // Waiting is only worth it if there is something to wait for. A
           // wallet with no authority on-chain cannot be recovered, and the
@@ -1707,7 +1710,7 @@ export function CavosProvider({
     } finally {
       setAuthorizingDevice(false);
     }
-  }, [wallet, deviceAuthorization, approveDeviceWithPasskey, waitUntilAuthorized]);
+  }, [wallet, deviceAuthorization, waitUntilAuthorized]);
 
   authorizeDeviceRef.current = authorizeDevice;
 
@@ -1729,15 +1732,8 @@ export function CavosProvider({
     try {
       const chain = cfg.chain ?? cfg.defaultChain ?? cfg.chains?.[0] ?? 'starknet';
       if (chain === 'solana') {
-        await CavosSolana.recover({
-          code,
-          identity,
-          network: (cfg.network === 'mainnet' ? 'solana-mainnet' : 'solana-devnet') as SolanaNetwork,
-          appSalt: cfg.appSalt,
-          ...(cfg.appId ? { appId: cfg.appId } : {}),
-          ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
-          ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
-        });
+        // Native Ed25519 restores on connect (enclave or passkey). There is no
+        // backup add_signer.
       } else if (chain === 'stellar') {
         // Classic `G…`: reconnect this (fresh) device, then use the recovery code
         // to approve it — the code unlocks the control key which authorizes adding

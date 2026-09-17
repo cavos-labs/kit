@@ -1,5 +1,6 @@
 import {
   createSocialRecoveryCredential,
+  readTokenSubject,
   socialRecoveryProvider,
 } from "./SocialRecoveryCredential";
 
@@ -13,6 +14,17 @@ function token(claims: Record<string, unknown>): string {
       .replace(/=+$/, "");
   return `${part({ alg: "RS256" })}.${part(claims)}.signature`;
 }
+
+describe("readTokenSubject", () => {
+  it("reads the subject the identity commitment binds", () => {
+    const idToken = token({ iss: "https://accounts.google.com", sub: "subject-9" });
+    expect(readTokenSubject(idToken)).toBe("subject-9");
+  });
+
+  it("refuses a credential with no subject", () => {
+    expect(() => readTokenSubject(token({ iss: "https://accounts.google.com" }))).toThrow(/no subject/);
+  });
+});
 
 describe("socialRecoveryProvider", () => {
   it("reads each provider from its issuer", () => {

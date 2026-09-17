@@ -131,9 +131,7 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
     if (next.status === "needs-device-approval") {
       try { hasPasskey = await next.hasPasskey(); } catch { /* factor is optional */ }
     }
-    const pendingRequestId = next.chain === "starknet" || next.chain === "solana"
-      ? next.pendingRequestId
-      : null;
+    const pendingRequestId = next.chain === "starknet" ? next.pendingRequestId : null;
     setWallet(next);
     setIdentity(id);
     setStatus({
@@ -240,10 +238,10 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
     const cfg = configRef.current;
     let next: CavosWallet;
     if ((cfg.chain ?? "starknet") === "solana") {
-      next = await Cavos.recoverSolana({
-        code,
+      next = await Cavos.connect({
+        chain: "solana",
+        network: cfg.network,
         identity,
-        network: cfg.network === "mainnet" ? "solana-mainnet" : "solana-devnet",
         appSalt: cfg.appSalt,
         appId: cfg.appId,
         environment: cfg.environment,
@@ -274,7 +272,7 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
 
   const resendDeviceApproval = useCallback(async () => {
     if (!wallet || !identity || !status.pendingRequestId) return;
-    if (wallet.chain !== "starknet" && wallet.chain !== "solana") return;
+    if (wallet.chain !== "starknet") return;
     const cfg = configRef.current;
     await new HttpRecoveryClient({
       baseUrl: cfg.authBackendUrl ?? "https://cavos.xyz",
