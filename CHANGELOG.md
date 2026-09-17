@@ -17,6 +17,10 @@ and Stellar keys, so one enclave enroll covers a multi-chain session.
   enroll is idempotent once the wrap exists.
 - **Identity lookup** (`provider` + `subject`) finds a `dek_sealed` enrollment
   so a second chain or device unwraps instead of minting another DEK.
+- **Native Stellar** matches Solana: `approveDeviceWithPasskey()` reconnects
+  with `{ passkey: true }`. `setupRecovery` is a no-op; `approveThisDeviceWithPasskey`
+  / `approveThisDeviceWithRecovery` throw. Grandfathered Horizon extras still
+  load for older wallets.
 
 ## 0.1.12
 

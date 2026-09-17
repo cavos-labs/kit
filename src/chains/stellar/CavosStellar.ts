@@ -666,7 +666,7 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async enrollPasskey(prfOutput: Uint8Array): Promise<string> {
-    if (this.nativeDek) return this.address;
+    if (this.nativeDek) return this.address; // PRF is the KDF; not a Horizon extra.
     if (this.statusValue === "undeployed") {
       this._pendingPasskeyPrf = prfOutput;
       await this._createAccount();
@@ -693,6 +693,7 @@ export class CavosStellar {
    * included in the first account creation. No on-chain write happens until execute().
    */
   async setupRecovery(code: string): Promise<string> {
+    if (this.nativeDek) return this.address;
     if (this.statusValue === "undeployed") {
       this._pendingRecoveryCode = code;
       return "";
@@ -710,12 +711,18 @@ export class CavosStellar {
    * `setOptions` adds this device. Flips status to `ready`.
    */
   async approveThisDeviceWithPasskey(prfOutput: Uint8Array): Promise<string> {
+    if (this.nativeDek) {
+      throw new Error("kit/stellar: restore this device by connecting with your passkey");
+    }
     return this.addThisDeviceWith(await importPasskeySigner(prfOutput), "passkey");
   }
 
   /** Approve THIS device using the recovery code (same as the passkey path, for
    *  the backup factor). */
   async approveThisDeviceWithRecovery(code: string): Promise<string> {
+    if (this.nativeDek) {
+      throw new Error("kit/stellar: native accounts restore by connecting with the enclave or a passkey");
+    }
     return this.addThisDeviceWith(await importRecoverySigner(code), "recovery code");
   }
 

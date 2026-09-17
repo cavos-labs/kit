@@ -78,7 +78,10 @@ export interface CavosConfig {
   defaultChain?: Chain;
   /** Environment: 'testnet' (sepolia/devnet) or 'mainnet'. */
   network: NetworkEnv;
-  /** Per-app salt so the same user has distinct wallets per app. */
+  /**
+   * Device-key slot. On native Solana/Stellar it is also the HKDF salt for the
+   * spend key — never change it after users connect.
+   */
   appSalt: string;
   /** Cavos paymaster API key (sponsors deploy + execute). Required for Starknet. */
   paymasterApiKey?: string;
@@ -1593,7 +1596,7 @@ export function CavosProvider({
   // chain, then poll readiness and reconnect once.
   const approveDeviceWithPasskey = useCallback(async () => {
     if (!wallet || !identity) throw new Error('Not logged in');
-    if (wallet.chain === 'solana') {
+    if (wallet.chain === 'solana' || (wallet.chain === 'stellar' && wallet.nativeDek)) {
       await connect(identity, { passkey: true });
       return;
     }

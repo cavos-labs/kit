@@ -2,10 +2,11 @@
 
 `@cavos/kit` is an **embedded Stellar wallet SDK**, **embedded Solana wallet**,
 and **embedded Starknet wallet** for React Native and web. Device-native
-self-custodial accounts controlled by **silent device signers** — non-extractable
-secp256r1 (P-256) keys that sign invisibly (no passkey popups, no Face ID /
-Touch ID prompts). OAuth / email authenticates the user; the registry names the
-wallet; the device key signs.
+self-custodial accounts: **Starknet** authorizes a silent non-extractable
+secp256r1 (P-256) device signer (no passkey popups, no Face ID / Touch ID
+prompts). **Solana and Stellar** spend with native Ed25519 keys derived from a
+MasterDEK. OAuth / email authenticates the user; the registry names the wallet;
+the device key signs.
 
 **Chains:** **Starknet, Solana, and Stellar** are implemented today. Starknet
 uses an on-chain Cairo `DeviceAccount` authorized by a silent P-256 device
@@ -32,17 +33,20 @@ npm install @cavos/kit
 ## How connect works
 
 1. **Authenticate** — OAuth, magic link, or OTP resolves a stable `userId`.
-2. **Registry lookup** — `(userId, appId, chain) → address`. If the user already
-   has an address for this app + chain, they get that address. If not, this
-   device computes a candidate address from its fresh device key.
+2. **Registry lookup** — `(userId, appId, chain, network) → address`. If the
+   user already has an address for this app + chain, they get that address. If
+   not, this device claims one: Starknet from the fresh P-256 device key;
+   Solana/Stellar from HKDF of the MasterDEK.
 3. **Registry claim** — Insert-only: the first device to register wins. If
    another device raced ahead, this device's candidate is discarded and the
    winning address is returned.
-4. **Lazy deploy** — The account is **never** deployed on connect. The first
-   `execute()` call deploys + runs the user's operation atomically.
-5. **Status** — `undeployed` (not on-chain yet), `ready` (deployed, this device
-   authorized), or `needs-device-approval` (deployed, this device not yet
-   authorized).
+4. **Lazy deploy (Starknet / Stellar)** — Those accounts are **never** created
+   on connect. The first `execute()` deploys + runs the user's operation.
+   **Solana** is a system account: `ready` once this device unwraps the spend
+   key; fund it with lamports, then spend. There is no `initialize`.
+5. **Status** — `undeployed` (Starknet/Stellar, not on-chain yet), `ready`
+   (this device can sign), or `needs-device-approval` (this device has no wrap
+   / is not a signer yet).
 
 The registry is the source of truth for "this user + this app + this chain →
 this address". Cavos holds the map and cannot spend; the device holds the key
@@ -509,12 +513,17 @@ dashboard. Native passkeys also require:
 
 The default key policy prefers Secure Enclave, StrongBox, or TEE and falls back
 to an OS-protected non-exportable key. Set `minimumKeySecurity: "hardware"` to
-reject that fallback. Stellar passkey recovery uses PRF when the credential
-provider supports it; otherwise the SDK surfaces a recovery-code fallback.
+reject that fallback. Native Solana/Stellar restore with enclave unwrap or
+passkey PRF. Grandfathered Stellar wallets still use a recovery-code extra
+signer when PRF is unavailable.
 
-`logout()` only clears the saved identity. To intentionally remove the local
-device, call `deleteDeviceKeys(identity.userId + ":" + appSalt)`. Reinstalling
-the application also creates a new device that must be approved or recovered.
+`logout()` does **not** wipe everything. It clears the persisted identity and
+the session token. IndexedDB MasterDEK wraps, WebCrypto keys, and native
+Secure Enclave / Keystore keys stay so reconnect is silent. It does not sign
+the user out of Google or Apple. To intentionally remove the local device on
+React Native, call `deleteDeviceKeys(identity.userId + ":" + appSalt)`.
+Reinstalling the application also creates a new device that must unwrap or be
+approved.
 
 ## Status
 
