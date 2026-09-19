@@ -1,11 +1,11 @@
 import { Account, RpcProvider, PaymasterRpc, hash, num, ETransactionVersion3, type Call } from "starknet";
-import type { Keypair } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
 import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
 import { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 import { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
 import { CavosSolana } from "./chains/solana/CavosSolana";
 import type { SolanaRelayer } from "./chains/solana/SolanaRelayer";
+import { TollClient } from "./chains/solana/TollClient";
 import type { SolanaNetwork } from "./chains/solana/constants";
 import { CavosStellar } from "./chains/stellar/CavosStellar";
 import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
@@ -186,8 +186,11 @@ export interface ConnectOptions {
   // --- Solana-only ---
   /** Gasless sponsorship relayer (defaults to the hosted one when `appId` set). */
   relayer?: SolanaRelayer;
-  /** Self-funded fee-payer fallback when no relayer is configured. */
-  feePayer?: Keypair;
+  /**
+   * Where Toll lives, for `fee: { token }` — the user pays their own fee, in a
+   * token they already hold. Omit it and that route is simply unavailable.
+   */
+  tollUrl?: string;
   socialRecovery?: SocialRecoveryClient;
   socialRecoveryCredential?: SocialRecoveryCredential;
   /**
@@ -475,7 +478,7 @@ export class Cavos {
         ...(opts.registry ? { registry: opts.registry } : {}),
         ...(rpcFor('solana', opts) ? { rpcUrl: rpcFor('solana', opts)! } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
-        ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
+        ...(opts.tollUrl ? { toll: new TollClient({ baseUrl: opts.tollUrl }) } : {}),
         ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
         ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
         ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),

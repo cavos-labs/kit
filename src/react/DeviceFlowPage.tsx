@@ -356,8 +356,8 @@ function useStashedRequestId(paramName: string, stashKey: string): string | null
  * what lets the page say so before the button is pressed rather than as a
  * failure after.
  *
- * Only Starknet and Solana identify a device by a P-256 key. Stellar classic
- * uses a different account model with no key to compare, so the check does not
+ * Only Starknet identifies a device by a P-256 key. Stellar classic and native
+ * Solana use account models with no such key to compare, so the check does not
  * apply there — and answering "no" is the safe direction: the SDK still
  * refuses, the user just does not get the early warning.
  */
@@ -366,7 +366,7 @@ export function targetsThisDevice(
   target: DevicePublicKey,
 ): boolean {
   if (!wallet) return false;
-  if (wallet.chain !== "starknet" && wallet.chain !== "solana") return false;
+  if (wallet.chain !== "starknet") return false;
   return wallet.publicKey.x === target.x && wallet.publicKey.y === target.y;
 }
 
