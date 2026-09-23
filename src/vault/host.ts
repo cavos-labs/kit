@@ -5,6 +5,10 @@ import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefa
 import { SocialRecoveryClient, type AttestationPolicy } from "../recovery/SocialRecoveryClient";
 import { HttpWalletRegistry } from "../registry/HttpWalletRegistry";
 import type { ResolveNativeEd25519Input } from "../secret/nativeAccount";
+import { zeroize, type MasterDEK } from "../secret/dek";
+import { readLocalDek, type LocalDekInput } from "../secret/localDek";
+import { addPasskey } from "../secret/PasskeyDekPort";
+import { HttpPasskeyWrapStore, type PasskeyWrapStore } from "../registry/PasskeyWrapStore";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
 import type { PasskeyPrfProvider } from "../signer/PasskeyProvider";
 import type { DeviceSigner } from "../signer/DeviceSigner";
@@ -42,6 +46,8 @@ export interface VaultHandlerDeps {
   ledger: SpendLedger;
   confirm(lines: Line[], context: { network: string }): Promise<boolean>;
   passkey(user: { userId: string; userName: string }): PasskeyPrfProvider;
+  passkeyWraps?: (auth: { environment?: "development" | "production"; authToken?: string | null }) => PasskeyWrapStore;
+  readDek?: (input: LocalDekInput) => Promise<MasterDEK>;
   resolveSolana?: (input: NativeInput) => Promise<{ address: string; spend: Ed25519SpendSigner | null; isNewAccount: boolean }>;
   resolveStellar?: (input: NativeInput) => Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }>;
   loadStarknetDevice?: (keyId: string) => Promise<DeviceSigner>;
@@ -62,6 +68,16 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   const resolveSolana = deps.resolveSolana ?? resolveNativeSolana;
   const resolveStellar = deps.resolveStellar ?? resolveNativeStellar;
   const loadStarknetDevice = deps.loadStarknetDevice ?? ((keyId: string) => WebCryptoSigner.loadOrCreate({ keyId }));
+  const readDek = deps.readDek ?? readLocalDek;
+  const passkeyWraps =
+    deps.passkeyWraps ??
+    ((auth) =>
+      new HttpPasskeyWrapStore({
+        baseUrl: deps.backendUrl,
+        appId: deps.appId,
+        ...(auth.environment ? { environment: auth.environment } : {}),
+        authToken: () => auth.authToken ?? null,
+      }));
   const solanaNetwork = deps.solanaNetwork ?? ((blockhash: string) => solanaNetworkName(blockhash));
   // Every key, wrap and counter is filed under the app that embedded the vault,
   // so a second app on the same site cannot reach them with its own policy.
@@ -80,8 +96,9 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       publicKey[0] = 4;
       publicKey.set(bigIntTo32Bytes(x), 1);
       publicKey.set(bigIntTo32Bytes(y), 33);
-      return { handle, address: "", publicKey, isNewAccount: false };
+      return { handle, address: "", publicKey, isNewAccount: false, passkey: false };
     }
+    const wraps = params.recovery === "passkey" ? passkeyWraps(params) : undefined;
     const input: NativeInput = {
       identity: { userId: params.userId, ...(params.userName ? { email: params.userName } : {}) },
       appSalt: params.appSalt,
@@ -104,18 +121,43 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
             }),
           }
         : {}),
-      ...(params.recovery === "passkey"
-        ? { passkey: deps.passkey({ userId: params.userId, userName: params.userName ?? params.userId }) }
+      ...(wraps
+        ? {
+            passkey: deps.passkey({ userId: params.userId, userName: params.userName ?? params.userId }),
+            passkeyWraps: wraps,
+            appId: scope,
+          }
         : {}),
+    };
+    // Read after connect, so a device that just restored from a passkey says so.
+    const hasPasskey = async () => {
+      if (!wraps) return false;
+      try {
+        return (await wraps.list(params.userId)).length > 0;
+      } catch {
+        return false;
+      }
     };
     if (params.chain === "solana") {
       const native = await resolveSolana(input);
       accounts.set(handle, { userId: params.userId, address: native.address, network: params.network, solana: native.spend ?? undefined });
-      return { handle, address: native.address, publicKey: native.spend?.publicKeyRaw() ?? null, isNewAccount: native.isNewAccount };
+      return {
+        handle,
+        address: native.address,
+        publicKey: native.spend?.publicKeyRaw() ?? null,
+        isNewAccount: native.isNewAccount,
+        passkey: await hasPasskey(),
+      };
     }
     const native = await resolveStellar(input);
     accounts.set(handle, { userId: params.userId, address: native.address, network: params.network, stellar: native.control });
-    return { handle, address: native.address, publicKey: native.control?.publicKeyRaw() ?? null, isNewAccount: native.isNewAccount };
+    return {
+      handle,
+      address: native.address,
+      publicKey: native.control?.publicKeyRaw() ?? null,
+      isNewAccount: native.isNewAccount,
+      passkey: await hasPasskey(),
+    };
   }
 
   function account(handle: string): Account {
@@ -214,6 +256,25 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.
       for (const chain of ["solana", "stellar", "starknet"]) accounts.delete(`${chain}:${userId}:${appSalt}`);
+    },
+    async enrollPasskey({ userId, appSalt, userName, environment, authToken }) {
+      // Solana and Stellar derive from the same DEK, so either connected account proves which DEK this is.
+      const chain = (["solana", "stellar"] as const).find((c) => accounts.get(`${c}:${userId}:${appSalt}`)?.address);
+      if (!chain) throw new Error("kit/vault: connect a Solana or Stellar wallet before adding a passkey");
+      const { address } = accounts.get(`${chain}:${userId}:${appSalt}`)!;
+      const dek = await readDek({ chain, userId, appSalt, address, keyScope: scope });
+      const user = { userId, userName: userName ?? userId };
+      try {
+        await addPasskey({
+          passkey: deps.passkey(user),
+          wraps: passkeyWraps({ environment, authToken }),
+          owner: { appId: scope, userId },
+          dek,
+          user,
+        });
+      } finally {
+        zeroize(dek);
+      }
     },
   };
 

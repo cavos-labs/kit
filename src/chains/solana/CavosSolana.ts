@@ -25,6 +25,7 @@ import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/Devic
 import type { Ed25519Seed } from "../../secret/dek";
 import type { Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
 import { resolveNativeSolana } from "./nativeConnect";
+import { passkeyRestoreInput } from "../../secret/nativeAccount";
 import { connectThroughVault, vaultConnectParams, type VaultClient } from "../../vault/VaultClient";
 
 export interface InstructionAccount {
@@ -178,7 +179,13 @@ export class CavosSolana {
           factor: opts.factor,
           store: opts.wrapStore,
           importSpend: opts.importSpend,
-          passkey: opts.passkey,
+          ...passkeyRestoreInput({
+            passkey: opts.passkey,
+            appId: opts.appId,
+            backendUrl,
+            environment: opts.environment,
+            authToken: () => opts.auth?.getAuthToken?.() ?? null,
+          }),
         });
 
     const wallet = new CavosSolana(
@@ -192,7 +199,8 @@ export class CavosSolana {
       opts.feePayer,
       registry,
       native.spend ?? undefined,
-      Boolean(opts.passkey),
+      // In the vault, `passkey` only lets it ask; whether one holds the key is its answer.
+      "passkey" in native ? native.passkey === true : Boolean(opts.passkey),
     );
     wallet.isNewAccount = native.isNewAccount;
     wallet._isDeployed = true;

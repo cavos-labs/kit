@@ -22,6 +22,7 @@ import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCred
 import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
 import { InMemoryWalletRegistry, type WalletRegistry } from "../../registry/WalletRegistry";
 import { resolveNativeStellar } from "./nativeConnect";
+import { passkeyRestoreInput } from "../../secret/nativeAccount";
 import { connectThroughVault, vaultConnectParams, type VaultClient } from "../../vault/VaultClient";
 import type { MessageSignature, StellarSignedTransaction } from "../../signing";
 import {
@@ -131,6 +132,8 @@ export class CavosStellar {
    * it is not added as a Horizon extra signer.
    */
   nativeDek = false;
+  /** Native accounts only: a passkey the user added can restore this account. */
+  passkeyRestore = false;
   private statusValue: StellarConnectStatus;
 
   /** Track whether account is created on-chain (for lazy deploy). */
@@ -237,7 +240,13 @@ export class CavosStellar {
             recovery: opts.recovery,
             factor: opts.factor,
             store: opts.wrapStore,
-            passkey: opts.passkey,
+            ...passkeyRestoreInput({
+              passkey: opts.passkey,
+              appId: opts.appId,
+              backendUrl,
+              environment: opts.environment,
+              authToken: () => opts.auth?.getAuthToken?.() ?? null,
+            }),
           });
       const deployed = await adapter.isDeployed(native.address);
       const wallet = new CavosStellar(
@@ -254,6 +263,7 @@ export class CavosStellar {
       );
       wallet.isNewAccount = native.isNewAccount;
       wallet.nativeDek = true;
+      wallet.passkeyRestore = "passkey" in native && native.passkey === true;
       return wallet;
     }
 
@@ -358,6 +368,7 @@ export class CavosStellar {
    * Returns true for undeployed accounts if a passkey is pending enrollment.
    */
   async hasPasskey(): Promise<boolean> {
+    if (this.nativeDek && this.passkeyRestore) return true;
     if (this.statusValue === "undeployed") {
       return this._pendingPasskeyPrf !== null;
     }

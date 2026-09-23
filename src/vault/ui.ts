@@ -225,7 +225,7 @@ export function sheet(options: { overlay: boolean }): Sheet {
 
   const inner = el("div", { width: "100%", maxWidth: "392px", margin: "0 auto" });
   const header = el("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "28px" });
-  header.append(mark(18), el("span", { fontSize: "14px", fontWeight: "600", letterSpacing: "-0.01em" }, "Cavos"));
+  header.append(mark(18));
 
   const title = el("h1", {
     margin: "0 0 8px",

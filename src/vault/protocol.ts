@@ -1,7 +1,6 @@
 import type { Call, InvocationsSignerDetails, TypedData } from "starknet";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 import type { DeviceSignature } from "../signer/DeviceSigner";
-import type { Line } from "./policy";
 
 export const VAULT_READY = "cavos-vault:ready";
 export const VAULT_HELLO = "cavos-vault:hello";
@@ -33,6 +32,8 @@ export interface ConnectResult {
    */
   publicKey: Uint8Array | null;
   isNewAccount: boolean;
+  /** A passkey the user added can restore this account on a new device. */
+  passkey: boolean;
 }
 
 export interface VaultMethods {
@@ -45,6 +46,14 @@ export interface VaultMethods {
   signStarknetInvoke(params: { handle: string; calls: Call[]; details: InvocationsSignerDetails }): string[];
   signStarknetMessage(params: { handle: string; message: Uint8Array }): DeviceSignature;
   forget(params: { userId: string; appSalt: string }): void;
+  /** Create a passkey that can restore the connected account on another device. */
+  enrollPasskey(params: {
+    userId: string;
+    appSalt: string;
+    userName?: string;
+    environment?: "development" | "production";
+    authToken?: string | null;
+  }): void;
 }
 
 export type VaultMethod = keyof VaultMethods;
@@ -61,13 +70,7 @@ export interface VaultEvent {
   event: "show" | "hide";
 }
 
-/**
- * The Cavos window is the fallback for what a cross-site frame cannot do
- * safely: passkeys some browsers refuse there, and approvals where the browser
- * cannot tell whether the page is covering the frame.
- */
-export type PopupIntent =
-  | { kind: "passkey"; userId: string; userName: string; credentialId?: Uint8Array }
-  | { kind: "review"; lines: Line[]; network: string; app: string };
+/** The Cavos window is the fallback for passkeys some browsers refuse inside a cross-site frame. */
+export type PopupIntent = { kind: "passkey"; userId: string; userName: string; create: boolean; credentialId?: Uint8Array };
 
-export type PopupResult = { secret: Uint8Array; credentialId?: Uint8Array } | { approved: boolean } | { error: string };
+export type PopupResult = { secret: Uint8Array; credentialId?: Uint8Array } | { error: string };

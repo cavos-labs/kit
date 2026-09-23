@@ -3,7 +3,10 @@ import { randomBytes } from "@noble/hashes/utils";
 import { Keypair as SolanaKeypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { KeypairControlKey } from "../chains/stellar/WebCryptoControlKey";
-import { parseEd25519Seed } from "../secret/dek";
+import { generateMasterDEK, parseEd25519Seed, parseMasterDEK } from "../secret/dek";
+import type { LocalDekInput } from "../secret/localDek";
+import { unwrapDek } from "../secret/passkeyWrap";
+import type { StoredPasskeyWrap } from "../registry/PasskeyWrapStore";
 import { solanaSpendFromSeed } from "../signer/Ed25519SpendSigner";
 import { prefixedMessageBytes } from "../signing";
 import { createVaultHandler, serveVault } from "./host";
@@ -27,6 +30,10 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
   const networks: string[] = [];
   const starknetDevice = new RecordingDevice();
   const scopes: (string | undefined)[] = [];
+  const dek = generateMasterDEK();
+  const prf = new Uint8Array(32).fill(5);
+  const dekReads: LocalDekInput[] = [];
+  const wraps: StoredPasskeyWrap[] = [];
   const handle = createVaultHandler({
     appId: "app",
     backendUrl: "https://cavos.test",
@@ -44,8 +51,19 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
       networks.push(context.network);
       return confirm();
     },
-    passkey: () => {
-      throw new Error("no passkey in tests");
+    passkey: () => ({
+      enroll: async () => ({ credentialId: new Uint8Array(16).fill(1), secret: prf.slice() }),
+      getSecret: async () => prf.slice(),
+    }),
+    passkeyWraps: () => ({
+      list: async () => wraps,
+      save: async (_userId, entry) => {
+        wraps.push(entry);
+      },
+    }),
+    readDek: async (input) => {
+      dekReads.push(input);
+      return parseMasterDEK(dek);
     },
     resolveSolana: async (input) => {
       scopes.push(input.keyScope);
@@ -69,7 +87,7 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
     channel.port1.close();
     channel.port2.close();
   };
-  return { client, asked, networks, scopes, stellarKey, starknetDevice, close };
+  return { client, asked, networks, scopes, stellarKey, starknetDevice, close, dek, prf, dekReads, wraps, spend };
 }
 
 /** Records what it was asked to sign; the signature itself is not under test here. */
@@ -225,6 +243,39 @@ describe("vault client and host", () => {
     await control!.signTransaction(onMainnet.toXDR(), Networks.PUBLIC);
     expect(networks).toEqual(["Stellar Mainnet"]);
     await expect(control!.signTransaction(onMainnet.toXDR(), "Made-up network")).rejects.toThrow(/unknown Stellar network/);
+    close();
+  });
+});
+
+describe("vault passkeys", () => {
+  const passkeyParams = { ...params, recovery: "passkey" as const };
+
+  it("refuses to add a passkey before a native account is connected", async () => {
+    const { client, wraps, close } = setup();
+    await expect(client.enrollPasskey({ userId: "u1", appSalt: "salt" })).rejects.toThrow(
+      "connect a Solana or Stellar wallet",
+    );
+    expect(wraps).toHaveLength(0);
+    close();
+  });
+
+  it("stores the connected account's DEK, read under the app's scope, encrypted under the new passkey", async () => {
+    const { client, dek, prf, dekReads, wraps, spend, close } = setup();
+    await client.connectSolana(passkeyParams);
+    await client.enrollPasskey({ userId: "u1", appSalt: "salt" });
+    expect(dekReads).toEqual([
+      { chain: "solana", userId: "u1", appSalt: "salt", address: spend.address(), keyScope: "app" },
+    ]);
+    expect(wraps).toHaveLength(1);
+    expect(unwrapDek(wraps[0].wrap, prf, { appId: "app", userId: "u1" })).toEqual(parseMasterDEK(dek));
+    close();
+  });
+
+  it("reports a passkey only once one was added", async () => {
+    const { client, close } = setup();
+    expect((await client.connectSolana(passkeyParams)).passkey).toBe(false);
+    await client.enrollPasskey({ userId: "u1", appSalt: "salt" });
+    expect((await client.connectSolana(passkeyParams)).passkey).toBe(true);
     close();
   });
 });
