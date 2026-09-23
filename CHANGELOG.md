@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.1
+
+### Passkeys restore native wallets on a new device
+
+A passkey added after sign-up now carries a Solana or Stellar wallet to another
+device. Before, `enrollPasskeyDefault()` created a passkey that restored
+nothing, and a new device never asked for it.
+
+- **Signing up never asks for a passkey.** The MasterDEK is random, whatever
+  `deviceApproval` says. A passkey only restores an account that exists.
+- **`enrollPasskeyDefault()` stores a copy of the DEK encrypted under the
+  passkey**, created in the vault's origin: `KEK = HKDF(PRF,
+  "cavos-passkey-dek-wrap-v1")`, `AES-256-GCM(KEK, DEK, aad = "appId:userId")`.
+  Cavos keeps the ciphertext at `/api/passkey-wraps` and cannot open it.
+- **A new device asks for the passkey only if one was added**, decrypts in the
+  vault and checks the DEK derives the registered address. Several passkeys per
+  user work; any of them restores. Declining leaves the device signed in
+  without the key.
+- **`hasPasskey`** on Solana and Stellar reports whether a passkey was added,
+  from the backend, on any browser.
+- **Starknet:** on a new device with a passkey approver, the auth modal shows
+  "Verify it's you" instead of finishing silently, and a send from an
+  unauthorized device opens it with a clear message.
+- **The enclave seals wallets created before the app used it.** A device that
+  already holds the key seals the DEK at the next sign-in, so a wallet created
+  on passkeys, or with the enclave off, becomes recoverable.
+
+### Vault
+
+- Approvals happen in the vault's sheet on every browser. Where the browser
+  cannot tell whether the page covers the frame (Safari), Approve arms after a
+  short delay instead of moving to a separate Cavos window.
+- The passkey sheet asks for one thing: "Add a passkey" to create, "Verify it's
+  you" to restore.
+- The sheet header shows the Cavos mark only, and the vault iframe no longer
+  shows a "Cavos" tooltip.
+
+### Breaking
+
+- Accounts whose DEK was derived from the passkey PRF (created with
+  `connect({ passkey: true })` on 0.1.14 to 0.2.0) no longer restore with that
+  passkey.
+- The vault protocol adds `enrollPasskey` and `ConnectResult.passkey`. Deploy
+  the vault host (cavos-web) with this version before apps use it.
+- `@noble/ciphers` is now a direct dependency.
+
 ## 0.2.0
 
 ### The Cavos vault

@@ -808,10 +808,15 @@ export function CavosAuthModal({
         setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (deviceAuthorization === 'passkey') {
-        // A passkey is added when the app calls enrollPasskeyDefault /
-        // approveDeviceWithPasskey — not as a login screen. Finish so the
-        // integrator can ask at the moment they chose.
-        if (address) triggerDone(address);
+        // A wallet with a passkey asks for it now, and the tap on the button is
+        // the gesture WebAuthn needs. Without one there is nothing to ask:
+        // finish, and the wallet reads until the user adds a passkey elsewhere.
+        if (walletStatus.hasPasskey && passkeySupported) {
+          setScreen('passkey-approval');
+          doneHandledRef.current = false;
+        } else if (address) {
+          triggerDone(address);
+        }
       } else if (deviceAuthorization === 'enclave-needs-login') {
         // Not an error: the proof the enclave checks is only good for one
         // session, and signing in again mints a new one. That is an action.

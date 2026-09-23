@@ -74,18 +74,30 @@ export class VaultClient {
     address: string;
     isNewAccount: boolean;
     spend: Ed25519SpendSigner | null;
+    passkey: boolean;
   }> {
     const result = await this.call("connect", { ...params, chain: "solana" });
-    return { address: result.address, isNewAccount: result.isNewAccount, spend: this.solanaSigner(result) };
+    return {
+      address: result.address,
+      isNewAccount: result.isNewAccount,
+      spend: this.solanaSigner(result),
+      passkey: result.passkey === true,
+    };
   }
 
   async connectStellar(params: Omit<ConnectParams, "chain">): Promise<{
     address: string;
     isNewAccount: boolean;
     control?: ControlKey;
+    passkey: boolean;
   }> {
     const result = await this.call("connect", { ...params, chain: "stellar" });
-    return { address: result.address, isNewAccount: result.isNewAccount, control: this.stellarSigner(result) };
+    return {
+      address: result.address,
+      isNewAccount: result.isNewAccount,
+      control: this.stellarSigner(result),
+      passkey: result.passkey === true,
+    };
   }
 
   async connectStarknet(params: Omit<ConnectParams, "chain">): Promise<{
@@ -111,6 +123,11 @@ export class VaultClient {
 
   forget(userId: string, appSalt: string): Promise<void> {
     return this.call("forget", { userId, appSalt });
+  }
+
+  /** Create a passkey, in the vault's own origin, that can restore the connected account on another device. */
+  enrollPasskey(params: VaultParams<"enrollPasskey">): Promise<void> {
+    return this.call("enrollPasskey", params);
   }
 
   private solanaSigner({ handle, publicKey }: ConnectResult): Ed25519SpendSigner | null {
@@ -230,7 +247,8 @@ function mountIframe(url: string, appId: string): Promise<MessagePort> {
   const origin = new URL(url).origin;
   const iframe = document.createElement("iframe");
   iframe.src = url;
-  iframe.title = "Cavos";
+  // aria-label, not title: Safari shows a title as a tooltip over the whole page.
+  iframe.setAttribute("aria-label", "Cavos");
   iframe.allow = `publickey-credentials-get ${origin}; publickey-credentials-create ${origin}`;
   iframe.style.cssText =
     "display:none;position:fixed;inset:0;width:100%;height:100%;border:0;z-index:2147483647;background:transparent;color-scheme:normal";

@@ -3,6 +3,9 @@ import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCred
 import { parseMasterDEK, type MasterDEK } from "../../secret/dek";
 import type { EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
 import { deviceFactorFromUnwrapKey } from "../../secret/factor";
+import { readLocalDek } from "../../secret/localDek";
+import { addPasskey } from "../../secret/PasskeyDekPort";
+import type { StoredPasskeyWrap } from "../../registry/PasskeyWrapStore";
 import { wrapDekToSec1, type WrappedDEK } from "../../secret/wrap";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { resolveNativeStellar } from "./nativeConnect";
@@ -91,27 +94,45 @@ describe("resolveNativeStellar", () => {
     expect(second.isNewAccount).toBe(false);
   });
 
-  it("passkey transports the same G onto a second device", async () => {
-    const prf = new Uint8Array(32).fill(9);
-    const passkey = {
-      enroll: async () => ({ credentialId: new Uint8Array(16), secret: prf }),
-      getSecret: async () => prf,
-    };
+  it("a passkey added after sign-up opens the wallet on a second device", async () => {
     const registry = new InMemoryWalletRegistry();
+    const key = LocalDeviceUnwrapKey.generate();
+    const store = new MemoryStore();
+    // Sign-up asks for no passkey: the DEK is random.
     const first = await resolveNativeStellar({
       identity: { userId: "user-spk" },
       appSalt,
       registry,
-      passkey,
-      factor: deviceFactorFromUnwrapKey(LocalDeviceUnwrapKey.generate()),
-      store: new MemoryStore(),
+      factor: deviceFactorFromUnwrapKey(key),
+      store,
     });
-    expect((await registry.lookup("user-spk"))?.address).toBe(first.address);
+    const prf = new Uint8Array(32).fill(9);
+    const passkey = {
+      enroll: async () => ({ credentialId: new Uint8Array(16), secret: prf.slice() }),
+      getSecret: async () => prf.slice(),
+    };
+    const saved: StoredPasskeyWrap[] = [];
+    const passkeyWraps = {
+      list: async () => saved,
+      save: async (_userId: string, entry: StoredPasskeyWrap) => {
+        saved.push(entry);
+      },
+    };
+    await addPasskey({
+      passkey,
+      wraps: passkeyWraps,
+      owner: { appId: "app", userId: "user-spk" },
+      dek: await readLocalDek({ chain: "stellar", userId: "user-spk", appSalt, address: first.address, store, unwrapKey: key }),
+      user: { userId: "user-spk", userName: "u" },
+    });
+
     const second = await resolveNativeStellar({
       identity: { userId: "user-spk" },
       appSalt,
       registry,
       passkey,
+      passkeyWraps,
+      appId: "app",
       factor: deviceFactorFromUnwrapKey(LocalDeviceUnwrapKey.generate()),
       store: new MemoryStore(),
     });

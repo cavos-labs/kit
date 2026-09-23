@@ -260,9 +260,10 @@ await wallet.setupRecovery(code);
 await wallet.execute(calls);
 ```
 
-On **Solana and Stellar**, login does not prompt for a passkey. After connect,
-call `enrollPasskeyDefault()` from `useCavos()` when you want the PRF credential.
-Native Solana has no on-chain approver and no recovery-code `add_signer`.
+On **Solana and Stellar**, signing up never asks for a passkey. After connect,
+call `enrollPasskeyDefault()` from `useCavos()` to add one; it can then restore
+the wallet on another device. Native Solana has no on-chain approver and no
+recovery-code `add_signer`.
 
 ## Quickstart — Starknet
 
@@ -439,8 +440,8 @@ key. Protection varies by runtime:
 Stellar spend keys are non-extractable Ed25519 (`CryptoKey` in the browser). On
 the web all of them live in the Cavos vault, where signing is silent within the
 app's limits and needs the user's approval beyond them. A new device restores
-the MasterDEK with the enclave or a passkey PRF — login itself never prompts
-for a passkey.
+the MasterDEK with the enclave or with a passkey the user added — signing up
+never asks for a passkey.
 
 ## Hardware-isolated social recovery
 
@@ -486,11 +487,24 @@ email restore. The enclave **seals the MasterDEK**. Solana and Stellar unwrap it
 on a new device; they do not add an on-chain recovery signer. Starknet still
 registers a restricted recovery authority that can only schedule `add_signer`.
 
-`deviceApproval: "passkey"` is **one chain**. The passkey's WebAuthn PRF is a
-KDF of the MasterDEK (`cavos-master-dek-passkey-v1`). Anyone with that synced
-credential can spend on Solana/Stellar. Login never asks for it — call
-`enrollPasskeyDefault()` after signup and `approveDeviceWithPasskey()` on a new
-device.
+`deviceApproval: "passkey"` is **one chain**. Signing up never asks for a
+passkey: the MasterDEK is random. `enrollPasskeyDefault()` creates a passkey in
+the vault and stores a copy of the DEK encrypted under it:
+
+```
+KEK  = HKDF-SHA256(passkey PRF, "cavos-passkey-dek-wrap-v1")
+wrap = 0x01 || nonce || AES-256-GCM(KEK, DEK, aad = "appId:userId")
+```
+
+Cavos keeps the wrap (`/api/passkey-wraps`) and cannot open it: the PRF never
+leaves the user's device. On a new device the vault asks for the passkey only
+if a wrap exists, decrypts locally and checks the DEK derives the registered
+address. A user can add several passkeys; any of them restores the wallet.
+Anyone holding a synced passkey that was added can spend on Solana/Stellar.
+
+On Starknet the passkey is an on-chain approver instead. On a new device the
+auth modal shows "Verify it's you" when the account has one, and
+`approveDeviceWithPasskey()` adds this device.
 
 `secureStep` defaults to `'off'`. Set `'optional'` / `'required'` only if you
 want the modal's built-in "Secure your account" screen.
@@ -557,8 +571,8 @@ dashboard. Native passkeys also require:
 
 The default key policy prefers Secure Enclave, StrongBox, or TEE and falls back
 to an OS-protected non-exportable key. Set `minimumKeySecurity: "hardware"` to
-reject that fallback. Native Solana/Stellar restore with enclave unwrap or
-passkey PRF. Grandfathered Stellar wallets still use a recovery-code extra
+reject that fallback. Native Solana/Stellar restore with enclave unwrap or a
+passkey wrap. Grandfathered Stellar wallets still use a recovery-code extra
 signer when PRF is unavailable.
 
 `logout()` does **not** wipe everything. It clears the persisted identity and
@@ -594,7 +608,7 @@ approved.
 - ✅ `CavosSolana` — `connect`, `execute(amount, destination)`,
   `executeInstructions(instructions)`, `signMessage` (`curve: "ed25519"`).
 - ✅ `SolanaRelayer` — fee payer only. No device-account program, no PDA.
-- ✅ New device: enclave unwrap or passkey PRF. `addSigner` / `CavosSolana.recover`
+- ✅ New device: enclave unwrap or a passkey wrap. `addSigner` / `CavosSolana.recover`
   are not used.
 
 ### Stellar

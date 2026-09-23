@@ -27,10 +27,12 @@ export class VaultModal {
   passkey(user: { userId: string; userName: string }): PasskeyPrfProvider {
     return {
       enroll: async () => {
-        const { secret, credentialId } = await this.serial(() => this.showPasskey(user));
-        return { credentialId: credentialId ?? new Uint8Array(), secret };
+        const { secret, credentialId } = await this.serial(() => this.showPasskey(user, { create: true }));
+        if (!credentialId) throw new Error("kit/vault: the new passkey has no credential id");
+        return { credentialId, secret };
       },
-      getSecret: async (credentialId) => (await this.serial(() => this.showPasskey(user, credentialId))).secret,
+      getSecret: async (credentialId) =>
+        (await this.serial(() => this.showPasskey(user, { create: false, credentialId }))).secret,
     };
   }
 
@@ -72,37 +74,41 @@ export class VaultModal {
       document.addEventListener("keydown", onKey);
       reject.onclick = () => void finish(false);
 
-      if (canTrackVisibility()) {
-        const approve = armableButton("Approve");
-        view.actions.append(approve.node, reject);
-        unguard = guard(view.card, approve);
-        approve.node.onclick = () => void finish(true);
-        return;
-      }
-      // Without a way to tell whether the page is covering this frame, the
-      // decision is taken in a top-level Cavos window the page cannot draw over.
-      const review = button("Review in a Cavos window", "primary");
-      view.actions.append(review, reject);
-      review.onclick = () =>
-        this.popup({ kind: "review", lines, network, app: hostOf(this.origin) }).then(
-          (result) => finish("approved" in result && result.approved),
-          () => finish(false),
-        );
+      const approve = armableButton("Approve");
+      view.actions.append(approve.node, reject);
+      approve.node.onclick = () => void finish(true);
+      // Where the browser can tell (Intersection Observer v2), Approve arms only
+      // while the page is not covering or fading the frame. Elsewhere (Safari)
+      // it cannot, and the arming delay is the only guard against a click aimed
+      // at something else.
+      if (canTrackVisibility()) unguard = guard(view.card, approve);
+      else approve.arm(ARM_MS);
     });
   }
 
-  private async showPasskey(user: { userId: string; userName: string }, credentialId?: Uint8Array): Promise<Secret> {
+  /** `create` adds a passkey to a wallet; otherwise an existing passkey opens it on this device. */
+  private async showPasskey(
+    user: { userId: string; userName: string },
+    mode: { create: boolean; credentialId?: Uint8Array },
+  ): Promise<Secret> {
+    const { create: creating, credentialId } = mode;
     const view = await this.open();
     return new Promise((resolve, reject) => {
-      view.title.textContent = "Unlock your wallet";
-      const message = el("span", {}, "Use your passkey to open your wallet on this site.");
+      view.title.textContent = creating ? "Add a passkey" : "Verify it's you";
+      const message = el(
+        "span",
+        {},
+        creating
+          ? "Your passkey will open this wallet on your other devices."
+          : "Use your passkey to continue on this device.",
+      );
       view.body.append(message);
 
       const passkeys = new PasskeyPrf({ rpName: "Cavos" });
       const use = button("Use passkey", "primary");
-      const create = button("Create a passkey", "secondary");
+      const create = button("Create passkey", "primary");
       const cancel = button("Cancel", "quiet");
-      view.actions.append(use, create, cancel);
+      view.actions.append(creating ? create : use, cancel);
 
       let settled = false;
       const finish = async (result: Secret | Error) => {
@@ -121,7 +127,7 @@ export class VaultModal {
           message.textContent = "Your browser needs a Cavos window to use your passkey.";
           const fallback = button("Continue in a Cavos window", "primary");
           fallback.onclick = () =>
-            this.popup({ kind: "passkey", ...user, credentialId }).then(
+            this.popup({ kind: "passkey", ...user, create: creating, credentialId }).then(
               (result) => finish("secret" in result ? result : new Error("error" in result ? result.error : "kit/vault: cancelled")),
               (error: Error) => finish(error),
             );
