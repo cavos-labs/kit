@@ -1,4 +1,4 @@
-import { Keypair } from "@stellar/stellar-sdk";
+import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { ed25519 } from "@noble/curves/ed25519";
 import { randomBytes } from "@noble/hashes/utils";
 import {
@@ -92,47 +92,25 @@ maybe("WebCryptoControlKey", () => {
 });
 
 maybe("signTransactionWithControlKey", () => {
-  it("signs a transaction hash and calls addSignature", async () => {
-    const seed = randomBytes(32);
-    const controlKey = await WebCryptoControlKey.importFromSeed(seed);
+  it("signs the transaction hash and attaches the signature", async () => {
+    const controlKey = await WebCryptoControlKey.importFromSeed(randomBytes(32));
+    const tx = new TransactionBuilder(new Account(controlKey.publicAddress(), "1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(Operation.payment({ destination: Keypair.random().publicKey(), asset: Asset.native(), amount: "1" }))
+      .setTimeout(30)
+      .build();
 
-    const txHash = randomBytes(32);
-    const signatures: Array<{ publicKey: string; signature: string }> = [];
+    await signTransactionWithControlKey(tx, controlKey);
 
-    const mockTx = {
-      hash: () => Buffer.from(txHash),
-      addSignature: (publicKey: string, signature: string) => {
-        signatures.push({ publicKey, signature });
-      },
-    };
-
-    await signTransactionWithControlKey(mockTx, controlKey);
-
-    expect(signatures).toHaveLength(1);
-    expect(signatures[0].publicKey).toBe(controlKey.publicAddress());
-
-    const sigBytes = Buffer.from(signatures[0].signature, "base64");
-    expect(ed25519.verify(sigBytes, txHash, controlKey.publicKeyRaw())).toBe(true);
+    expect(tx.signatures).toHaveLength(1);
+    expect(ed25519.verify(tx.signatures[0].signature(), tx.hash(), controlKey.publicKeyRaw())).toBe(true);
   });
 });
 
 maybe("createSorobanSigner", () => {
-  it("creates a signer callback compatible with authorizeEntry", async () => {
-    const seed = randomBytes(32);
-    const controlKey = await WebCryptoControlKey.importFromSeed(seed);
-
-    const signer = createSorobanSigner(controlKey);
-    const payload = randomBytes(32);
-
-    const mockPreimage = { toXDR: () => Buffer.from(payload) };
-
-    const result = await signer(mockPreimage, payload);
-
-    expect(result.publicKey).toBe(controlKey.publicAddress());
-    expect(ed25519.verify(result.signature, payload, controlKey.publicKeyRaw())).toBe(true);
-  });
-
-  it("hashes preimage if payload not provided", async () => {
+  it("signs the sha256 of the preimage", async () => {
     const seed = randomBytes(32);
     const controlKey = await WebCryptoControlKey.importFromSeed(seed);
 

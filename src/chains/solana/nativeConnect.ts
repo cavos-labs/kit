@@ -1,10 +1,9 @@
-import { PublicKey } from "@solana/web3.js";
 import { WebCryptoControlKey } from "../stellar/WebCryptoControlKey";
 import {
   resolveNativeEd25519,
   type ResolveNativeEd25519Input,
 } from "../../secret/nativeAccount";
-import { solanaSpendFromSeed, type Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
+import { solanaSpendFromSeed, spendSignerFrom, type Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
 import type { Ed25519Seed } from "../../secret/dek";
 
 export type ResolveNativeSolanaInput = Omit<ResolveNativeEd25519Input, "chain">;
@@ -35,9 +34,5 @@ async function importSolanaSpend(seed: Ed25519Seed, keyId: string): Promise<Ed25
 }
 
 function spendFromControl(key: WebCryptoControlKey): Ed25519SpendSigner {
-  return {
-    address: () => new PublicKey(key.publicKeyRaw()).toBase58(),
-    publicKeyRaw: () => key.publicKeyRaw(),
-    sign: (message) => key.sign(message),
-  };
+  return spendSignerFrom(key.publicKeyRaw(), (data) => key.sign(data));
 }

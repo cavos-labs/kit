@@ -45,6 +45,7 @@ import {
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
+import { VaultClient } from '../vault/VaultClient';
 import { CavosAuthModal } from './CavosAuthModal';
 import {
   validateCavosConfig,
@@ -123,6 +124,11 @@ export interface CavosConfig {
    * takes precedence, so existing apps keep their explicit pin.
    */
   socialRecoveryAttestation?: AttestationPolicy;
+  /**
+   * Signing keys live in the Cavos vault, not in this page's
+   * storage. On by default when `appId` is set; `false` turns it off.
+   */
+  vault?: boolean | { url?: string };
 }
 
 export interface CavosModalConfig {
@@ -417,6 +423,10 @@ export function resolveSocialRecoveryPolicy(
   if (typeof config.socialRecovery === 'object') return config.socialRecovery;
   if (config.socialRecovery === true) return DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
   return undefined;
+}
+
+function vaultSetting(config: CavosConfig): boolean | { url?: string } {
+  return config.vault ?? Boolean(config.appId);
 }
 
 export function CavosProvider({
@@ -789,6 +799,7 @@ export function CavosProvider({
         ...(socialClient ? { socialRecovery: socialClient } : {}),
         ...(socialCredential ? { socialRecoveryCredential: socialCredential } : {}),
         ...(passkeyPrf ? { passkeyPrf } : {}),
+        vault: vaultSetting(cfg),
       }));
       setSession(s);
       setSelectedChain(s.defaultChain);
@@ -1764,6 +1775,7 @@ export function CavosProvider({
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
           ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+          vault: vaultSetting(cfg),
         });
       }
       // After recovery, reconnect to get a proper session with all chains
@@ -1817,6 +1829,12 @@ export function CavosProvider({
   }, [auth]);
 
   const logout = useCallback(() => {
+    const vault = vaultSetting(config);
+    if (vault && config.appId && identity) {
+      VaultClient.attach({ appId: config.appId, ...(typeof vault === 'object' ? vault : {}) })
+        .forget(identity.userId, config.appSalt)
+        .catch(() => undefined);
+    }
     auth.clearStoredIdentity();
     setSession(null);
     setIdentity(null);
@@ -1829,7 +1847,7 @@ export function CavosProvider({
         '[CavosProvider] logout() cleared Cavos state only. Sign the user out with your own auth and pass `identity={null}`.',
       );
     }
-  }, [auth, isExternalAuth]);
+  }, [auth, config, identity, isExternalAuth]);
 
   const value: CavosContextValue = {
     openModal,

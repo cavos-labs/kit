@@ -54,6 +54,13 @@ export class WebCryptoSigner implements DeviceSigner {
     return new WebCryptoSigner(rec.privateKey, { x: rec.x, y: rec.y }, opts.keyId);
   }
 
+  static async remove(keyId: string): Promise<void> {
+    if (typeof indexedDB === "undefined") return;
+    const db = await openDb();
+    await tx(db, "readwrite", (store) => store.delete(keyId));
+    db.close();
+  }
+
   /**
    * Load the device key, creating one on first use.
    *

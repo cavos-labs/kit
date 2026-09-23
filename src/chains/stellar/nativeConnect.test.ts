@@ -61,7 +61,7 @@ describe("resolveNativeStellar", () => {
     expect(native.address.startsWith("G")).toBe(true);
     expect(native.control!.publicAddress()).toBe(native.address);
     expect(native.isNewAccount).toBe(true);
-    const sig = await native.control!.sign(new Uint8Array(32));
+    const sig = await native.control!.signMessage(new Uint8Array(32));
     expect(sig).toHaveLength(64);
   });
 

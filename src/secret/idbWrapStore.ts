@@ -4,20 +4,21 @@ import type { WrapStore } from "./DeviceSecret";
 const IDB_NAME = "cavos-kit-dek-wrap";
 const IDB_STORE = "wraps";
 
-export function idbWrapStore(): WrapStore {
+export function idbWrapStore(scope?: string): WrapStore {
+  const key = (userId: string) => (scope ? `${scope}|${userId}` : userId);
   return {
     async get(userId) {
       if (!hasIndexedDB()) return null;
-      const raw = await idbGet(userId);
+      const raw = await idbGet(key(userId));
       return raw ? parseWrappedDEK(raw) : null;
     },
     async put(userId, wrap) {
       if (!hasIndexedDB()) return;
-      await idbPut(userId, wrap);
+      await idbPut(key(userId), wrap);
     },
     async clear(userId) {
       if (!hasIndexedDB()) return;
-      await idbDel(userId);
+      await idbDel(key(userId));
     },
   };
 }

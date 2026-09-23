@@ -54,6 +54,13 @@ export class WebCryptoDeviceUnwrapKey implements DeviceUnwrapKey {
     return new WebCryptoDeviceUnwrapKey(rec.privateKey, rec.publicRaw, opts.keyId);
   }
 
+  static async remove(keyId: string): Promise<void> {
+    if (typeof indexedDB === "undefined") return;
+    const db = await openDb();
+    await tx(db, "readwrite", (store) => store.delete(keyId));
+    db.close();
+  }
+
   /** Load the device unwrap key, creating one on first use. */
   static async loadOrCreate(opts: WebCryptoUnwrapKeyOptions): Promise<WebCryptoDeviceUnwrapKey> {
     return (await WebCryptoDeviceUnwrapKey.load(opts)) ?? (await WebCryptoDeviceUnwrapKey.create(opts));

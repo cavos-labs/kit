@@ -176,3 +176,4 @@ export {
   hexToBytes,
   bigIntTo32Bytes,
 } from "./crypto/encoding";
+export { VaultClient } from "./vault/VaultClient";
