@@ -3,36 +3,28 @@ import {
   resolveNativeEd25519,
   type ResolveNativeEd25519Input,
 } from "../../secret/nativeAccount";
-import type { Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
 import type { Ed25519Seed } from "../../secret/dek";
 
 export type ResolveNativeStellarInput = Omit<ResolveNativeEd25519Input, "chain" | "importSpend" | "loadPersisted">;
 
+type StellarSpend = { address(): string; control: ControlKey };
+
 export async function resolveNativeStellar(
   input: ResolveNativeStellarInput,
 ): Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }> {
-  let control: ControlKey | undefined;
-  const native = await resolveNativeEd25519({
+  const native = await resolveNativeEd25519<StellarSpend>({
     ...input,
     chain: "stellar",
     loadPersisted: async (keyId) => {
       const key = await WebCryptoControlKey.load({ keyId });
-      if (!key) return null;
-      control = key;
-      return stellarSpend(key);
+      return key ? stellarSpend(key) : null;
     },
-    importSpend: async (seed: Ed25519Seed, keyId: string) => {
-      control = await WebCryptoControlKey.importFromSeed(seed, { keyId });
-      return stellarSpend(control);
-    },
+    importSpend: async (seed: Ed25519Seed, keyId: string) =>
+      stellarSpend(await WebCryptoControlKey.importFromSeed(seed, { keyId })),
   });
-  return { address: native.address, control, isNewAccount: native.isNewAccount };
+  return { address: native.address, control: native.spend?.control, isNewAccount: native.isNewAccount };
 }
 
-function stellarSpend(key: ControlKey): Ed25519SpendSigner {
-  return {
-    address: () => key.publicAddress(),
-    publicKeyRaw: () => key.publicKeyRaw(),
-    sign: (message) => key.sign(message),
-  };
+function stellarSpend(control: ControlKey): StellarSpend {
+  return { address: () => control.publicAddress(), control };
 }

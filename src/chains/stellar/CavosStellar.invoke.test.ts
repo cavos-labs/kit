@@ -5,6 +5,13 @@ import { LocalDeviceUnwrapKey } from "./DeviceUnwrapKey";
 import type { StellarRelayer } from "./StellarRelayer";
 import { KeypairControlKey } from "./WebCryptoControlKey";
 
+/** The stubbed txs here are not real XDR; only the auth-entry signing is exercised for real. */
+class StubTxControl extends KeypairControlKey {
+  async signTransaction(): Promise<Uint8Array> {
+    return new Uint8Array(64);
+  }
+}
+
 /**
  * Verifies `CavosStellar.invokeContract` — the Soroban path that lets a Cavos
  * account act as a `require_auth(role)` signer (e.g. Trustless Work escrow).
@@ -69,7 +76,7 @@ describe("CavosStellar.invokeContract", () => {
       "stellar-testnet",
       adapter,
       LocalDeviceUnwrapKey.generate(),
-      new KeypairControlKey(acct),
+      new StubTxControl(acct),
       new Uint8Array(32),
       undefined,
       { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
@@ -115,7 +122,7 @@ describe("CavosStellar.invokeContract", () => {
       "stellar-testnet",
       adapter,
       LocalDeviceUnwrapKey.generate(),
-      new KeypairControlKey(acct),
+      new StubTxControl(acct),
       new Uint8Array(32),
       relayer,
       { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
@@ -149,7 +156,7 @@ describe("CavosStellar.invokeContract", () => {
     const Ctor = CavosStellar as unknown as new (...args: unknown[]) => CavosStellar;
     const wallet = new Ctor(
       identity, acct.publicKey(), "ready", "stellar-testnet", adapter,
-      LocalDeviceUnwrapKey.generate(), new KeypairControlKey(acct), new Uint8Array(32), relayer,
+      LocalDeviceUnwrapKey.generate(), new StubTxControl(acct), new Uint8Array(32), relayer,
       { appSalt: "test", backendUrl: "https://cavos.xyz", startingBalance: 50000000n },
     );
 

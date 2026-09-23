@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.0
+
+### The Cavos vault
+
+Signing keys for Solana, Stellar and Starknet move out of the integrator's page
+and into the vault, an iframe on a Cavos origin (`vault.cavos.xyz`). The page
+asks for signatures; it never holds a key, so a script running on it can no
+longer take one.
+
+- **On by default** in `CavosProvider` when `appId` is set. `vault: false`
+  turns it off; `vault: { url }` points at another deployment. `Cavos.connect`
+  takes the same `vault` option.
+- **Limits and approvals come from the dashboard**, per app (Approvals page),
+  never from the page. Within the limits the vault signs silently. Over them,
+  the app's rule applies: ask the user, block, or sign anyway.
+- **The vault reads what it signs.** Solana messages, Stellar transactions and
+  Soroban auth entries, Starknet outside executions and invokes. Transfers of
+  known assets count against the limits, and so do Solana fees and token
+  account rent. Anything it cannot read as a transfer (signer changes, unknown
+  programs or contracts) is over the limit. The network shown to the user is
+  the one in the payload, not the one the app named.
+- **Keys are filed under the app id**, and an app must register the origins
+  that may embed it. Keys created by an earlier vault build are not reused.
+- **Approvals** happen in the vault's own modal. Where the browser cannot tell
+  whether the page is covering it (no Intersection Observer v2), the decision
+  moves to a top-level Cavos window. Passkeys fall back to that window too.
+- **Legacy copies are retired.** After a vault connect, a Solana or Stellar
+  key, device unwrap key or wrapped DEK left in the page's storage is deleted
+  once it provably opens the same address. Starknet device keys created before
+  the vault stay on-chain and in page storage.
+- `@cavos/kit/vault` exports `startVaultHost` and `startVaultConfirm` for the
+  pages that serve it, and `dist/vault-browser` ships them as standalone scripts.
+
+### Breaking
+
+- `Ed25519SpendSigner.sign` is now `signTransaction(message)` and
+  `signMessage(message)`; `signMessage` applies the Cavos prefix itself.
+- `ControlKey.sign` is now `signTransaction(xdr, networkPassphrase)`,
+  `signAuthEntry(preimageXdr)` and `signMessage(message)`.
+- `StarknetAdapter.signMessageRaw(prefixedBytes)` is now
+  `signMessage(message)`, which prefixes.
+- `ConnectStellarOptions.deviceKey` is optional.
+- `logout()` releases the vault's unlocked keys; it no longer deletes stored ones.
+
 ## 0.1.14
 
 ### Native Ed25519 + enclave MasterDEK

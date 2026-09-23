@@ -22,11 +22,8 @@ import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCred
 import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
 import { InMemoryWalletRegistry, type WalletRegistry } from "../../registry/WalletRegistry";
 import { resolveNativeStellar } from "./nativeConnect";
-import {
-  prefixedMessageBytes,
-  type MessageSignature,
-  type StellarSignedTransaction,
-} from "../../signing";
+import { connectThroughVault, vaultConnectParams, type VaultClient } from "../../vault/VaultClient";
+import type { MessageSignature, StellarSignedTransaction } from "../../signing";
 import {
   WebCryptoControlKey,
   type ControlKey,
@@ -53,7 +50,7 @@ export interface ConnectStellarOptions {
   identity?: Identity;
   appSalt: string;
   /** This device's P-256 ECDH unwrap key (provisioned + persisted per device). */
-  deviceKey: DeviceUnwrapKey;
+  deviceKey?: DeviceUnwrapKey;
   /**
    * Gasless sponsorship via the Cavos classic relayer. When set (or when `appId` +
    * `backendUrl` are given) the relayer is the tx source + fee payer AND sponsors
@@ -83,6 +80,8 @@ export interface ConnectStellarOptions {
   wrapStore?: WrapStore;
   registry?: WalletRegistry;
   passkey?: PasskeyPrfProvider;
+  /** Keep the key in the Cavos vault instead of this page's storage. */
+  vault?: VaultClient;
 }
 
 /**
@@ -161,7 +160,7 @@ export class CavosStellar {
     status: StellarConnectStatus,
     readonly network: StellarNetwork,
     private readonly adapter: StellarAdapter,
-    _deviceKey: DeviceUnwrapKey,
+    _deviceKey: DeviceUnwrapKey | undefined,
     private control: ControlKey | undefined,
     _dek: Uint8Array | undefined,
     private readonly relayer: StellarRelayer | undefined,
@@ -224,18 +223,22 @@ export class CavosStellar {
           })
         : null);
 
-    if (opts.recovery || opts.socialRecovery || opts.passkey) {
-      const native = await resolveNativeStellar({
-        identity,
-        appSalt: opts.appSalt,
-        registry: registry ?? new InMemoryWalletRegistry(),
-        credential: opts.credential,
-        socialRecovery: opts.socialRecovery,
-        recovery: opts.recovery,
-        factor: opts.factor,
-        store: opts.wrapStore,
-        passkey: opts.passkey,
-      });
+    if (opts.vault || opts.recovery || opts.socialRecovery || opts.passkey) {
+      const native = opts.vault
+        ? await connectThroughVault("stellar", identity, opts.appSalt, () =>
+            opts.vault!.connectStellar(vaultConnectParams({ ...opts, identity })),
+          )
+        : await resolveNativeStellar({
+            identity,
+            appSalt: opts.appSalt,
+            registry: registry ?? new InMemoryWalletRegistry(),
+            credential: opts.credential,
+            socialRecovery: opts.socialRecovery,
+            recovery: opts.recovery,
+            factor: opts.factor,
+            store: opts.wrapStore,
+            passkey: opts.passkey,
+          });
       const deployed = await adapter.isDeployed(native.address);
       const wallet = new CavosStellar(
         identity,
@@ -631,8 +634,7 @@ export class CavosStellar {
   async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
     const control = this.requireControl();
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
-    const prefixed = prefixedMessageBytes(msgBytes);
-    const sig = await control.sign(prefixed);
+    const sig = await control.signMessage(msgBytes);
     return {
       signature: sig,
       publicKey: control.publicAddress(),

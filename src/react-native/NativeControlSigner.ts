@@ -1,5 +1,5 @@
 import { StrKey } from "@stellar/stellar-sdk";
-import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
+import { LocalControlKey } from "../chains/stellar/WebCryptoControlKey";
 import { nativeModule } from "./NativeModule";
 import { fromBase64, toBase64 } from "./encoding";
 
@@ -45,13 +45,15 @@ import { fromBase64, toBase64 } from "./encoding";
  * const sig = await signer.sign(txHash);
  * ```
  */
-export class NativeControlSigner implements ControlKey {
+export class NativeControlSigner extends LocalControlKey {
   private constructor(
     readonly keyId: string,
     private readonly deviceWrapBase64: string,
     private readonly ciphertextBase64: string,
     private readonly publicKeyRawBytes: Uint8Array,
-  ) {}
+  ) {
+    super();
+  }
 
   /**
    * Create a native control signer from the on-chain envelope data.

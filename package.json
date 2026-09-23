@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "description": "Embedded Stellar wallet SDK, embedded Solana wallet, and embedded Starknet wallet. Device-native self-custodial accounts for React Native and web.",
   "repository": {
     "type": "git",
@@ -44,6 +44,11 @@
       "types": "./dist/stellar.d.ts",
       "require": "./dist/stellar.js",
       "import": "./dist/stellar.mjs"
+    },
+    "./vault": {
+      "types": "./dist/vault/index.d.ts",
+      "require": "./dist/vault/index.js",
+      "import": "./dist/vault/index.mjs"
     },
     "./app.plugin": "./app.plugin.js"
   },

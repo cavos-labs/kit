@@ -18,13 +18,14 @@ import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import type { PasskeyApprover, PasskeyEnrollParams, PasskeyPrfProvider } from "../../signer/PasskeyProvider";
 import type { ExecuteOptions } from "../../chains/ChainAdapter";
 import { utf8ToBytes } from "../../crypto/encoding";
-import { prefixedMessageBytes, type MessageSignature, type SolanaSignedTransaction } from "../../signing";
+import type { MessageSignature, SolanaSignedTransaction } from "../../signing";
 import type { SocialRecoveryClient } from "../../recovery/SocialRecoveryClient";
 import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCredential";
 import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
 import type { Ed25519Seed } from "../../secret/dek";
 import type { Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
 import { resolveNativeSolana } from "./nativeConnect";
+import { connectThroughVault, vaultConnectParams, type VaultClient } from "../../vault/VaultClient";
 
 export interface InstructionAccount {
   pubkey: string;
@@ -57,6 +58,8 @@ export interface ConnectSolanaOptions {
   wrapStore?: WrapStore;
   importSpend?: (seed: Ed25519Seed, keyId: string) => Promise<Ed25519SpendSigner>;
   passkey?: PasskeyPrfProvider;
+  /** Keep the key in the Cavos vault instead of this page's storage. */
+  vault?: VaultClient;
 }
 
 export type ConnectStatus = "undeployed" | "ready" | "needs-device-approval";
@@ -161,18 +164,22 @@ export class CavosSolana {
           })
         : undefined);
 
-    const native = await resolveNativeSolana({
-      identity,
-      appSalt: opts.appSalt,
-      registry,
-      credential: opts.credential,
-      socialRecovery: opts.socialRecovery,
-      recovery: opts.recovery,
-      factor: opts.factor,
-      store: opts.wrapStore,
-      importSpend: opts.importSpend,
-      passkey: opts.passkey,
-    });
+    const native = opts.vault
+      ? await connectThroughVault("solana", identity, opts.appSalt, () =>
+          opts.vault!.connectSolana(vaultConnectParams({ ...opts, identity })),
+        )
+      : await resolveNativeSolana({
+          identity,
+          appSalt: opts.appSalt,
+          registry,
+          credential: opts.credential,
+          socialRecovery: opts.socialRecovery,
+          recovery: opts.recovery,
+          factor: opts.factor,
+          store: opts.wrapStore,
+          importSpend: opts.importSpend,
+          passkey: opts.passkey,
+        });
 
     const wallet = new CavosSolana(
       identity,
@@ -282,7 +289,7 @@ export class CavosSolana {
   async signMessage(message: string | Uint8Array): Promise<MessageSignature> {
     const spend = this.requireSpend();
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
-    const signature = await spend.sign(prefixedMessageBytes(msgBytes));
+    const signature = await spend.signMessage(msgBytes);
     return { signature, publicKey: spend.address(), curve: "ed25519" };
   }
 
@@ -298,7 +305,7 @@ export class CavosSolana {
     tx.recentBlockhash = blockhash;
     tx.add(ix);
     const message = tx.serializeMessage();
-    const signature = await spend.sign(message);
+    const signature = await spend.signTransaction(message);
     return { chain: "solana", message, signature, publicKey: spend.publicKeyRaw() };
   }
 
@@ -327,7 +334,7 @@ export class CavosSolana {
     tx.feePayer = payer;
     tx.recentBlockhash = blockhash;
     tx.add(...ixs);
-    const signature = await spend.sign(tx.serializeMessage());
+    const signature = await spend.signTransaction(tx.serializeMessage());
     tx.addSignature(new PublicKey(this.address), Buffer.from(signature));
     if (sponsored && this.relayer) {
       return this.relayer.sendSigned(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));

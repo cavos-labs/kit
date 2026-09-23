@@ -15,7 +15,7 @@ import { toPasskeyDekPort } from "./PasskeyDekPort";
 import { zeroize, type Ed25519Seed } from "./dek";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
 
-export interface ResolveNativeEd25519Input {
+export interface ResolveNativeEd25519Input<S extends { address(): string } = Ed25519SpendSigner> {
   chain: Ed25519Chain;
   identity: Identity;
   appSalt: string;
@@ -26,8 +26,13 @@ export interface ResolveNativeEd25519Input {
   passkey?: PasskeyPrfProvider;
   factor?: DeviceFactor;
   store?: WrapStore;
-  importSpend?: (seed: Ed25519Seed, keyId: string) => Promise<Ed25519SpendSigner>;
-  loadPersisted?: (keyId: string) => Promise<Ed25519SpendSigner | null>;
+  importSpend?: (seed: Ed25519Seed, keyId: string) => Promise<S>;
+  loadPersisted?: (keyId: string) => Promise<S | null>;
+  /**
+   * Prefixes every stored key. The vault passes the app id, so one app can
+   * never load another app's keys from the same browser storage.
+   */
+  keyScope?: string;
 }
 
 const PASSKEY_CREDENTIAL: SocialRecoveryCredential = {
@@ -56,11 +61,12 @@ function localOnlyDekPort(): EnclaveDekPort {
   };
 }
 
-export async function resolveNativeEd25519(
-  input: ResolveNativeEd25519Input,
-): Promise<{ address: string; spend: Ed25519SpendSigner | null; isNewAccount: boolean }> {
+export async function resolveNativeEd25519<S extends { address(): string } = Ed25519SpendSigner>(
+  input: ResolveNativeEd25519Input<S>,
+): Promise<{ address: string; spend: S | null; isNewAccount: boolean }> {
   const appSalt = parseAppSalt(input.appSalt);
-  const keyId = `${input.chain}:${input.identity.userId}:${input.appSalt}`;
+  const scoped = (id: string) => (input.keyScope ? `${input.keyScope}|${id}` : id);
+  const keyId = scoped(`${input.chain}:${input.identity.userId}:${input.appSalt}`);
   const loaded = input.loadPersisted ? await input.loadPersisted(keyId) : null;
   if (loaded) {
     return { address: loaded.address(), spend: loaded, isNewAccount: false };
@@ -70,10 +76,10 @@ export async function resolveNativeEd25519(
     input.factor ??
     deviceFactorFromUnwrapKey(
       await WebCryptoDeviceUnwrapKey.loadOrCreate({
-        keyId: `${input.identity.userId}:${input.appSalt}`,
+        keyId: scoped(`${input.identity.userId}:${input.appSalt}`),
       }),
     );
-  const store = input.store ?? idbWrapStore();
+  const store = input.store ?? idbWrapStore(input.keyScope);
   const recovery = input.recovery ?? dekPort(input);
   let existing = false;
   try {
@@ -123,14 +129,14 @@ export async function resolveNativeEd25519(
   }
 }
 
-function recoveryCredential(input: ResolveNativeEd25519Input): SocialRecoveryCredential {
+function recoveryCredential(input: ResolveNativeEd25519Input<{ address(): string }>): SocialRecoveryCredential {
   if (input.credential) return input.credential;
   if (input.passkey && !input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
   if (!input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
   throw new Error(`kit/${input.chain}: sign in again to restore this device`);
 }
 
-function dekPort(input: ResolveNativeEd25519Input): EnclaveDekPort {
+function dekPort(input: ResolveNativeEd25519Input<{ address(): string }>): EnclaveDekPort {
   if (input.recovery) return input.recovery;
   if (input.socialRecovery) return toEnclaveDekPort(input.socialRecovery);
   if (input.passkey) {

@@ -62,7 +62,7 @@ describe("resolveNativeSolana", () => {
     });
     expect(native.address).toBe(native.spend!.address());
     expect(native.isNewAccount).toBe(true);
-    const sig = await native.spend!.sign(new Uint8Array(32));
+    const sig = await native.spend!.signMessage(new Uint8Array(32));
     expect(sig).toHaveLength(64);
   });
 

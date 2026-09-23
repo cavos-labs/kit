@@ -6,6 +6,7 @@ import { signatureToFelts } from "../../crypto/signature";
 import { u256ToFelts, bigIntTo32Bytes, bytesToByteArrayCalldata, bytesToBigInt } from "../../crypto/encoding";
 import type { PasskeyAssertion } from "../../crypto/webauthn";
 import { UDC_ADDRESS } from "./constants";
+import { prefixedMessageBytes } from "../../signing";
 import { poseidon, namespaceToFelt } from "../../identity";
 
 export interface StarknetAdapterOptions {
@@ -14,6 +15,8 @@ export interface StarknetAdapterOptions {
   provider?: { callContract(call: { contractAddress: string; entrypoint: string; calldata: string[] }): Promise<string[]> };
   /** Signer used to sign outgoing transactions. */
   signer?: DeviceSigner;
+  /** Signs an off-chain message; defaults to `signer` over the prefixed bytes. */
+  messageSigner?: (message: Uint8Array) => Promise<DeviceSignature>;
 }
 
 /** Starknet implementation of the device-signer account adapter. */
@@ -175,13 +178,13 @@ export class StarknetAdapter implements ChainAdapter {
   }
 
   /**
-   * Sign arbitrary bytes (an off-chain message) with the device key. The signer
-   * signs `sha256(bytes)` and returns the raw `(r, s, yParity)` — callers encode
-   * it per chain. Used by `Cavos.signMessage`.
+   * Sign an off-chain message with the device key: `sha256(prefixedMessageBytes(message))`,
+   * returned as the raw `(r, s, yParity)`. Used by `Cavos.signMessage`.
    */
-  async signMessageRaw(bytes: Uint8Array): Promise<DeviceSignature> {
+  async signMessage(message: Uint8Array): Promise<DeviceSignature> {
+    if (this.opts.messageSigner) return this.opts.messageSigner(message);
     if (!this.opts.signer) throw new Error("kit/starknet: signer required to sign");
-    return this.opts.signer.sign(bytes);
+    return this.opts.signer.sign(prefixedMessageBytes(message));
   }
 
   // --- passkey approvers ---

@@ -22,7 +22,8 @@ function makeWallet(opts: { relayer?: SolanaRelayer; feePayer?: Keypair }): Cavo
   const spend = {
     address: () => new PublicKey("11111111111111111111111111111112").toBase58(),
     publicKeyRaw: () => new PublicKey("11111111111111111111111111111112").toBytes(),
-    sign: async () => new Uint8Array(64),
+    signTransaction: async () => new Uint8Array(64),
+    signMessage: async () => new Uint8Array(64),
   };
   const connection = {
     getLatestBlockhash: async () => ({ blockhash: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi", lastValidBlockHeight: 1 }),

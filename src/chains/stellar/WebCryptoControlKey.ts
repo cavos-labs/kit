@@ -1,6 +1,7 @@
-import { StrKey } from "@stellar/stellar-sdk";
+import { StrKey, TransactionBuilder, type FeeBumpTransaction, type Transaction } from "@stellar/stellar-sdk";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
+import { prefixedMessageBytes } from "../../signing";
 
 /**
  * Non-extractable Ed25519 control key for classic-G Stellar accounts.
@@ -20,14 +21,39 @@ import { sha256 } from "@noble/hashes/sha256";
 const IDB_NAME = "cavos-kit-stellar-control";
 const IDB_STORE = "control-keys";
 
-/** Interface for the control-key signing capability used by CavosStellar. */
+/**
+ * The control-key signing capability used by CavosStellar. It signs whole
+ * transactions, auth preimages and prefixed messages — never raw bytes — so a
+ * signer that sits behind a policy can see what it is signing.
+ */
 export interface ControlKey {
   /** Stellar `G…` address of the control public key. */
   publicAddress(): string;
   /** The raw 32-byte Ed25519 public key. */
   publicKeyRaw(): Uint8Array;
-  /** Sign data with the control key. Returns a 64-byte Ed25519 signature. */
-  sign(data: Uint8Array): Promise<Uint8Array>;
+  signTransaction(xdr: string, networkPassphrase: string): Promise<Uint8Array>;
+  signAuthEntry(preimageXdr: Uint8Array): Promise<Uint8Array>;
+  /** Signs `prefixedMessageBytes(message)`. */
+  signMessage(message: Uint8Array): Promise<Uint8Array>;
+}
+
+/** A control key whose private half is in this process. */
+export abstract class LocalControlKey implements ControlKey {
+  abstract publicAddress(): string;
+  abstract publicKeyRaw(): Uint8Array;
+  abstract sign(data: Uint8Array): Promise<Uint8Array>;
+
+  signTransaction(xdr: string, networkPassphrase: string): Promise<Uint8Array> {
+    return this.sign(new Uint8Array(TransactionBuilder.fromXDR(xdr, networkPassphrase).hash()));
+  }
+
+  signAuthEntry(preimageXdr: Uint8Array): Promise<Uint8Array> {
+    return this.sign(sha256(preimageXdr));
+  }
+
+  signMessage(message: Uint8Array): Promise<Uint8Array> {
+    return this.sign(prefixedMessageBytes(message));
+  }
 }
 
 export interface WebCryptoControlKeyOptions {
@@ -47,12 +73,14 @@ interface StoredControlKey {
  * sessions. For Node/test environments without IndexedDB, use `fromCryptoKey`
  * to construct directly from an in-memory CryptoKey.
  */
-export class WebCryptoControlKey implements ControlKey {
+export class WebCryptoControlKey extends LocalControlKey {
   private constructor(
     private readonly privateKey: CryptoKey,
     private readonly publicRaw: Uint8Array,
     readonly keyId: string | undefined,
-  ) {}
+  ) {
+    super();
+  }
 
   /**
    * Construct directly from an already-imported CryptoKey (for tests / Node).
@@ -128,6 +156,13 @@ export class WebCryptoControlKey implements ControlKey {
     const rec = await idbGet(opts.keyId);
     if (!rec) return null;
     return new WebCryptoControlKey(rec.privateKey, rec.publicRaw, opts.keyId);
+  }
+
+  static async remove(keyId: string): Promise<void> {
+    if (!hasIndexedDB()) return;
+    const db = await openDb();
+    await tx(db, "readwrite", (store) => store.delete(keyId));
+    db.close();
   }
 
   publicAddress(): string {
@@ -245,8 +280,10 @@ function toBufferSource(data: Uint8Array): ArrayBuffer {
  * extractable (unlike a proper WebCryptoControlKey), so this should only be
  * used in tests.
  */
-export class KeypairControlKey implements ControlKey {
-  constructor(private readonly keypair: { publicKey(): string; sign(data: Buffer): Buffer }) {}
+export class KeypairControlKey extends LocalControlKey {
+  constructor(private readonly keypair: { publicKey(): string; sign(data: Buffer): Buffer }) {
+    super();
+  }
 
   publicAddress(): string {
     return this.keypair.publicKey();
@@ -262,31 +299,21 @@ export class KeypairControlKey implements ControlKey {
   }
 }
 
-/**
- * Sign a Stellar transaction using a WebCrypto control key.
- * Signs `tx.hash()` and adds the signature to the transaction.
- */
+/** Sign a Stellar transaction with the control key and attach the signature. */
 export async function signTransactionWithControlKey(
-  tx: { hash(): Buffer; addSignature(publicKey: string, signature: string): void },
+  tx: Transaction | FeeBumpTransaction,
   controlKey: ControlKey,
 ): Promise<void> {
-  const hash = tx.hash();
-  const sig = await controlKey.sign(new Uint8Array(hash));
+  const sig = await controlKey.signTransaction(tx.toXDR(), tx.networkPassphrase);
   tx.addSignature(controlKey.publicAddress(), Buffer.from(sig).toString("base64"));
 }
 
-/**
- * Create a signing callback compatible with `authorizeEntry` for Soroban.
- * The callback receives the preimage (xdr.HashIdPreimage) and optionally the
- * payload (32-byte hash). Returns `{ signature, publicKey }` as expected by
- * the stellar-sdk.
- */
+/** A signing callback for `authorizeEntry`. */
 export function createSorobanSigner(
   controlKey: ControlKey,
-): (preimage: { toXDR(): Buffer }, payload?: Uint8Array) => Promise<{ signature: Uint8Array; publicKey: string }> {
-  return async (preimage: { toXDR(): Buffer }, payload?: Uint8Array) => {
-    const data = payload ?? sha256(preimage.toXDR());
-    const signature = await controlKey.sign(data);
+): (preimage: { toXDR(): Buffer }) => Promise<{ signature: Uint8Array; publicKey: string }> {
+  return async (preimage) => {
+    const signature = await controlKey.signAuthEntry(new Uint8Array(preimage.toXDR()));
     return { signature, publicKey: controlKey.publicAddress() };
   };
 }
