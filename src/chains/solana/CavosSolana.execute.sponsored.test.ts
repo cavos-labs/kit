@@ -19,7 +19,8 @@ function makeWallet(opts: { relayer?: SolanaRelayer; connection?: unknown }): Ca
   const spend = {
     address: () => SELF.toBase58(),
     publicKeyRaw: () => SELF.toBytes(),
-    sign: async () => new Uint8Array(64),
+    signTransaction: async () => new Uint8Array(64),
+    signMessage: async () => new Uint8Array(64),
   };
   const connection =
     opts.connection ??

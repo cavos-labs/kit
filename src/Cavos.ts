@@ -1,6 +1,6 @@
-import { Account, RpcProvider, PaymasterRpc, hash, num, ETransactionVersion3, type Call } from "starknet";
+import { Account, RpcProvider, PaymasterRpc, hash, num, ETransactionVersion3, type Call, type SignerInterface } from "starknet";
 import type { AuthProvider, Identity } from "./auth/AuthProvider";
-import type { DeviceSigner, DevicePublicKey } from "./signer/DeviceSigner";
+import type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/DeviceSigner";
 import { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 import { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
 import { CavosSolana } from "./chains/solana/CavosSolana";
@@ -38,6 +38,7 @@ import {
   STARKNET_NETWORKS,
   type StarknetNetwork,
 } from "./chains/starknet/constants";
+import { VaultClient, vaultConnectParams } from "./vault/VaultClient";
 
 /** The chains the unified `Cavos.connect` can target. */
 export type Chain = "starknet" | "solana" | "stellar";
@@ -212,6 +213,12 @@ export interface ConnectOptions {
   stellarDeviceKey?: DeviceUnwrapKey;
   /** Create/load the Stellar ECDH unwrap key (native / tests). */
   createStellarDeviceKey?: (keyId: string) => Promise<DeviceUnwrapKey>;
+
+  /**
+   * Keep the signing keys in the Cavos vault, an iframe on a Cavos origin,
+   * instead of this page's storage. Needs `appId`.
+   */
+  vault?: boolean | { url?: string };
 }
 
 /** The Starknet-specific connect options, resolved from the unified ones. */
@@ -230,6 +237,7 @@ interface StarknetConnectOptions {
   rpcUrl?: string;
   classHash?: string;
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
+  vault?: VaultClient;
 }
 
 /**
@@ -283,6 +291,8 @@ export interface RecoveryOptions {
   auth?: AuthProvider;
   /** Override the new device's signer (native / tests); default WebCrypto. */
   createSigner?: (keyId: string) => Promise<DeviceSigner>;
+  /** Keep the new device's key in the Cavos vault. Needs `appId`. */
+  vault?: boolean | { url?: string };
 }
 
 /**
@@ -464,8 +474,10 @@ export class Cavos {
   ): Promise<CavosWallet> {
     if (chain === "solana") {
       const keyId = `${opts.identity.userId}:${opts.appSalt}`;
-      const unwrapKey = opts.stellarDeviceKey
-        ?? (opts.createStellarDeviceKey ? await opts.createStellarDeviceKey(keyId) : undefined);
+      const vault = vaultFor(opts);
+      const unwrapKey = vault
+        ? undefined
+        : opts.stellarDeviceKey ?? (opts.createStellarDeviceKey ? await opts.createStellarDeviceKey(keyId) : undefined);
       return CavosSolana.connect({
         network: SOLANA_ENV[opts.network],
         identity: opts.identity,
@@ -483,14 +495,18 @@ export class Cavos {
         ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
         ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),
         ...(unwrapKey ? { factor: deviceFactorFromUnwrapKey(unwrapKey) } : {}),
+        ...(vault ? { vault } : {}),
       });
     }
     if (chain === "stellar") {
       const keyId = `${opts.identity.userId}:${opts.appSalt}`;
-      const deviceKey = opts.stellarDeviceKey
-        ?? (opts.createStellarDeviceKey
-          ? await opts.createStellarDeviceKey(keyId)
-          : await loadDefaultWebDeviceKey(keyId));
+      const vault = vaultFor(opts);
+      const deviceKey = vault
+        ? undefined
+        : opts.stellarDeviceKey
+          ?? (opts.createStellarDeviceKey
+            ? await opts.createStellarDeviceKey(keyId)
+            : await loadDefaultWebDeviceKey(keyId));
       return CavosStellar.connect({
         network: STELLAR_ENV[opts.network],
         identity: opts.identity,
@@ -505,6 +521,7 @@ export class Cavos {
         ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
         ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
         ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),
+        ...(vault ? { vault } : {}),
       });
     }
     // Starknet
@@ -526,6 +543,7 @@ export class Cavos {
       rpcUrl: rpcFor('starknet', opts),
       classHash: opts.classHash,
       createSigner: opts.createSigner,
+      vault: vaultFor(opts),
     });
   }
 
@@ -547,17 +565,15 @@ export class Cavos {
     });
 
     // This device's silent signer.
-    const signer = opts.createSigner
-      ? await opts.createSigner(`${identity.userId}:${opts.appSalt}`)
-      : await loadDefaultWebSigner(`${identity.userId}:${opts.appSalt}`);
-    const devicePubkey = await signer.getPublicKey();
+    const device = await starknetDevice(opts, identity);
+    const devicePubkey = device.publicKey;
 
-    const adapter = new StarknetAdapter({ classHash, signer, provider });
+    const adapter = new StarknetAdapter({ classHash, signer: device.raw, messageSigner: device.signMessage, provider });
     const makeAccount = (address: string) =>
       new Account({
         provider,
         address,
-        signer: new StarknetDeviceSigner(signer),
+        signer: device.accountSigner,
         paymaster,
         cairoVersion: "1",
       });
@@ -842,8 +858,7 @@ export class Cavos {
       await this.ensureAuthorized("kit");
     }
     const msgBytes = typeof message === "string" ? utf8ToBytes(message) : message;
-    const prefixed = prefixedMessageBytes(msgBytes);
-    const sig = await this.adapter.signMessageRaw(prefixed);
+    const sig = await this.adapter.signMessage(msgBytes);
     // 64-byte r‖s (Starknet's contract normalizes high-s, so no low-S needed here).
     const signature = new Uint8Array(64);
     signature.set(bigIntTo32Bytes(sig.r), 0);
@@ -1279,10 +1294,11 @@ export class Cavos {
     });
 
     // The new device's signer (created/loaded the same way connect() does).
-    const signer = opts.createSigner
-      ? await opts.createSigner(`${opts.identity.userId}:${opts.appSalt}`)
-      : await loadDefaultWebSigner(`${opts.identity.userId}:${opts.appSalt}`);
-    const devicePubkey = await signer.getPublicKey();
+    const device = await starknetDevice(
+      { ...opts, network, vault: vaultFor({ ...opts, chain: "starknet" }) },
+      opts.identity,
+    );
+    const devicePubkey = device.publicKey;
 
     // The backup key drives THIS transaction: it's the only signer that can
     // authorise adding the new device after all device keys are lost.
@@ -1334,11 +1350,11 @@ export class Cavos {
     }
 
     // Hand control to the new device's signer for all future operations.
-    const adapter = new StarknetAdapter({ classHash, signer, provider });
+    const adapter = new StarknetAdapter({ classHash, signer: device.raw, messageSigner: device.signMessage, provider });
     const account = new Account({
       provider,
       address: existing.address,
-      signer: new StarknetDeviceSigner(signer),
+      signer: device.accountSigner,
       paymaster,
       cairoVersion: "1",
     });
@@ -1486,6 +1502,33 @@ async function paymasterExecuteDirect(
   return { transactionHash: json.result?.transaction_hash ?? json.result?.tracking_id };
 }
 
+interface StarknetDevice {
+  publicKey: DevicePublicKey;
+  accountSigner: SignerInterface;
+  signMessage(message: Uint8Array): Promise<DeviceSignature>;
+  /** Absent when the key lives in the vault, which never signs a bare hash. */
+  raw?: DeviceSigner;
+}
+
+async function starknetDevice(
+  opts: { appSalt: string; network: string; environment?: "development" | "production"; auth?: AuthProvider; vault?: VaultClient; createSigner?: (keyId: string) => Promise<DeviceSigner> },
+  identity: Identity,
+): Promise<StarknetDevice> {
+  if (opts.vault) {
+    return opts.vault.connectStarknet(
+      vaultConnectParams({ identity, appSalt: opts.appSalt, network: opts.network, environment: opts.environment, auth: opts.auth }),
+    );
+  }
+  const keyId = `${identity.userId}:${opts.appSalt}`;
+  const raw = opts.createSigner ? await opts.createSigner(keyId) : await loadDefaultWebSigner(keyId);
+  return {
+    publicKey: await raw.getPublicKey(),
+    accountSigner: new StarknetDeviceSigner(raw),
+    signMessage: (message) => raw.sign(prefixedMessageBytes(message)),
+    raw,
+  };
+}
+
 async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
   if (typeof indexedDB === "undefined" || !globalThis.crypto?.subtle) {
     throw new Error(
@@ -1494,6 +1537,15 @@ async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {
   }
   const { WebCryptoSigner } = await import("./signer/WebCryptoSigner");
   return WebCryptoSigner.loadOrCreate({ keyId });
+}
+
+function vaultFor(opts: ConnectOptions): VaultClient | undefined {
+  if (!opts.vault) return undefined;
+  if (!opts.appId) throw new Error("kit: the vault needs `appId`");
+  return VaultClient.attach({
+    appId: opts.appId,
+    ...(typeof opts.vault === "object" && opts.vault.url ? { url: opts.vault.url } : {}),
+  });
 }
 
 async function loadDefaultWebDeviceKey(keyId: string): Promise<DeviceUnwrapKey> {

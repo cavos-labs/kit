@@ -45,6 +45,11 @@ import {
 } from '../recovery/SocialRecoveryCoordinator';
 import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
+import { VaultClient } from '../vault/VaultClient';
+import { zeroize } from '../secret/dek';
+import { readLocalDek } from '../secret/localDek';
+import { addPasskey } from '../secret/PasskeyDekPort';
+import { HttpPasskeyWrapStore } from '../registry/PasskeyWrapStore';
 import { CavosAuthModal } from './CavosAuthModal';
 import {
   validateCavosConfig,
@@ -128,6 +133,11 @@ export interface CavosConfig {
    * takes precedence, so existing apps keep their explicit pin.
    */
   socialRecoveryAttestation?: AttestationPolicy;
+  /**
+   * Signing keys live in the Cavos vault, not in this page's
+   * storage. On by default when `appId` is set; `false` turns it off.
+   */
+  vault?: boolean | { url?: string };
 }
 
 export interface CavosModalConfig {
@@ -424,6 +434,10 @@ export function resolveSocialRecoveryPolicy(
   return undefined;
 }
 
+function vaultSetting(config: CavosConfig): boolean | { url?: string } {
+  return config.vault ?? Boolean(config.appId);
+}
+
 export function CavosProvider({
   config,
   modal,
@@ -542,6 +556,15 @@ export function CavosProvider({
   useEffect(() => {
     configRef.current = config;
   });
+
+  // Mount the vault iframe now rather than when connect first asks for it.
+  // `attach` is memoized, so connect later reuses this one — already loaded
+  // while the OAuth code exchange ran, instead of loading after it.
+  useEffect(() => {
+    const vault = vaultSetting(config);
+    if (!vault || !config.appId || typeof window === 'undefined') return;
+    VaultClient.attach({ appId: config.appId, ...(typeof vault === 'object' ? vault : {}) });
+  }, [config.appId, config.vault]);
 
   // Fetch app branding (name, logo) from the backend so the modal shows the
   // integrating app's identity without manual props.
@@ -770,8 +793,13 @@ export function CavosProvider({
       const socialCredential = auth.hasSocialRecoveryCredential()
         ? auth.consumeSocialRecoveryCredential()
         : undefined;
+      // In the vault, a passkey app offers the passkey whenever this device
+      // lacks the key of a wallet that exists. The vault only asks then: a new
+      // account is created without one, and a device that has the key never
+      // sees the prompt.
+      const vaultOn = Boolean(vaultSetting(cfg)) && Boolean(cfg.appId);
       const passkeyPrf =
-        opts?.passkey
+        opts?.passkey || (vaultOn && appDeviceApproval === 'passkey')
           ? new PasskeyPrf({
               rpName: branding.appName ?? modal?.appName ?? 'Cavos',
               ...(cfg.rpId ? { rpId: cfg.rpId } : {}),
@@ -795,6 +823,7 @@ export function CavosProvider({
         ...(socialClient ? { socialRecovery: socialClient } : {}),
         ...(socialCredential ? { socialRecoveryCredential: socialCredential } : {}),
         ...(passkeyPrf ? { passkeyPrf } : {}),
+        vault: vaultSetting(cfg),
       }));
       setSession(s);
       setSelectedChain(s.defaultChain);
@@ -1563,12 +1592,43 @@ export function CavosProvider({
     const wallets = session.chains.map((c) => session.wallet(c));
     const nativeOnly = wallets.every((w) => w.chain === 'solana' || w.chain === 'stellar');
     if (nativeOnly) {
-      const prf = new PasskeyPrf({ rpName });
-      await prf.enroll({
-        userId: identity.userId,
-        userName: identity.email ?? identity.userId,
-        ...(identity.email ? { displayName: identity.email } : {}),
-      });
+      // Success means a copy of the DEK is stored under the passkey. A passkey
+      // that merely exists would restore nothing on the next device.
+      const cfg = configRef.current;
+      if (!cfg.appId) throw new Error('kit: adding a passkey requires an appId');
+      const vault = vaultSetting(cfg);
+      const user = { userId: identity.userId, userName: identity.email ?? identity.userId };
+      const authToken = auth.getAuthToken();
+      if (vault) {
+        await VaultClient.attach({ appId: cfg.appId, ...(typeof vault === 'object' ? vault : {}) }).enrollPasskey({
+          ...user,
+          appSalt: cfg.appSalt,
+          ...(cfg.environment ? { environment: cfg.environment } : {}),
+          authToken,
+        });
+      } else {
+        const w = wallets.find((x) => x.status === 'ready');
+        if (!w || (w.chain !== 'solana' && w.chain !== 'stellar')) {
+          throw new Error('kit: this device does not hold the wallet key, so it cannot add a passkey');
+        }
+        const dek = await readLocalDek({ chain: w.chain, userId: identity.userId, appSalt: cfg.appSalt, address: w.address });
+        try {
+          await addPasskey({
+            passkey: new PasskeyPrf({ rpName, ...(cfg.rpId ? { rpId: cfg.rpId } : {}) }),
+            wraps: new HttpPasskeyWrapStore({
+              baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+              appId: cfg.appId,
+              ...(cfg.environment ? { environment: cfg.environment } : {}),
+              authToken: () => auth.getAuthToken(),
+            }),
+            owner: { appId: cfg.appId, userId: identity.userId },
+            dek,
+            user,
+          });
+        } finally {
+          zeroize(dek);
+        }
+      }
       setWalletStatus((status) => ({ ...status, hasPasskey: true }));
       return;
     }
@@ -1596,7 +1656,7 @@ export function CavosProvider({
     const secret =
       enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
     await stellar.enrollPasskey(secret);
-  }, [session, identity, rpName]);
+  }, [session, identity, rpName, auth]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
@@ -1683,10 +1743,14 @@ export function CavosProvider({
       // gesture, and only a missing login proof needs the user at all.
       switch (deviceAuthorization) {
         case 'passkey':
-          // Adding or asserting a passkey is the app's call, not something
-          // login (or the first send) decides for them.
+          // WebAuthn needs a tap the send already spent, so hand the user the
+          // passkey screen and let them send again once it is done.
+          if (walletStatus.hasPasskey) {
+            openModal();
+            throw new Error('Verify it\'s you with your passkey to use this device, then try again.');
+          }
           throw new Error(
-            'kit: call approveDeviceWithPasskey() to restore this device. Login does not ask for a passkey.',
+            'This device is not authorized yet. Add a passkey on a device that is, then sign in here again.',
           );
         case 'enclave': {
           // Waiting is only worth it if there is something to wait for. A
@@ -1719,7 +1783,7 @@ export function CavosProvider({
     } finally {
       setAuthorizingDevice(false);
     }
-  }, [wallet, deviceAuthorization, waitUntilAuthorized]);
+  }, [wallet, deviceAuthorization, waitUntilAuthorized, walletStatus.hasPasskey, openModal]);
 
   authorizeDeviceRef.current = authorizeDevice;
 
@@ -1770,6 +1834,7 @@ export function CavosProvider({
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
           ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
+          vault: vaultSetting(cfg),
         });
       }
       // After recovery, reconnect to get a proper session with all chains
@@ -1823,6 +1888,12 @@ export function CavosProvider({
   }, [auth]);
 
   const logout = useCallback(() => {
+    const vault = vaultSetting(config);
+    if (vault && config.appId && identity) {
+      VaultClient.attach({ appId: config.appId, ...(typeof vault === 'object' ? vault : {}) })
+        .forget(identity.userId, config.appSalt)
+        .catch(() => undefined);
+    }
     auth.clearStoredIdentity();
     setSession(null);
     setIdentity(null);
@@ -1835,7 +1906,7 @@ export function CavosProvider({
         '[CavosProvider] logout() cleared Cavos state only. Sign the user out with your own auth and pass `identity={null}`.',
       );
     }
-  }, [auth, isExternalAuth]);
+  }, [auth, config, identity, isExternalAuth]);
 
   const value: CavosContextValue = {
     openModal,

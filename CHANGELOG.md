@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.2.3
+
+### Email sign-in works with enclave recovery
+
+- **On the enclave, the email provider uses the email link**, even when the
+  app asks for `emailMode: 'otp'`. A Cavos email code carries no token the
+  enclave verifies, so Solana and Stellar wallets could not be created from it.
+  Apps on passkeys keep the mode they chose.
+- **A failed connect shows its error.** The modal used to stay on the
+  connecting spinner ("taking longer than usual") with the error hidden.
+- **The connecting screen names email** when you signed in with email, not the
+  provider you used last time.
+- The error for a missing recovery proof now says how to continue, instead of
+  "sign in again to restore this device" on an account that was new.
+
+## 0.2.2
+
+### Faster sign-in for returning users
+
+Measured on a three-chain app: about 8.7s from the OAuth callback to a ready
+wallet, most of it spent on work the login did not need.
+
+- **A wallet already on this device no longer waits on the enclave.** Each
+  login re-sealed it and re-claimed its registry rows before `connect`
+  returned, about 3.5s. That still happens, in the background.
+- **The vault iframe loads with `CavosProvider`**, during the OAuth code
+  exchange, instead of after it.
+- **A vault that fails to load is not kept**, so the next call mounts a fresh
+  one instead of failing the same way.
+
+## 0.2.1
+
+### Passkeys restore native wallets on a new device
+
+A passkey added after sign-up now carries a Solana or Stellar wallet to another
+device. Before, `enrollPasskeyDefault()` created a passkey that restored
+nothing, and a new device never asked for it.
+
+- **Signing up never asks for a passkey.** The MasterDEK is random, whatever
+  `deviceApproval` says. A passkey only restores an account that exists.
+- **`enrollPasskeyDefault()` stores a copy of the DEK encrypted under the
+  passkey**, created in the vault's origin: `KEK = HKDF(PRF,
+  "cavos-passkey-dek-wrap-v1")`, `AES-256-GCM(KEK, DEK, aad = "appId:userId")`.
+  Cavos keeps the ciphertext at `/api/passkey-wraps` and cannot open it.
+- **A new device asks for the passkey only if one was added**, decrypts in the
+  vault and checks the DEK derives the registered address. Several passkeys per
+  user work; any of them restores. Declining leaves the device signed in
+  without the key.
+- **`hasPasskey`** on Solana and Stellar reports whether a passkey was added,
+  from the backend, on any browser.
+- **Starknet:** on a new device with a passkey approver, the auth modal shows
+  "Verify it's you" instead of finishing silently, and a send from an
+  unauthorized device opens it with a clear message.
+- **The enclave seals wallets created before the app used it.** A device that
+  already holds the key seals the DEK at the next sign-in, so a wallet created
+  on passkeys, or with the enclave off, becomes recoverable.
+
+### Vault
+
+- Approvals happen in the vault's sheet on every browser. Where the browser
+  cannot tell whether the page covers the frame (Safari), Approve arms after a
+  short delay instead of moving to a separate Cavos window.
+- The passkey sheet asks for one thing: "Add a passkey" to create, "Verify it's
+  you" to restore.
+- The sheet header shows the Cavos mark only, and the vault iframe no longer
+  shows a "Cavos" tooltip.
+
+### Breaking
+
+- Accounts whose DEK was derived from the passkey PRF (created with
+  `connect({ passkey: true })` on 0.1.14 to 0.2.0) no longer restore with that
+  passkey.
+- The vault protocol adds `enrollPasskey` and `ConnectResult.passkey`. Deploy
+  the vault host (cavos-web) with this version before apps use it.
+- `@noble/ciphers` is now a direct dependency.
+
+## 0.2.0
+
+### The Cavos vault
+
+Signing keys for Solana, Stellar and Starknet move out of the integrator's page
+and into the vault, an iframe on a Cavos origin (`vault.cavos.xyz`). The page
+asks for signatures; it never holds a key, so a script running on it can no
+longer take one.
+
+- **On by default** in `CavosProvider` when `appId` is set. `vault: false`
+  turns it off; `vault: { url }` points at another deployment. `Cavos.connect`
+  takes the same `vault` option.
+- **Limits and approvals come from the dashboard**, per app (Approvals page),
+  never from the page. Within the limits the vault signs silently. Over them,
+  the app's rule applies: ask the user, block, or sign anyway.
+- **The vault reads what it signs.** Solana messages, Stellar transactions and
+  Soroban auth entries, Starknet outside executions and invokes. Transfers of
+  known assets count against the limits, and so do Solana fees and token
+  account rent. Anything it cannot read as a transfer (signer changes, unknown
+  programs or contracts) is over the limit. The network shown to the user is
+  the one in the payload, not the one the app named.
+- **Keys are filed under the app id**, and an app must register the origins
+  that may embed it. Keys created by an earlier vault build are not reused.
+- **Approvals** happen in the vault's own modal. Where the browser cannot tell
+  whether the page is covering it (no Intersection Observer v2), the decision
+  moves to a top-level Cavos window. Passkeys fall back to that window too.
+- **Legacy copies are retired.** After a vault connect, a Solana or Stellar
+  key, device unwrap key or wrapped DEK left in the page's storage is deleted
+  once it provably opens the same address. Starknet device keys created before
+  the vault stay on-chain and in page storage.
+- `@cavos/kit/vault` exports `startVaultHost` and `startVaultConfirm` for the
+  pages that serve it, and `dist/vault-browser` ships them as standalone scripts.
+
+### Breaking
+
+- `Ed25519SpendSigner.sign` is now `signTransaction(message)` and
+  `signMessage(message)`; `signMessage` applies the Cavos prefix itself.
+- `ControlKey.sign` is now `signTransaction(xdr, networkPassphrase)`,
+  `signAuthEntry(preimageXdr)` and `signMessage(message)`.
+- `StarknetAdapter.signMessageRaw(prefixedBytes)` is now
+  `signMessage(message)`, which prefixes.
+- `ConnectStellarOptions.deviceKey` is optional.
+- `logout()` releases the vault's unlocked keys; it no longer deletes stored ones.
+
 ## 0.1.14
 
 ### Native Ed25519 + enclave MasterDEK

@@ -22,7 +22,8 @@ function makeWallet(opts: { spend?: unknown; connection?: unknown } = {}): Cavos
       : {
           address: () => SELF.toBase58(),
           publicKeyRaw: () => SELF.toBytes(),
-          sign: async () => new Uint8Array(64),
+          signTransaction: async () => new Uint8Array(64),
+    signMessage: async () => new Uint8Array(64),
         };
   const connection =
     opts.connection ??

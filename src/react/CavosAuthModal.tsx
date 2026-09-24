@@ -10,6 +10,8 @@ import React, {
 import { Fingerprint } from '@phosphor-icons/react';
 import { useCavos } from './CavosProvider';
 import { useDismissibleSheet } from './useDismissibleSheet';
+import { emailModeFor } from './deviceAuthorization';
+import { screenForAuthError } from './authErrorScreen';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -487,7 +489,7 @@ export function CavosAuthModal({
   appLogo,
   appLogoSize,
   providers = ['google', 'apple', 'email'],
-  emailMode = 'magic-link',
+  emailMode: requestedEmailMode = 'magic-link',
   primaryColor = '#402AFF',
   theme = 'light',
   backgroundColor: backgroundColorProp,
@@ -516,6 +518,7 @@ export function CavosAuthModal({
     setupRecovery,
   } = useCavos();
   const isMobile = useIsMobile();
+  const emailMode = emailModeFor(deviceAuthorization, requestedEmailMode);
 
   // Theme-derived values
   const isLight = theme !== 'dark';
@@ -707,9 +710,8 @@ export function CavosAuthModal({
     // The error belongs to whichever screen owns that mechanism. Painting it
     // over whatever happens to be up is how an approval spinner ended up
     // carrying a recovery's error and a recovery-phrase link at once.
-    if (walletStatus.needsDeviceApproval && screen !== 'device-approval') {
-      setScreen(false /* email is no longer an automatic route */ ? 'device-approval' : 'select');
-    }
+    const next = screenForAuthError({ screen, needsDeviceApproval: walletStatus.needsDeviceApproval });
+    if (next) setScreen(next);
     setError(authError);
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
     clearAuthError();
@@ -808,10 +810,15 @@ export function CavosAuthModal({
         setScreen('social-recovery');
         doneHandledRef.current = false;
       } else if (deviceAuthorization === 'passkey') {
-        // A passkey is added when the app calls enrollPasskeyDefault /
-        // approveDeviceWithPasskey — not as a login screen. Finish so the
-        // integrator can ask at the moment they chose.
-        if (address) triggerDone(address);
+        // A wallet with a passkey asks for it now, and the tap on the button is
+        // the gesture WebAuthn needs. Without one there is nothing to ask:
+        // finish, and the wallet reads until the user adds a passkey elsewhere.
+        if (walletStatus.hasPasskey && passkeySupported) {
+          setScreen('passkey-approval');
+          doneHandledRef.current = false;
+        } else if (address) {
+          triggerDone(address);
+        }
       } else if (deviceAuthorization === 'enclave-needs-login') {
         // Not an error: the proof the enclave checks is only good for one
         // session, and signing in again mints a new one. That is an action.
@@ -1603,7 +1610,7 @@ export function CavosAuthModal({
             )}
 
             {showEmail && (
-              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => setScreen('magic-link')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => { rememberProvider('email'); setScreen('magic-link'); }} disabled={busy}>
                 {btnIcon(<EmailIcon />, <Spinner size={14} color={primaryColor} />, primaryColor)}
                 <span>Continue with email</span>
               </button>

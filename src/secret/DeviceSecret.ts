@@ -7,6 +7,9 @@ import {
 } from "./derive";
 import { parseWrappedDEK, type WrappedDEK } from "./wrap";
 
+/** New device, no local wrap, and nothing that can restore one. */
+export const NO_WRAP_SOURCE = "kit/secret: this device has no local key and no recovery wrap";
+
 export interface DeviceFactor {
   publicKeySec1(): Uint8Array;
   unwrap(blob: WrappedDEK): Promise<MasterDEK>;
@@ -49,6 +52,13 @@ export interface EnclaveDekPort {
   mintDek?(params: {
     credential: SocialRecoveryCredential;
   }): Promise<MasterDEK | null>;
+  /**
+   * Restore the DEK of an account that already exists, from a factor that
+   * holds a copy (a passkey). Ensure still checks it derives the address.
+   */
+  restoreDek?(params: {
+    credential: SocialRecoveryCredential;
+  }): Promise<MasterDEK>;
 }
 
 export type ReadySecret = {
@@ -124,7 +134,9 @@ async function runEnsure(input: EnclaveEnsureInput): Promise<ReadySecret> {
   }
 
   if (!dek && registered) {
-    const minted = await recovery.mintDek?.({ credential });
+    const minted = recovery.restoreDek
+      ? await recovery.restoreDek({ credential })
+      : await recovery.mintDek?.({ credential });
     if (minted) {
       const derived = nativeAddress(minted, registered.chain, appSalt);
       if (derived === registered.address) {
