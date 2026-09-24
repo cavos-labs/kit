@@ -49,6 +49,10 @@ class MemoryEnclave implements EnclaveDekPort {
   }
 }
 
+async function until(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 describe("resolveNativeSolana", () => {
   const appSalt = "app-salt";
 
@@ -172,6 +176,8 @@ describe("resolveNativeSolana", () => {
       store,
       loadPersisted: async () => created.spend!,
     });
+    // Sealing runs behind the connect; let it finish.
+    await until(() => enclave.address !== null);
     expect(enclave.address).toBe(created.address);
 
     const restored = await resolveNativeSolana({
@@ -185,6 +191,36 @@ describe("resolveNativeSolana", () => {
       importSpend: async (seed) => solanaSpendFromSeed(seed),
     });
     expect(restored.spend!.address()).toBe(created.address);
+  });
+
+  it("returns a device-held wallet without waiting for the enclave", async () => {
+    const registry = new InMemoryWalletRegistry();
+    const factor = deviceFactorFromUnwrapKey(LocalDeviceUnwrapKey.generate());
+    const store = new MemoryStore();
+    const created = await resolveNativeSolana({
+      identity: { userId: "user-fast" },
+      appSalt,
+      registry,
+      factor,
+      store,
+      importSpend: async (seed) => solanaSpendFromSeed(seed),
+    });
+
+    // An enclave that never answers: the login must not hang on it.
+    const stalled = new MemoryEnclave();
+    stalled.enrollDek = () => new Promise(() => undefined);
+    const native = await resolveNativeSolana({
+      identity: { userId: "user-fast" },
+      appSalt,
+      registry,
+      credential,
+      recovery: stalled,
+      factor,
+      store,
+      loadPersisted: async () => created.spend!,
+    });
+    expect(native.address).toBe(created.address);
+    expect(native.spend).toBe(created.spend);
   });
 
   it("first device does not prompt a passkey", async () => {

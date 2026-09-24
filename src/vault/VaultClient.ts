@@ -48,9 +48,10 @@ export class VaultClient {
   private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
 
   private constructor(private readonly port: Promise<MessagePort>) {
-    void port.then((p) => {
+    // A load failure reaches callers through `call`; this listener has none.
+    port.then((p) => {
       p.onmessage = ({ data }: MessageEvent<VaultReply>) => this.settle(data);
-    });
+    }, () => undefined);
   }
 
   /** One iframe per vault URL and app, shared by every wallet on the page. */
@@ -59,8 +60,15 @@ export class VaultClient {
     const key = `${url}|${opts.appId}`;
     let client = VaultClient.attached.get(key);
     if (!client) {
-      client = new VaultClient(mountIframe(url, opts.appId));
-      VaultClient.attached.set(key, client);
+      const port = mountIframe(url, opts.appId);
+      const created = new VaultClient(port);
+      VaultClient.attached.set(key, created);
+      // A vault that failed to load must not be the one every later call
+      // gets: forget it, so the next attach mounts a fresh iframe.
+      port.catch(() => {
+        if (VaultClient.attached.get(key) === created) VaultClient.attached.delete(key);
+      });
+      client = created;
     }
     return client;
   }

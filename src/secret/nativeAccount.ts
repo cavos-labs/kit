@@ -95,8 +95,12 @@ export async function resolveNativeEd25519<S extends { address(): string } = Ed2
     // the host off) was never sealed, so a new device would find nothing to
     // recover. Seal it while this login's proof is fresh. Enroll is idempotent,
     // and hardening must never break a wallet that already signs here.
+    //
+    // Not awaited: on a wallet that is already sealed this is an enclave
+    // session, a job and a registry claim per chain — about 3.5s of a login
+    // that needs none of it to sign.
     if (input.credential && (input.socialRecovery || input.recovery)) {
-      await ensure(await factor()).catch((error: unknown) =>
+      void factor().then(ensure).catch((error: unknown) =>
         console.warn(`[cavos] could not seal this wallet for recovery: ${error instanceof Error ? error.message : error}`),
       );
     }

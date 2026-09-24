@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2
+
+### Faster sign-in for returning users
+
+Measured on a three-chain app: about 8.7s from the OAuth callback to a ready
+wallet, most of it spent on work the login did not need.
+
+- **A wallet already on this device no longer waits on the enclave.** Each
+  login re-sealed it and re-claimed its registry rows before `connect`
+  returned, about 3.5s. That still happens, in the background.
+- **The vault iframe loads with `CavosProvider`**, during the OAuth code
+  exchange, instead of after it.
+- **A vault that fails to load is not kept**, so the next call mounts a fresh
+  one instead of failing the same way.
+
 ## 0.2.1
 
 ### Passkeys restore native wallets on a new device
