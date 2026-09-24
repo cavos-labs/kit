@@ -552,6 +552,15 @@ export function CavosProvider({
     configRef.current = config;
   });
 
+  // Mount the vault iframe now rather than when connect first asks for it.
+  // `attach` is memoized, so connect later reuses this one — already loaded
+  // while the OAuth code exchange ran, instead of loading after it.
+  useEffect(() => {
+    const vault = vaultSetting(config);
+    if (!vault || !config.appId || typeof window === 'undefined') return;
+    VaultClient.attach({ appId: config.appId, ...(typeof vault === 'object' ? vault : {}) });
+  }, [config.appId, config.vault]);
+
   // Fetch app branding (name, logo) from the backend so the modal shows the
   // integrating app's identity without manual props.
   useEffect(() => {
