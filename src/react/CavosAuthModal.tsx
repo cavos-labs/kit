@@ -10,6 +10,8 @@ import React, {
 import { Fingerprint } from '@phosphor-icons/react';
 import { useCavos } from './CavosProvider';
 import { useDismissibleSheet } from './useDismissibleSheet';
+import { emailModeFor } from './deviceAuthorization';
+import { screenForAuthError } from './authErrorScreen';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -487,7 +489,7 @@ export function CavosAuthModal({
   appLogo,
   appLogoSize,
   providers = ['google', 'apple', 'email'],
-  emailMode = 'magic-link',
+  emailMode: requestedEmailMode = 'magic-link',
   primaryColor = '#402AFF',
   theme = 'light',
   backgroundColor: backgroundColorProp,
@@ -516,6 +518,7 @@ export function CavosAuthModal({
     setupRecovery,
   } = useCavos();
   const isMobile = useIsMobile();
+  const emailMode = emailModeFor(deviceAuthorization, requestedEmailMode);
 
   // Theme-derived values
   const isLight = theme !== 'dark';
@@ -707,9 +710,8 @@ export function CavosAuthModal({
     // The error belongs to whichever screen owns that mechanism. Painting it
     // over whatever happens to be up is how an approval spinner ended up
     // carrying a recovery's error and a recovery-phrase link at once.
-    if (walletStatus.needsDeviceApproval && screen !== 'device-approval') {
-      setScreen(false /* email is no longer an automatic route */ ? 'device-approval' : 'select');
-    }
+    const next = screenForAuthError({ screen, needsDeviceApproval: walletStatus.needsDeviceApproval });
+    if (next) setScreen(next);
     setError(authError);
     // The provider owns the error; once surfaced here it's "consumed" by the UI.
     clearAuthError();
@@ -1608,7 +1610,7 @@ export function CavosAuthModal({
             )}
 
             {showEmail && (
-              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => setScreen('magic-link')} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => { rememberProvider('email'); setScreen('magic-link'); }} disabled={busy}>
                 {btnIcon(<EmailIcon />, <Spinner size={14} color={primaryColor} />, primaryColor)}
                 <span>Continue with email</span>
               </button>

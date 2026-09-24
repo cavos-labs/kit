@@ -172,7 +172,11 @@ function recoveryCredential(input: ResolveNativeEd25519Input<{ address(): string
   if (input.credential) return input.credential;
   if (input.passkey && !input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
   if (!input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
-  throw new Error(`kit/${input.chain}: sign in again to restore this device`);
+  // Reached on a new account as much as on a new device, and most often after
+  // an email code, which carries no token the enclave verifies.
+  throw new Error(
+    `kit/${input.chain}: this wallet is protected by recovery. Sign in with Google, Apple or an email link to continue.`,
+  );
 }
 
 function dekPort(input: ResolveNativeEd25519Input<{ address(): string }>): EnclaveDekPort {
