@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.3
+
+### Email sign-in works with enclave recovery
+
+- **On the enclave, the email provider uses the email link**, even when the
+  app asks for `emailMode: 'otp'`. A Cavos email code carries no token the
+  enclave verifies, so Solana and Stellar wallets could not be created from it.
+  Apps on passkeys keep the mode they chose.
+- **A failed connect shows its error.** The modal used to stay on the
+  connecting spinner ("taking longer than usual") with the error hidden.
+- **The connecting screen names email** when you signed in with email, not the
+  provider you used last time.
+- The error for a missing recovery proof now says how to continue, instead of
+  "sign in again to restore this device" on an account that was new.
+
 ## 0.2.2
 
 ### Faster sign-in for returning users

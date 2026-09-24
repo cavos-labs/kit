@@ -47,3 +47,17 @@ export function resolveDeviceAuthorization(
   if (input.approval === "passkey") return "passkey";
   return input.socialCredential ? "enclave" : "enclave-needs-login";
 }
+
+/**
+ * How the built-in email provider signs in, given the app's approval method.
+ *
+ * An enclave-protected wallet is created and restored with a provider token
+ * the enclave verifies. A Cavos email code yields none (Firebase has no native
+ * OTP), so on the enclave the email link is the only email route that works.
+ */
+export function emailModeFor(
+  method: DeviceAuthorizationMethod,
+  requested: "magic-link" | "otp",
+): "magic-link" | "otp" {
+  return method === "passkey" ? requested : "magic-link";
+}
