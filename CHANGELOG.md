@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4
 
 - **`persistSession: false`** in `CavosConfig` (and `CavosAuth`) keeps the
   sign-in in `sessionStorage`, so it ends when the tab closes, and removes any

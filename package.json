@@ -1,6 +1,6 @@
 {
   "name": "@cavos/kit",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Embedded Stellar wallet SDK, embedded Solana wallet, and embedded Starknet wallet. Device-native self-custodial accounts for React Native and web.",
   "repository": {
     "type": "git",
