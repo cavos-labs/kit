@@ -190,6 +190,23 @@ function App() {
 }
 ```
 
+### React: keeping a sign-in to the tab
+
+By default a sign-in with the built-in auth is kept in `localStorage`: the user
+stays signed in across tabs and browser restarts. Set `persistSession: false`
+to keep it in `sessionStorage` instead. It then survives a reload and the OAuth
+redirect, and ends when the tab closes. An identity saved earlier in
+`localStorage` is removed, so switching the option off also signs out users
+who were already signed in.
+
+```tsx
+<CavosProvider config={{ appId, network: "testnet", appSalt: "my-app", persistSession: false }}>
+```
+
+The option is read when the provider mounts. Only the built-in auth uses it:
+with the `identity` prop your own auth decides. Either way the device keys stay
+on the device, so signing in again reconnects the same wallet silently.
+
 ## Lazy deploy
 
 **Connect never deploys.** Deployment happens lazily on the first `execute()`
