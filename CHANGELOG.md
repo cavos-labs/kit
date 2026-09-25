@@ -18,7 +18,12 @@ users, and fails with `insufficient funds for fee` on a 0 SOL account. Pass
   ```
 
   `sponsored: true` / `false` stays as a deprecated alias. `fee` wins if both
-  are passed.
+  are passed. All three chains resolve `fee`; it is not Solana-only.
+
+- **`{ token }` is typed as Solana-only.** `FeeMode` is `'self' | 'sponsored'`
+  everywhere; Solana's options widen it to `SolanaFeeMode`. Writing
+  `{ fee: { token } }` against Stellar or Starknet no longer compiles, rather
+  than compiling and being ignored.
 
 - **Solana's default is now `'self'`.** The account is a native Ed25519 system
   account: it signs as both authority and fee payer, so there was never a

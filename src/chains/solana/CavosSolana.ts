@@ -14,7 +14,7 @@ import { appNamespace } from "../../identity";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
 import type { PasskeyApprover, PasskeyEnrollParams, PasskeyPrfProvider } from "../../signer/PasskeyProvider";
-import { resolveFeeMode, type ExecuteOptions } from "../../chains/ChainAdapter";
+import { resolveFeeMode, type SolanaExecuteOptions } from "../../chains/ChainAdapter";
 import { utf8ToBytes } from "../../crypto/encoding";
 import type { MessageSignature, SolanaSignedTransaction } from "../../signing";
 import type { SocialRecoveryClient } from "../../recovery/SocialRecoveryClient";
@@ -287,7 +287,7 @@ export class CavosSolana {
     throw new Error("kit/solana: restore this device by connecting with your passkey");
   }
 
-  async execute(amount: bigint, destination: string, opts?: ExecuteOptions): Promise<string> {
+  async execute(amount: bigint, destination: string, opts?: SolanaExecuteOptions): Promise<string> {
     const from = new PublicKey(this.address);
     const to = new PublicKey(destination);
     const ix = SystemProgram.transfer({
@@ -298,7 +298,7 @@ export class CavosSolana {
     return this.sendNative([ix], opts);
   }
 
-  async executeInstructions(instructions: InstructionData[], opts?: ExecuteOptions): Promise<string> {
+  async executeInstructions(instructions: InstructionData[], opts?: SolanaExecuteOptions): Promise<string> {
     const ixs = instructions.map(
       (instruction) =>
         new TransactionInstruction({
@@ -362,7 +362,7 @@ export class CavosSolana {
    *   - `{ token }`        → Toll is fee payer and settles in that token, paid
    *     from the account's own token balance in the same transaction.
    */
-  private async sendNative(ixs: TransactionInstruction[], opts?: ExecuteOptions): Promise<string> {
+  private async sendNative(ixs: TransactionInstruction[], opts?: SolanaExecuteOptions): Promise<string> {
     const spend = this.requireSpend();
     const mode = resolveFeeMode(opts, "self");
     const self = new PublicKey(this.address);

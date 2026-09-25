@@ -363,6 +363,10 @@ Omit it and that route is simply unavailable; the other two are unaffected.
 > `sponsored: true` / `false` still works as a deprecated alias for
 > `fee: 'sponsored'` / `'self'`. `fee` wins if both are passed.
 
+`'self'` and `'sponsored'` work on every chain. `{ token }` is Solana only —
+it is typed that way, so writing it against Stellar or Starknet does not
+compile.
+
 `connect` does not create the account on-chain. The address is `ready` on this
 device as soon as the spend key is unwrapped. The account exists on Solana once
 it holds lamports (fund it, then spend). There is no `initialize` instruction

@@ -12,7 +12,7 @@ import type { StellarRelayer } from "./chains/stellar/StellarRelayer";
 import type { DeviceUnwrapKey } from "./chains/stellar/DeviceUnwrapKey";
 import type { StellarNetwork } from "./chains/stellar/constants";
 import type { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
-import type { ChainCall, ExecuteOptions, ComputeAddressParams } from "./chains/ChainAdapter";
+import { resolveFeeMode, type ChainCall, type ExecuteOptions, type ComputeAddressParams } from "./chains/ChainAdapter";
 import type { WalletRegistry } from "./registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 import { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
@@ -751,7 +751,7 @@ export class Cavos {
     // balance (starknet.js' `Account.execute` ignores the paymaster entirely, so
     // the same Account instance works for both paths). Both return
     // { transaction_hash }.
-    if (opts?.sponsored === false) {
+    if (resolveFeeMode(opts, 'sponsored') === 'self') {
       const res = await this.account.execute(calls as Call[]);
       return { transactionHash: res.transaction_hash };
     }
@@ -796,7 +796,7 @@ export class Cavos {
     allCalls.push(...userCalls);
 
     // Self-funded deploy is not supported — deploy always needs paymaster sponsorship
-    if (opts?.sponsored === false) {
+    if (resolveFeeMode(opts, 'sponsored') === 'self') {
       throw new Error(
         "kit: self-funded deploy is not supported. The first execute on an undeployed account requires sponsored mode.",
       );

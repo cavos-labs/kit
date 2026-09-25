@@ -92,7 +92,15 @@ export type {
 export { CAVOS_MESSAGE_PREFIX, prefixedMessageBytes } from "./signing";
 
 // Chain adapters
-export type { ChainAdapter, ChainCall, ComputeAddressParams, ExecuteOptions } from "./chains/ChainAdapter";
+export type {
+  ChainAdapter,
+  ChainCall,
+  ComputeAddressParams,
+  ExecuteOptions,
+  FeeMode,
+  SolanaExecuteOptions,
+  SolanaFeeMode,
+} from "./chains/ChainAdapter";
 export { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
 export type { StarknetAdapterOptions } from "./chains/starknet/StarknetAdapter";
 export { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
