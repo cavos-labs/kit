@@ -262,7 +262,7 @@ if (wallet.status === "undeployed") {
 | `WebCryptoSigner` | Silent device signer: non-extractable P-256 key in IndexedDB (the vault's, on the web), no UI on sign. |
 | `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` / `StellarRelayer` | Cavos gasless sponsor: co-signs as fee payer so the integrator holds no keypair. |
-| `TollClient` | Solana only. Fee payer that settles in a token the user already holds, in the same transaction, so an account with no SOL still transacts. |
+| `fee: { token }` | Solana only. The fee is settled in a token the user already holds, in the same transaction, so an account with no SOL still transacts. |
 | `RecoveryClient` | Email-approval multi-device relay (**Starknet**). Native Solana/Stellar restore the MasterDEK instead. |
 | `SocialRecoveryClient` | Verifies hardware attestation, binds a provider token to one session, encrypts directly to the enclave. |
 
@@ -338,27 +338,21 @@ await wallet.execute(amount, dest, { fee: { token: USDC } });  // the user pays,
 ```
 
 The account signs its own transaction in all three. What changes is who is
-named fee payer, never who authorises the transfer — neither the relayer nor
-Toll can alter the instructions they co-sign.
+named fee payer, never who authorises the transfer — a co-signer cannot alter
+the instructions it signs.
 
 **`'self'` is the default on Solana**, unlike Starknet and Stellar where a
 fresh account cannot deploy itself or meet the base reserve without help. The
 account here is a plain system account: it is signer and fee payer at once, so
 there was never a reason it could not pay its own way.
 
-**`{ token }` routes through [Toll](https://toll.cavos.xyz)**, which is fee
-payer and settles in that token in the same transaction — so an account holding
-no SOL still transacts. It needs `tollUrl`:
+**`{ token }` needs nothing configured.** The fee is settled in that token in
+the same transaction, so an account holding no SOL still transacts. The token
+must be one the service accepts and the account must hold it.
 
-```ts
-const wallet = await Cavos.connect({
-  chain: "solana",
-  // ...
-  tollUrl: "https://toll.cavos.xyz",
-});
-```
-
-Omit it and that route is simply unavailable; the other two are unaffected.
+`'self'` and `'sponsored'` work on every chain. `{ token }` is Solana only —
+it is typed that way, so writing it against Stellar or Starknet does not
+compile.
 
 > `sponsored: true` / `false` still works as a deprecated alias for
 > `fee: 'sponsored'` / `'self'`. `fee` wins if both are passed.
@@ -380,7 +374,7 @@ if (wallet.chain === "solana") {
 > **Note:** `execute(amount, destination)` moves **lamports**. Both take the
 > same `fee` option. On the sponsored route the app's Solana program allowlist
 > applies (dashboard → Solana Programs) on top of System / SPL Token /
-> Token-2022 / ATA; Toll runs its own.
+> Token-2022 / ATA. The token route enforces its own.
 
 ## Quickstart — Stellar
 

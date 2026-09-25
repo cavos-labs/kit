@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.2.5
+
+### Breaking: Solana pays its own fee by default
+
+Despite the patch number. An app relying on the old default now charges its
+users, and fails with `insufficient funds for fee` on a 0 SOL account. Pass
+`{ fee: 'sponsored' }` to keep the previous behaviour.
+
+- **`fee` replaces `sponsored`**, because who pays and in what is one question
+  with three answers, not two flags that look independent and are not:
+
+  ```ts
+  execute(amount, dest)                           // the account pays, in SOL
+  execute(amount, dest, { fee: 'sponsored' })     // the app pays
+  execute(amount, dest, { fee: { token: USDC } }) // the user pays, in USDC
+  ```
+
+  `sponsored: true` / `false` stays as a deprecated alias. `fee` wins if both
+  are passed. All three chains resolve `fee`; it is not Solana-only.
+
+- **`{ token }` is typed as Solana-only.** `FeeMode` is `'self' | 'sponsored'`
+  everywhere; Solana's options widen it to `SolanaFeeMode`. Writing
+  `{ fee: { token } }` against Stellar or Starknet no longer compiles, rather
+  than compiling and being ignored.
+
+- **Solana's default is now `'self'`.** The account is a native Ed25519 system
+  account: it signs as both authority and fee payer, so there was never a
+  reason it could not pay its own way. Starknet and Stellar stay sponsored,
+  where a fresh account cannot deploy itself or meet the base reserve without
+  help.
+
+- **`fee: { token }` settles the fee in that token**, in the same transaction,
+  so an account holding no SOL still transacts. Nothing to configure.
+
+- **`feePayer` is gone.** It took a `Keypair` the integrator supplied, which
+  was never self-funding — it was a third party paying.
+
+### Fixed on Solana
+
+All found while testing the above; each has a regression test that fails
+against the previous code.
+
+- **`signTransaction` threw on every call.** It compiled a message with no fee
+  payer, so web3.js refused it with `Transaction fee payer required`.
+- **`execute` truncated lamports above 2^53**, passing a bigint through
+  `Number()`. `SystemProgram.transfer` takes a bigint.
+- **`isReady()` returned `true` unconditionally**, so the provider's approval
+  poll exited on its first pass no matter the real state.
+- **`publicKey` returned a hardcoded `{ x: 0n, y: 0n }`** — a fake secp256r1
+  point on an Ed25519 chain. `targetsThisDevice` compared against it and so
+  answered no for every device, including a real match.
+- **`TransferChecked` wrote its u64 with `Buffer`'s BigInt methods**, which the
+  global `Buffer` a bundler hands the browser does not carry.
+
 ## 0.2.4
 
 - **`persistSession: false`** in `CavosConfig` (and `CavosAuth`) keeps the

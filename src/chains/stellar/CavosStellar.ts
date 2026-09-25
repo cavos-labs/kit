@@ -16,7 +16,7 @@ import {
 } from "./constants";
 import type { Transaction } from "@stellar/stellar-sdk";
 import { utf8ToBytes } from "../../crypto/encoding";
-import type { ExecuteOptions } from "../../chains/ChainAdapter";
+import { resolveFeeMode, type ExecuteOptions } from "../../chains/ChainAdapter";
 import type { SocialRecoveryClient } from "../../recovery/SocialRecoveryClient";
 import type { SocialRecoveryCredential } from "../../recovery/SocialRecoveryCredential";
 import type { DeviceFactor, EnclaveDekPort, WrapStore } from "../../secret/DeviceSecret";
@@ -589,7 +589,7 @@ export class CavosStellar {
       throw new Error("kit/stellar: addTrustline requires a deployed account. Call execute() first to create the account.");
     }
     const control = this.requireReadyControl();
-    const sponsored = opts?.sponsored !== false;
+    const sponsored = resolveFeeMode(opts, 'sponsored') === 'sponsored';
     if (sponsored && this.relayer) {
       const relayerSource = await this.relayer.getSource();
       const tx = await this.adapter.buildSponsoredChangeTrustTx({
@@ -843,7 +843,7 @@ export class CavosStellar {
     opts?: ExecuteOptions,
   ): Promise<string> {
     await signTransactionWithControlKey(tx, control);
-    const sponsored = opts?.sponsored !== false;
+    const sponsored = resolveFeeMode(opts, 'sponsored') === 'sponsored';
     if (sponsored && this.relayer) {
       const feeSource = await this.relayer.getSource();
       const bump = this.adapter.wrapFeeBump(tx, feeSource);
@@ -858,7 +858,7 @@ export class CavosStellar {
     opts?: ExecuteOptions,
   ): Promise<string> {
     await signTransactionWithControlKey(inner, control);
-    const sponsored = opts?.sponsored !== false;
+    const sponsored = resolveFeeMode(opts, 'sponsored') === 'sponsored';
     if (sponsored && this.relayer) {
       const feeSource = await this.relayer.getSource();
       const bump = this.adapter.wrapFeeBump(inner, feeSource);
@@ -886,7 +886,7 @@ export class CavosStellar {
     opts?: ExecuteOptions,
     rotation?: ControlRotation,
   ): Promise<string> {
-    const sponsored = opts?.sponsored !== false;
+    const sponsored = resolveFeeMode(opts, 'sponsored') === 'sponsored';
     if (sponsored && this.relayer) {
       // The relayer account is the tx source, and EVERY sponsored write from
       // every user of this app consumes one of its sequence numbers. Two writes
