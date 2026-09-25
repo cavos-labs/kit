@@ -2,6 +2,7 @@ import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { CavosSolana } from "./CavosSolana";
 import type { TollClient } from "./TollClient";
 import { associatedTokenAddress, TOKEN_PROGRAM_ID } from "./spl";
+import { TOLL_URL } from "./TollClient";
 
 /**
  * Paying the fee in a token: the payment and the user's own instruction are one
@@ -118,12 +119,29 @@ describe("CavosSolana — fee: { token }", () => {
     expect(relayer.sendSigned).not.toHaveBeenCalled();
   });
 
-  it("throws a clear error when no toll client is configured", async () => {
-    await expect(
-      makeWallet(undefined).execute(1n, Keypair.generate().publicKey.toBase58(), {
-        fee: { token: MINT.toBase58() },
+  it("needs no configuration: it falls back to the hosted service", async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        quote: "sealed",
+        fee_payer: TOLL_PAYER.toBase58(),
+        treasury: TREASURY.toBase58(),
+        mint: MINT.toBase58(),
+        amount: 5_000,
+        decimals: 6,
+        expires_at: 2 ** 31,
       }),
-    ).rejects.toThrow(/no `toll` client configured/);
+    });
+    const original = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      await makeWallet(undefined)
+        .execute(1n, Keypair.generate().publicKey.toBase58(), { fee: { token: MINT.toBase58() } })
+        .catch(() => undefined); // the submit leg is not what this asserts
+      expect(String(fetchMock.mock.calls[0]![0])).toBe(`${TOLL_URL}/v1/quote`);
+    } finally {
+      global.fetch = original;
+    }
   });
 });
 

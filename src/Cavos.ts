@@ -191,6 +191,10 @@ export interface ConnectOptions {
    * Where Toll lives, for `fee: { token }` — the user pays their own fee, in a
    * token they already hold. Omit it and that route is simply unavailable.
    */
+  /**
+   * Overrides where the token fee route settles. Defaults to the hosted
+   * service, so `fee: { token }` needs no configuration.
+   */
   tollUrl?: string;
   socialRecovery?: SocialRecoveryClient;
   socialRecoveryCredential?: SocialRecoveryCredential;
@@ -490,7 +494,7 @@ export class Cavos {
         ...(opts.registry ? { registry: opts.registry } : {}),
         ...(rpcFor('solana', opts) ? { rpcUrl: rpcFor('solana', opts)! } : {}),
         ...(opts.relayer ? { relayer: opts.relayer } : {}),
-        ...(opts.tollUrl ? { toll: new TollClient({ baseUrl: opts.tollUrl }) } : {}),
+        toll: new TollClient(opts.tollUrl ? { baseUrl: opts.tollUrl } : {}),
         ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
         ...(opts.socialRecoveryCredential ? { credential: opts.socialRecoveryCredential } : {}),
         ...(opts.passkeyPrf ? { passkey: opts.passkeyPrf } : {}),

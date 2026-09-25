@@ -407,10 +407,8 @@ export class CavosSolana {
     self: PublicKey,
     spend: Ed25519SpendSigner,
   ): Promise<string> {
-    if (!this.toll) {
-      throw new Error("kit/solana: cannot pay in a token — no `toll` client configured");
-    }
-    const quote = await this.toll.quote({ mint: token, instructions: ixs.length + 1 });
+    const toll = this.toll ?? new TollClient();
+    const quote = await toll.quote({ mint: token, instructions: ixs.length + 1 });
     const payment = transferCheckedInstruction({
       source: associatedTokenAddress(quote.mint, self),
       mint: quote.mint,
@@ -428,7 +426,7 @@ export class CavosSolana {
     const signature = await spend.signTransaction(tx.serializeMessage());
     tx.addSignature(self, Buffer.from(signature));
 
-    return this.toll.submit(
+    return toll.submit(
       quote.quote,
       tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
     );

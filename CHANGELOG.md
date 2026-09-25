@@ -31,9 +31,8 @@ users, and fails with `insufficient funds for fee` on a 0 SOL account. Pass
   where a fresh account cannot deploy itself or meet the base reserve without
   help.
 
-- **`fee: { token }` routes through Toll**, which is fee payer and settles in
-  that token in the same transaction, so an account holding no SOL still
-  transacts. Set `tollUrl` to enable it; omit it and the route is unavailable.
+- **`fee: { token }` settles the fee in that token**, in the same transaction,
+  so an account holding no SOL still transacts. Nothing to configure.
 
 - **`feePayer` is gone.** It took a `Keypair` the integrator supplied, which
   was never self-funding — it was a third party paying.

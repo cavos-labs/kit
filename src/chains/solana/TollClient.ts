@@ -12,9 +12,11 @@ export interface TollQuote {
   expiresAt: number;
 }
 
+/** The hosted service. An integrator running their own points `baseUrl` at it. */
+export const TOLL_URL = "https://toll.cavos.xyz";
+
 export interface TollClientOptions {
-  /** e.g. https://toll.cavos.xyz */
-  baseUrl: string;
+  baseUrl?: string;
 }
 
 export interface QuoteRequest {
@@ -34,10 +36,14 @@ export interface QuoteRequest {
  * signed and cannot alter its instructions.
  */
 export class TollClient {
-  constructor(private readonly opts: TollClientOptions) {}
+  private readonly baseUrl: string;
+
+  constructor(opts: TollClientOptions = {}) {
+    this.baseUrl = opts.baseUrl ?? TOLL_URL;
+  }
 
   async quote(req: QuoteRequest): Promise<TollQuote> {
-    const res = await fetch(`${this.opts.baseUrl}/v1/quote`, {
+    const res = await fetch(`${this.baseUrl}/v1/quote`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -74,7 +80,7 @@ export class TollClient {
   }
 
   async submit(quote: string, serialized: Uint8Array): Promise<string> {
-    const res = await fetch(`${this.opts.baseUrl}/v1/submit`, {
+    const res = await fetch(`${this.baseUrl}/v1/submit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
