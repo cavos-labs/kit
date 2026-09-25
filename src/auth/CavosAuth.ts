@@ -11,6 +11,13 @@ export interface CavosAuthOptions {
   backendUrl?: string;
   /** App identifier registered with Cavos (the `appId` from the dashboard). */
   appId?: string;
+  /**
+   * `false` keeps the signed-in identity in `sessionStorage`: it survives a
+   * reload and the OAuth redirect, and ends when the tab closes. Any identity
+   * already in `localStorage` is removed. Defaults to `true` (`localStorage`,
+   * signed in across tabs and restarts).
+   */
+  persistSession?: boolean;
 }
 
 /**
@@ -67,6 +74,23 @@ export class CavosAuth implements AuthProvider {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
     this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
+    if (opts.persistSession === false && typeof window !== "undefined") {
+      // An identity saved before the app turned persistence off would
+      // otherwise keep this browser signed in for good.
+      try {
+        window.localStorage.removeItem(this.identityStorageKey);
+      } catch {
+        /* nothing was stored if storage is unavailable */
+      }
+    }
+  }
+
+  /**
+   * Where the identity lives. Resolved on use, not in the constructor, because
+   * the provider also builds this during SSR, where there is no `window`.
+   */
+  private identityStorage(): Storage {
+    return this.opts.persistSession === false ? window.sessionStorage : window.localStorage;
   }
 
   /**
@@ -77,7 +101,7 @@ export class CavosAuth implements AuthProvider {
   restoreIdentity(): Identity | null {
     if (typeof window === "undefined") return null;
     try {
-      const value = window.localStorage.getItem(this.identityStorageKey);
+      const value = this.identityStorage().getItem(this.identityStorageKey);
       if (!value) return null;
       const identity = JSON.parse(value) as Identity;
       if (!identity.userId || typeof identity.userId !== "string") return null;
@@ -95,7 +119,7 @@ export class CavosAuth implements AuthProvider {
     this.setAuthToken(null);
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.removeItem(this.identityStorageKey);
+        this.identityStorage().removeItem(this.identityStorageKey);
       } catch {
         /* nothing was stored if storage is unavailable */
       }
@@ -282,7 +306,7 @@ export class CavosAuth implements AuthProvider {
 
   /**
    * The provider id_token from this session's login, for the wallet registry.
-   * Null on a page reload that restored the identity from localStorage but not
+   * Null on a page reload that restored the identity from storage but not
    * the token — the address cache covers that device; a brand-new device has
    * just logged in and therefore has one.
    */
@@ -329,7 +353,7 @@ export class CavosAuth implements AuthProvider {
     this.last = id;
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.setItem(this.identityStorageKey, JSON.stringify(id));
+        this.identityStorage().setItem(this.identityStorageKey, JSON.stringify(id));
       } catch {
         // Private mode and blocked site data throw here. This store only saves
         // a returning user from signing in again; an unwritable one must not

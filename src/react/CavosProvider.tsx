@@ -93,6 +93,19 @@ export interface CavosConfig {
   /** Override the Cavos auth backend (self-hosted / staging). */
   authBackendUrl?: string;
   /**
+   * Whether a sign-in outlives the tab. Defaults to `true`: the identity is
+   * kept in `localStorage` and the user stays signed in across tabs and
+   * restarts. `false` keeps it in `sessionStorage` instead, so it survives a
+   * reload and the OAuth redirect but ends when the tab closes; an identity
+   * saved earlier in `localStorage` is removed.
+   *
+   * Read once, when the provider mounts. Changing it later has no effect until
+   * the provider remounts (e.g. give it a new `key`). Only the built-in auth
+   * uses it: with the `identity` prop your auth decides, and device keys stay
+   * on the device either way.
+   */
+  persistSession?: boolean;
+  /**
    * How a device that is not a signer yet gets authorized: by the attested
    * enclave, or by a passkey on the device. This is the app's choice — an app
    * runs one or the other, and inferring it at runtime gave different users
@@ -470,7 +483,12 @@ export function CavosProvider({
     [config.socialRecovery, config.socialRecoveryAttestation],
   );
   const [auth] = useState(
-    () => new CavosAuth({ appId: config.appId, backendUrl: config.authBackendUrl }),
+    () =>
+      new CavosAuth({
+        appId: config.appId,
+        backendUrl: config.authBackendUrl,
+        persistSession: config.persistSession,
+      }),
   );
   const [session, setSession] = useState<(CavosWallet & CavosSession) | null>(null);
   const [selectedChain, setSelectedChain] = useState<Chain>(
