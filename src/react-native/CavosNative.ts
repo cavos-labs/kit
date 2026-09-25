@@ -44,7 +44,6 @@ export const Cavos = {
       ...(opts.backendUrl ? { backendUrl: opts.backendUrl } : {}),
       ...(opts.rpcUrl ? { rpcUrl: opts.rpcUrl } : {}),
       ...(opts.relayer ? { relayer: opts.relayer } : {}),
-      ...(opts.feePayer ? { feePayer: opts.feePayer } : {}),
       ...(opts.registry ? { registry: opts.registry } : {}),
       ...(opts.socialRecovery ? { socialRecovery: opts.socialRecovery } : {}),
       ...(opts.credential ? { socialRecoveryCredential: opts.credential } : {}),

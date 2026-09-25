@@ -15,15 +15,22 @@ const wallet = (chain: string, x: bigint, y: bigint) =>
   ({ chain, publicKey: { x, y } }) as unknown as CavosWallet;
 
 describe("targetsThisDevice", () => {
-  it("recognises the device in use on the chains that identify one by key", () => {
+  it("recognises the device in use on Starknet, which identifies one by key", () => {
     expect(targetsThisDevice(wallet("starknet", 1n, 2n), { x: 1n, y: 2n })).toBe(true);
-    expect(targetsThisDevice(wallet("solana", 1n, 2n), { x: 1n, y: 2n })).toBe(true);
   });
 
   it("does not confuse a different device for this one", () => {
     expect(targetsThisDevice(wallet("starknet", 1n, 2n), { x: 9n, y: 2n })).toBe(false);
     // Both coordinates matter: matching only x would accept a different key.
     expect(targetsThisDevice(wallet("starknet", 1n, 2n), { x: 1n, y: 9n })).toBe(false);
+  });
+
+  it("answers no for native Solana, which has no P-256 device key", () => {
+    // A native Solana account is a single Ed25519 key derived from the DEK;
+    // there is no per-device P-256 signer to compare. This used to pass a
+    // hardcoded { x: 0n, y: 0n } to the comparison, so it answered no by
+    // accident — for every device, including a real match.
+    expect(targetsThisDevice(wallet("solana", 1n, 2n), { x: 1n, y: 2n })).toBe(false);
   });
 
   it("answers no for Stellar, which has no device key to compare", () => {

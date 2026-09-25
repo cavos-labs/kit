@@ -9,3 +9,6 @@ export { SolanaRelayer } from "./chains/solana/SolanaRelayer";
 export type { SolanaRelayerOptions } from "./chains/solana/SolanaRelayer";
 export { SOLANA_NETWORKS } from "./chains/solana/constants";
 export type { SolanaNetwork } from "./chains/solana/constants";
+export { TollClient } from "./chains/solana/TollClient";
+export type { TollQuote, TollClientOptions, QuoteRequest } from "./chains/solana/TollClient";
+export { associatedTokenAddress, transferCheckedInstruction, TOKEN_PROGRAM_ID } from "./chains/solana/spl";

@@ -120,6 +120,11 @@ export interface CavosConfig {
    * serve them all, and the mismatched one answers "Method not found".
    */
   rpcUrls?: Partial<Record<Chain, string>>;
+  /**
+   * Where Toll lives, for `fee: { token }` — the user pays their own fee in a
+   * token they already hold. Solana only. Omit it and that route is not offered.
+   */
+  tollUrl?: string;
   /** Explicit OAuth callback. Optional on web; required by the native provider. */
   redirectUri?: string;
   /** Passkey relying-party id. Optional on web; required by the native provider. */
@@ -832,6 +837,7 @@ export function CavosProvider({
         ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
         ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
         ...(cfg.rpcUrls ? { rpcUrls: cfg.rpcUrls } : {}),
+        ...(cfg.tollUrl ? { tollUrl: cfg.tollUrl } : {}),
         ...(socialClient ? { socialRecovery: socialClient } : {}),
         ...(socialCredential ? { socialRecoveryCredential: socialCredential } : {}),
         ...(passkeyPrf ? { passkeyPrf } : {}),

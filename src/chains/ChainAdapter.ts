@@ -10,19 +10,37 @@ export interface ChainCall {
 /**
  * Options for state-changing wallet calls (`execute`, `addSigner`, etc.).
  *
- *   await wallet.execute(calls, { sponsored: false }); // self-funded
+ *   await wallet.execute(calls);                          // the account pays
+ *   await wallet.execute(calls, { fee: 'sponsored' });    // the app pays
+ *   await wallet.execute(calls, { fee: { token: USDC } }); // the user pays, in USDC
  *
- * `sponsored` defaults to `true`: the Cavos relayer / paymaster pays gas (and, on
- * Stellar, the reserve) so the user signs but never holds gas tokens. Pass
- * `sponsored: false` to submit directly — the account pays its own fee / reserve
- * from its own balance (ETH on Starknet, SOL on Solana, XLM on Stellar). Useful
- * for testing the device signature, for fee transparency, or as a fallback when
- * the relayer is unreachable. Self-funded mode requires the account to actually
- * hold enough native balance for the fee (and Stellar reserve, if the call adds
- * subentries).
+ * `fee` answers one question — who pays, and in what — so the three answers are
+ * one field rather than several flags that look independent and are not.
+ *
+ *   - `'self'` (the default on Solana): the account pays from its own balance.
+ *   - `'sponsored'`: the Cavos relayer / paymaster pays, so the user signs but
+ *     never holds a gas token. On Starknet and Stellar this is the default,
+ *     because a fresh account there cannot deploy itself or meet the base
+ *     reserve without help.
+ *   - `{ token }`: the user pays, in a token they already hold. Solana only.
+ *     Toll is the fee payer and settles in that token in the same transaction,
+ *     so an account holding no SOL still transacts. Requires a `toll` client.
  */
+export type FeeMode = 'self' | 'sponsored' | { token: string };
+
 export interface ExecuteOptions {
+  fee?: FeeMode;
+  /**
+   * @deprecated Use `fee`. `true` is `'sponsored'`, `false` is `'self'`.
+   */
   sponsored?: boolean;
+}
+
+/** `fee` wins; `sponsored` is honoured while it is still around. */
+export function resolveFeeMode(opts: ExecuteOptions | undefined, fallback: FeeMode): FeeMode {
+  if (opts?.fee !== undefined) return opts.fee;
+  if (opts?.sponsored !== undefined) return opts.sponsored ? 'sponsored' : 'self';
+  return fallback;
 }
 
 export interface ComputeAddressParams {
