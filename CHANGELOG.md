@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.6
+## 0.3.0
 
 ### Breaking: this release needs the current Cavos backend and recovery enclave
 
