@@ -2,6 +2,12 @@ import { hash, num } from "starknet";
 import * as WebBrowser from "expo-web-browser";
 import type { AuthProvider, Identity } from "../auth/AuthProvider";
 import { decodeUtf8, fromBase64 } from "./encoding";
+import {
+  assertLoginBinding,
+  loginNonce,
+  loginSecretFrom,
+  requiresLoginBinding,
+} from "../auth/loginBinding";
 import { nativeModule } from "./NativeModule";
 import {
   createSocialRecoveryCredential,
@@ -35,6 +41,8 @@ export class NativeCavosAuth implements AuthProvider {
   private last: Identity | null = null;
   /** Never persisted; every recovery requires a fresh social login. */
   private recoveryCredential: SocialRecoveryCredential | null = null;
+  /** The secret of the login in flight; see `auth/loginBinding`. */
+  private loginSecret: string | null = null;
 
   constructor(private readonly opts: NativeCavosAuthOptions) {
     if (!opts.appId) throw new NativeCavosAuthError("invalid-config", "kit/native-auth: appId is required");
@@ -63,9 +71,11 @@ export class NativeCavosAuth implements AuthProvider {
   }
 
   async login(provider: "google" | "apple"): Promise<Identity> {
-    const nonce = await this.freshNonce();
+    // Kept in memory: the system browser returns to this same call, and a
+    // callback that arrives in a new process is refused (see `loginBinding`).
+    this.loginSecret = loginSecretFrom(fromBase64(await nativeModule().randomBytes(32)));
     const params = new URLSearchParams({
-      nonce,
+      nonce: loginNonce(this.loginSecret),
       redirect_uri: this.opts.redirectUri,
       app_id: this.opts.appId,
     });
@@ -165,8 +175,19 @@ export class NativeCavosAuth implements AuthProvider {
     const payload = token.split(".")[1];
     if (!payload) throw new NativeCavosAuthError("callback-invalid", "kit/native-auth: malformed JWT");
     const claims = JSON.parse(decodeUtf8(fromBase64(normalizeBase64url(payload))));
+    let loginSecret: string | undefined;
+    if (requiresLoginBinding(claims.iss)) {
+      const kept = this.loginSecret;
+      this.loginSecret = null;
+      try {
+        assertLoginBinding(claims.nonce, kept);
+      } catch (error) {
+        throw new NativeCavosAuthError("callback-invalid", (error as Error).message);
+      }
+      loginSecret = kept;
+    }
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
-      ? createSocialRecoveryCredential(token)
+      ? createSocialRecoveryCredential(token, loginSecret)
       : null;
     const identity: Identity = {
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),

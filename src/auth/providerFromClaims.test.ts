@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@jest/globals";
 import { CavosAuth } from "./CavosAuth";
+import { beginLogin } from "./loginFixture";
+import { requiresLoginBinding } from "./loginBinding";
 
 /**
  * `user.provider` is public API and the UI names it back to the user
@@ -7,12 +9,14 @@ import { CavosAuth } from "./CavosAuth";
  * `provider` nor Firebase's `sign_in_provider`, so this used to resolve to the
  * literal "oauth" — true, and useless to say out loud.
  */
-function identityFrom(claims: Record<string, unknown>): Promise<{ provider?: string }> {
-  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+async function identityFrom(claims: Record<string, unknown>): Promise<{ provider?: string }> {
+  const auth = new CavosAuth();
+  // A Google or Apple token is only accepted as the answer to a login.
+  const nonce = requiresLoginBinding(claims.iss) ? await beginLogin(auth) : undefined;
+  const payload = Buffer.from(JSON.stringify({ ...claims, nonce })).toString("base64url");
   const token = `e30.${payload}.sig`;
   // `identityFromAuthData` is private; the OAuth callback is its only entry
   // point that takes raw auth data, which is exactly the path under test.
-  const auth = new CavosAuth();
   return (auth as unknown as {
     identityFromAuthData: (data: string, provider: string) => Promise<{ provider?: string }>;
   }).identityFromAuthData(JSON.stringify({ jwt: token }), "oauth");

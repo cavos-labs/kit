@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "@jest/globals";
 import { CavosAuth } from "./CavosAuth";
+import { beginLogin } from "./loginFixture";
 
 // The suite runs in Node, where there is no `window`. A map behind the Storage
 // interface is enough: what is under test is that the token is written and read
@@ -23,17 +24,20 @@ function installSessionStorage() {
  * this as 48 unauthenticated `/api/wallets` calls and a login stuck on its
  * spinner.
  */
-function tokenFor(sub: string): string {
+function tokenFor(sub: string, nonce: string): string {
   const payload = Buffer.from(
-    JSON.stringify({ iss: "https://accounts.google.com", sub }),
+    JSON.stringify({ iss: "https://accounts.google.com", sub, nonce }),
   ).toString("base64url");
   return `e30.${payload}.sig`;
 }
 
-function login(auth: CavosAuth, token: string) {
-  return (auth as unknown as {
+/** Sign `sub` in through a login this instance started; returns the token. */
+async function login(auth: CavosAuth, sub: string): Promise<string> {
+  const token = tokenFor(sub, await beginLogin(auth));
+  await (auth as unknown as {
     identityFromAuthData: (data: string, provider: string) => Promise<unknown>;
   }).identityFromAuthData(JSON.stringify({ jwt: token }), "oauth");
+  return token;
 }
 
 describe("the login token survives a reconnect", () => {
@@ -46,21 +50,20 @@ describe("the login token survives a reconnect", () => {
   });
 
   it("is readable by a new instance in the same tab", async () => {
-    const token = tokenFor("u1");
-    await login(new CavosAuth({ appId: "app-1" }), token);
+    const token = await login(new CavosAuth({ appId: "app-1" }), "u1");
 
     // A reload builds a fresh provider; the token has to still be there.
     expect(new CavosAuth({ appId: "app-1" }).getAuthToken()).toBe(token);
   });
 
   it("is scoped to the app", async () => {
-    await login(new CavosAuth({ appId: "app-1" }), tokenFor("u1"));
+    await login(new CavosAuth({ appId: "app-1" }), "u1");
     expect(new CavosAuth({ appId: "app-2" }).getAuthToken()).toBeNull();
   });
 
   it("is dropped on sign-out", async () => {
     const auth = new CavosAuth({ appId: "app-1" });
-    await login(auth, tokenFor("u1"));
+    await login(auth, "u1");
     auth.clearStoredIdentity();
 
     expect(auth.getAuthToken()).toBeNull();
@@ -79,8 +82,7 @@ describe("the login token survives a reconnect", () => {
     };
 
     const auth = new CavosAuth({ appId: "app-1" });
-    const token = tokenFor("u1");
-    await login(auth, token);
+    const token = await login(auth, "u1");
     expect(auth.getAuthToken()).toBe(token);
   });
 });
