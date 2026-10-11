@@ -23,10 +23,18 @@ export interface SocialRecoveryCredential {
    * token cannot verify against rather than one that wrongly accepts it.
    */
   provider: SocialRecoveryProvider;
+  /**
+   * The secret whose hash this login sent as the `nonce` (see
+   * `auth/loginBinding`). The enclave requires it beside a Google or Apple
+   * token; it travels only inside the job encrypted to the enclave. Absent for
+   * email, whose tokens carry no nonce.
+   */
+  noncePreimage?: string;
 }
 
 export function createSocialRecoveryCredential(
   idToken: string,
+  noncePreimage?: string,
 ): SocialRecoveryCredential {
   if (idToken.split(".").length !== 3) {
     throw new Error("kit/auth: malformed social recovery credential");
@@ -35,6 +43,7 @@ export function createSocialRecoveryCredential(
     idToken,
     tokenFingerprint: toBase64Url(sha256(utf8ToBytes(idToken))),
     provider: socialRecoveryProvider(idToken),
+    ...(noncePreimage ? { noncePreimage } : {}),
   };
 }
 

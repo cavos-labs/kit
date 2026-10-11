@@ -617,8 +617,15 @@ export class Cavos {
     let isSigner = false;
 
     if (!alreadyDeployed) {
-      // Account not deployed yet — first execute will deploy + initialize
-      status = "undeployed";
+      // Only the device whose key the address was derived from can deploy it:
+      // the constructor installs that key and no other. A second device that
+      // arrives before the first transaction resolves the same address from the
+      // registry, but its own key derives a different one — so it is not
+      // "undeployed, about to deploy", it is waiting to be authorized. Calling
+      // it undeployed let it send a deployment for an account it does not
+      // derive, signed by a key the real account rejects.
+      const derivesThisAddress = sameAddress(adapter.computeAddress(addressParams), address);
+      status = derivesThisAddress ? "undeployed" : "needs-device-approval";
     } else {
       // Account exists — check if this device is authorized.
       //
@@ -654,6 +661,9 @@ export class Cavos {
     );
     // isNewAccount is set after first deploy in execute(), not here
     cavos.isNewAccount = false;
+    // The status cannot say this on its own: a device waiting to be authorized
+    // may be waiting on an account that does not exist yet.
+    cavos._isDeployed = alreadyDeployed;
 
     // Connect no longer mails an approval on sight. It used to fire here the
     // moment it saw an unauthorized device, before anything had considered
@@ -987,7 +997,6 @@ export class Cavos {
   async enrollSocialRecovery(params: {
     recoveryXHex: string;
     recoveryYHex: string;
-    delaySeconds: number;
     policyHashHex: string;
     opts?: ExecuteOptions;
   }): Promise<{ transactionHash: string }> {
@@ -999,7 +1008,6 @@ export class Cavos {
         this.adapter.buildEnrollSocialRecovery(
           this.address,
           { x: BigInt(params.recoveryXHex), y: BigInt(params.recoveryYHex) },
-          BigInt(params.delaySeconds),
           BigInt(params.policyHashHex),
         ),
       ],
@@ -1048,15 +1056,6 @@ export class Cavos {
     if (submit) return submit(call);
     if (!this.paymaster) throw new Error("kit: no paymaster configured for social recovery");
     return paymasterExecuteDirect(this.paymaster, this.address, call);
-  }
-
-  async cancelSocialRecovery(
-    opts?: ExecuteOptions,
-  ): Promise<{ transactionHash: string }> {
-    return this.execute(
-      [this.adapter.buildCancelSocialRecovery(this.address)],
-      opts,
-    );
   }
 
   /**
@@ -1531,6 +1530,15 @@ async function starknetDevice(
     signMessage: (message) => raw.sign(prefixedMessageBytes(message)),
     raw,
   };
+}
+
+/** Starknet addresses compare as numbers: the same one may be zero-padded or not. */
+function sameAddress(a: string, b: string): boolean {
+  try {
+    return BigInt(a) === BigInt(b);
+  } catch {
+    return a === b;
+  }
 }
 
 async function loadDefaultWebSigner(keyId: string): Promise<DeviceSigner> {

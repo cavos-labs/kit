@@ -1,5 +1,7 @@
 import { CavosAuth } from "./CavosAuth";
 import { createSocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
+import { beginLogin, FIXTURE_APP_ID } from "./loginFixture";
+import { loginNonce } from "./loginBinding";
 
 /**
  * `handleCallback(authData)` is the pure, network-free seam into
@@ -21,12 +23,16 @@ describe("CavosAuth.handleCallback -> Identity", () => {
   afterEach(() => jest.restoreAllMocks());
 
   it("exchanges a one-time callback code without putting the JWT in the URL", async () => {
-    const token = jwt({ iss: "https://accounts.google.com", sub: "code-user" });
+    const auth = new CavosAuth({ backendUrl: "https://cavos.test", appId: "app-id" });
+    const token = jwt({
+      iss: "https://accounts.google.com",
+      sub: "code-user",
+      nonce: await beginLogin(auth),
+    });
     const fetchMock = jest.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
       json: async () => ({ jwt: token }),
     } as Response);
-    const auth = new CavosAuth({ backendUrl: "https://cavos.test", appId: "app-id" });
     const id = await auth.handleCallback(
       `?cavos_auth_code=${"a".repeat(43)}`,
       "https://wallet.test/callback",
@@ -49,6 +55,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     const auth = new CavosAuth();
     const id = await auth.handleCallback(
       jwt({
+        nonce: await beginLogin(auth),
         iss: "https://accounts.google.com",
         sub: "google-user-123",
         email: "ada@example.com",
@@ -85,7 +92,12 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
   it("accepts ?auth_data=<jwt> callback strings", async () => {
     const auth = new CavosAuth();
-    const token = jwt({ iss: "https://accounts.google.com", sub: "u", name: "From URL" });
+    const token = jwt({
+      iss: "https://accounts.google.com",
+      sub: "u",
+      name: "From URL",
+      nonce: await beginLogin(auth),
+    });
     const id = await auth.handleCallback(`?auth_data=${token}`);
     expect(id.userId).toBe("u");
     expect(id.name).toBe("From URL");
@@ -93,18 +105,21 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
   it("keeps only an in-memory token fingerprint for one-session recovery binding", async () => {
     const auth = new CavosAuth();
+    const nonce = await beginLogin(auth);
     const token = jwt({
       iss: "https://accounts.google.com",
       sub: "recent-user",
-      nonce: "fresh-login-nonce-123",
+      nonce,
       iat: 1_700_000_000,
       exp: 1_700_003_600,
     });
     await auth.handleCallback(token);
 
-    expect(auth.consumeSocialRecoveryCredential()).toEqual(
-      createSocialRecoveryCredential(token),
-    );
+    const credential = auth.consumeSocialRecoveryCredential();
+    expect(credential).toMatchObject(createSocialRecoveryCredential(token));
+    // The credential carries the secret the nonce commits to, so the enclave
+    // can tell this login's token from the same token in anyone else's hands.
+    expect(nonce).toBe(`${FIXTURE_APP_ID}.${loginNonce(credential.noncePreimage!)}`);
     // Still available after use, because a session holds a wallet on every
     // configured chain and each needs its own enrolment. Dropping it after the
     // first left the rest unprotected with nothing to try again with.
@@ -113,8 +128,31 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     // allows one session per credential per wallet, so this cannot be reused
     // against a wallet it has already enrolled. A one-shot here only ever
     // constrained a client that was cooperating anyway.
-    expect(auth.consumeSocialRecoveryCredential()).toEqual(
-      createSocialRecoveryCredential(token),
-    );
+    expect(auth.consumeSocialRecoveryCredential()).toEqual(credential);
+  });
+
+  it("refuses a Google or Apple token that does not answer a login it started", async () => {
+    const stranger = jwt({
+      iss: "https://accounts.google.com",
+      sub: "attacker",
+      nonce: `${FIXTURE_APP_ID}.${loginNonce("a-secret-this-client-never-made")}`,
+    });
+
+    // No login in flight: a callback carrying someone else's code.
+    const idle = new CavosAuth();
+    await expect(idle.handleCallback(stranger)).rejects.toThrow("did not start here");
+    expect(idle.getAuthToken()).toBeNull();
+
+    // A login in flight, answered with a token minted for another one.
+    const waiting = new CavosAuth();
+    await beginLogin(waiting);
+    await expect(waiting.handleCallback(stranger)).rejects.toThrow("does not match this sign-in");
+    expect(() => waiting.getSocialRecoveryCredential()).toThrow();
+
+    // The secret is spent either way: the same answer cannot be retried.
+    const nonce = await beginLogin(waiting);
+    const mine = jwt({ iss: "https://appleid.apple.com", sub: "me", nonce });
+    await expect(waiting.handleCallback(mine)).resolves.toMatchObject({ userId: "me" });
+    await expect(waiting.handleCallback(mine)).rejects.toThrow("did not start here");
   });
 });

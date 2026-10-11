@@ -5,6 +5,13 @@ import {
   isSocialRecoveryIssuer,
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
+import { secureRandomBytes } from "../crypto/encoding";
+import {
+  assertLoginBinding,
+  loginNonce,
+  loginSecretFrom,
+  requiresLoginBinding,
+} from "./loginBinding";
 
 export interface CavosAuthOptions {
   /** Cavos backend base URL. Defaults to the hosted service (same as @cavos/react). */
@@ -47,6 +54,9 @@ export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
   private readonly identityStorageKey: string;
   private readonly authTokenKey: string;
+  private readonly loginSecretKey: string;
+  /** The login secret, for a callback this same instance handles. */
+  private loginSecret: string | null = null;
   /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
   private pendingNonce: string | null = null;
   private last: Identity | null = null;
@@ -74,6 +84,7 @@ export class CavosAuth implements AuthProvider {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
     this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
+    this.loginSecretKey = `cavos-kit:login-secret:${opts.appId ?? "default"}`;
     if (opts.persistSession === false && typeof window !== "undefined") {
       // An identity saved before the app turned persistence off would
       // otherwise keep this browser signed in for good.
@@ -139,7 +150,7 @@ export class CavosAuth implements AuthProvider {
   private async oauthUrl(provider: "google" | "apple", redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
     const params = new URLSearchParams({
-      nonce: this.freshNonce(),
+      nonce: this.startLogin(),
       redirect_uri: redirectUri ?? window.location.href,
       ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
     });
@@ -290,9 +301,15 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
+    let loginSecret: string | undefined;
+    if (requiresLoginBinding(claims.iss)) {
+      const kept = this.takeLoginSecret();
+      assertLoginBinding(claims.nonce, kept);
+      loginSecret = kept;
+    }
     this.setAuthToken(token);
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
-      ? createSocialRecoveryCredential(token)
+      ? createSocialRecoveryCredential(token, loginSecret)
       : null;
     return this.remember({
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
@@ -329,6 +346,39 @@ export class CavosAuth implements AuthProvider {
     } catch {
       /* memory-only fallback; a reconnect will 401 as it did before */
     }
+  }
+
+  /**
+   * Begin a Google or Apple login: keep a fresh secret for the trip to the
+   * provider and back, and return the nonce that commits to it.
+   *
+   * `sessionStorage` because the login navigates away and the secret has to be
+   * here when the callback lands; it is removed as soon as it is read. Where
+   * storage is unavailable only this instance remembers it, so a login that
+   * reloads the page is refused at the callback — the safe outcome.
+   */
+  private startLogin(): string {
+    const secret = loginSecretFrom(secureRandomBytes(32));
+    this.loginSecret = secret;
+    try {
+      window.sessionStorage.setItem(this.loginSecretKey, secret);
+    } catch {
+      /* memory only */
+    }
+    return loginNonce(secret);
+  }
+
+  /** The secret of the login in flight, taken exactly once. */
+  private takeLoginSecret(): string | null {
+    let secret = this.loginSecret;
+    this.loginSecret = null;
+    try {
+      secret = window.sessionStorage.getItem(this.loginSecretKey) ?? secret;
+      window.sessionStorage.removeItem(this.loginSecretKey);
+    } catch {
+      /* memory only */
+    }
+    return secret;
   }
 
   /** Generate (and remember) the nonce the Cavos backend expects on requests. */

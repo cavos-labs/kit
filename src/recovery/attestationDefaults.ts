@@ -21,15 +21,11 @@ import type { AttestationPolicy } from "./SocialRecoveryClient";
  */
 export const DEFAULT_SOCIAL_RECOVERY_ATTESTATION: AttestationPolicy = {
   pcr0: [
-    // 2026-08-16 — the enclave that names the check it refused a request on.
-    // Not deployed yet: it is published here first so browsers already accept
-    // it when it is, which is the only order that does not break recovery for
-    // everyone during the rollout.
-    "3a97720a6e8a7a0ce034703be64d12e6ceadabdedf807656df6516770848da70f9f3a69ba355ccd4d1b1fc7ac3116aa4",
-    // 2026-08-13 — first Nitro deployment, and what is running today. Verified
-    // against the live enclave, not just a local build: a document it produced
-    // was checked with this package's own verifier. Drop this once no app on
-    // the previous release is still in use.
-    "f2f81237afb5ecd3287e622c711bef8e5fe382f13c549794e478be3f54877d0c0c80a7bc9f97150fc28150130f373f87",
+    // 2026-10-11 — the enclave that binds a token to the app and the login,
+    // and seals its answers. Deployed, and read back from the running enclave
+    // on the host. It is the only measurement accepted: this release reads the
+    // sealed answer, which no earlier enclave produces, so there is no older
+    // image it could work with.
+    "5ec163560006f105b5448c2db77ecf5ec442e00abd475f65349d6d93e837279652708770c50b3aa2e8676f553f572825",
   ],
 };

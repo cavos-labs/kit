@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "@jest/globals";
 import { CavosAuth } from "./CavosAuth";
+import { beginLogin } from "./loginFixture";
 
 // The suite runs in Node, where there is no `window`. Two separate maps behind
 // the Storage interface, because what is under test is which one is written.
@@ -16,17 +17,18 @@ function memoryStorage() {
 
 const IDENTITY_KEY = "cavos-kit:identity:app-1";
 
-function tokenFor(sub: string): string {
+function tokenFor(sub: string, nonce: string): string {
   const payload = Buffer.from(
-    JSON.stringify({ iss: "https://accounts.google.com", sub }),
+    JSON.stringify({ iss: "https://accounts.google.com", sub, nonce }),
   ).toString("base64url");
   return `e30.${payload}.sig`;
 }
 
-function login(auth: CavosAuth, sub = "u1") {
+async function login(auth: CavosAuth, sub = "u1") {
+  const token = tokenFor(sub, await beginLogin(auth));
   return (auth as unknown as {
     identityFromAuthData: (data: string, provider: string) => Promise<unknown>;
-  }).identityFromAuthData(JSON.stringify({ jwt: tokenFor(sub) }), "oauth");
+  }).identityFromAuthData(JSON.stringify({ jwt: token }), "oauth");
 }
 
 describe("persistSession", () => {

@@ -366,13 +366,6 @@ function useIsMobile() {
   return isMobile;
 }
 
-function formatDelay(seconds: number): string {
-  if (seconds < 60) return `${seconds} seconds`;
-  if (seconds < 3600) return `${Math.ceil(seconds / 60)} minutes`;
-  if (seconds < 86400) return `${Math.ceil(seconds / 3600)} hours`;
-  return `${Math.ceil(seconds / 86400)} days`;
-}
-
 // ─── Style helpers ────────────────────────────────────────────────────────────
 
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
@@ -830,7 +823,7 @@ export function CavosAuthModal({
         doneHandledRef.current = false;
       }
     }
-  }, [authorizingDevice, deviceAuthorization, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, walletStatus.socialRecoveryReadyAt, passkeySupported, screen, triggerDone, secureStep]);
+  }, [authorizingDevice, deviceAuthorization, open, isAuthenticated, address, walletStatus.isReady, walletStatus.isUndeployed, walletStatus.isDeploying, walletStatus.awaitingApproval, walletStatus.needsDeviceApproval, walletStatus.hasPasskey, walletStatus.isNewAccount, walletStatus.isSocialRecovering, passkeySupported, screen, triggerDone, secureStep]);
 
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
@@ -1027,8 +1020,6 @@ export function CavosAuthModal({
   );
 
   if (screen === 'social-recovery') {
-    const readyAt = walletStatus.socialRecoveryReadyAt;
-    const remaining = readyAt ? Math.max(0, readyAt - Math.floor(Date.now() / 1000)) : 0;
     return (
       <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal>
         <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
@@ -1040,14 +1031,12 @@ export function CavosAuthModal({
               Restoring this device
             </h2>
             <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
-              {readyAt && remaining > 0
-                ? `The recovery timelock is active. This device will be added automatically in about ${formatDelay(remaining)}.`
-                : 'Your identity was verified inside a hardware-isolated enclave. Finalizing device access now.'}
+              Your identity was verified inside a hardware-isolated enclave. Finalizing device access now.
             </p>
             <div style={{ background: isLight ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}`, borderRadius: `${btnRadius}px`, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center' }}>
               <Spinner size={14} color={subTextColor} />
               <span style={{ fontSize: '12px', color: subTextColor }}>
-                {readyAt && remaining > 0 ? 'Waiting for the on-chain timelock…' : 'Finalizing recovery…'}
+                Finalizing recovery…
               </span>
             </div>
           </div>

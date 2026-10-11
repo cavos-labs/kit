@@ -5,6 +5,8 @@ import { NativeDeviceUnwrapKey } from "./NativeDeviceUnwrapKey";
 import { NativeCavosAuth } from "./NativeCavosAuth";
 import { eciesWrapDEK } from "../chains/stellar/envelope";
 import { fromBase64, toBase64 } from "./encoding";
+import { loginNonce, loginSecretFrom } from "../auth/loginBinding";
+import * as WebBrowser from "expo-web-browser";
 
 const signingPrivate = new Uint8Array(32).fill(7);
 const unwrapPrivate = new Uint8Array(32).fill(9);
@@ -63,19 +65,37 @@ describe("NativeCavosAuth", () => {
 
   test("persists callback identity, restores it, and logout keeps device keys", async () => {
     const auth = new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" });
+    // The bridge's randomness is fixed above, so the secret this login keeps
+    // is known, and with it the nonce the provider would sign.
+    const secret = loginSecretFrom(new Uint8Array(32).fill(13));
     const payload = toBase64(new TextEncoder().encode(JSON.stringify({
       iss: "https://accounts.google.com",
       sub: "user-1",
       email: "a@b.test",
-      nonce: "fresh-login-nonce-123",
+      nonce: `0f9d5a1c-3b2e-4c5a-8d7f-1a2b3c4d5e6f.${loginNonce(secret)}`,
       iat: 1_700_000_000,
     })))
       .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-    const identity = await auth.handleCallback(`cavos://auth?auth_data=x.${payload}.x`);
+    const callback = `cavos://auth?auth_data=x.${payload}.x`;
+
+    // A callback this app did not ask for is refused before anything is kept.
+    await expect(auth.handleCallback(callback)).rejects.toThrow("did not start here");
+    expect(() => auth.getSocialRecoveryCredential()).toThrow("fresh social login");
+
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ url: "https://provider.test/authorize" }),
+    } as Response);
+    (WebBrowser.openAuthSessionAsync as jest.Mock).mockResolvedValue({ type: "success", url: callback });
+    const identity = await auth.login("google");
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`nonce=${loginNonce(secret)}`);
+    fetchMock.mockRestore();
+
     expect(identity).toMatchObject({ userId: "user-1", email: "a@b.test" });
     expect(auth.getSocialRecoveryCredential()).toMatchObject({
       idToken: `x.${payload}.x`,
       tokenFingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      noncePreimage: secret,
     });
 
     const restored = await new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" }).restoreIdentity();

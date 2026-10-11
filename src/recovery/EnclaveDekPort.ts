@@ -4,21 +4,6 @@ import type { EnclaveDekPort } from "../secret/DeviceSecret";
 import { parseWrappedDEK } from "../secret/wrap";
 import type { SocialRecoveryClient } from "./SocialRecoveryClient";
 
-function parseAlreadyEnrolledAddress(error: unknown, fallback: string): string | null {
-  if (!(error instanceof Error)) return null;
-  if (!error.message.includes("already_enrolled")) return null;
-  const json = error.message.match(/\{[\s\S]*\}$/);
-  if (!json) return fallback;
-  try {
-    const body = JSON.parse(json[0]) as { wallet_address?: unknown };
-    return typeof body.wallet_address === "string" && body.wallet_address
-      ? body.wallet_address
-      : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 export function toEnclaveDekPort(
   client: Pick<SocialRecoveryClient, "enroll" | "recover" | "lookupDekEnrollment">,
 ): EnclaveDekPort {
@@ -29,6 +14,7 @@ export function toEnclaveDekPort(
         const row = await client.lookupDekEnrollment({
           provider: params.credential.provider,
           subject,
+          idToken: params.credential.idToken,
         });
         return row ? { address: row.wallet_address } : null;
       } catch {
@@ -38,25 +24,22 @@ export function toEnclaveDekPort(
       }
     },
     async enrollDek(params) {
-      try {
-        const { result } = await client.enroll({
-          walletAddress: params.address,
-          credential: params.credential,
-          dek: params.dek,
-        });
-        if (result.already_enrolled) {
-          const address =
-            typeof result.wallet_address === "string" && result.wallet_address
-              ? result.wallet_address
-              : params.address;
-          return { kind: "already-enrolled", address };
-        }
-        return { kind: "enrolled" };
-      } catch (error) {
-        const address = parseAlreadyEnrolledAddress(error, params.address);
-        if (address) return { kind: "already-enrolled", address };
-        throw error;
+      const { result } = await client.enroll({
+        walletAddress: params.address,
+        credential: params.credential,
+        dek: params.dek,
+      });
+      if (result.result !== "confirmed") return { kind: "enrolled" };
+      // The wallet already had a record, and the enclave has now said whether
+      // it seals this DEK. A mismatch must not lock the user out of a wallet
+      // this device can still spend from, but it must not pass silently either:
+      // it means a lost device would not be recoverable.
+      if (result.dek_matches !== true) {
+        console.error(
+          "[cavos] the recovery record for this wallet does not hold its key; recovery is not protecting it.",
+        );
       }
+      return { kind: "already-enrolled", address: params.address };
     },
     async wrapDekToFactor(params) {
       const { result } = await client.recover({

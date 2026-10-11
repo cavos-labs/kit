@@ -109,6 +109,8 @@ describe("Cavos Starknet deterministic address resolution", () => {
     });
     expect(second.address).toBe("0xwinner");
     expect(second.address).not.toBe(computed);
+    // It lost the race, so its key is not the one that address deploys with.
+    expect(second.status).toBe("needs-device-approval");
   });
 
   it("waits for the recovery schedule receipt before allowing finalize", async () => {
@@ -156,5 +158,46 @@ describe("Cavos Starknet deterministic address resolution", () => {
 
     expect(result.transactionHash).toBe("0xabc");
     expect(waitForTransaction).toHaveBeenCalledWith("0xabc");
+  });
+
+  it("does not let a second device deploy an account its key does not derive", async () => {
+    // Nothing is on-chain yet: the first device signed in but has not transacted.
+    jest.spyOn(RpcProvider.prototype, "getClassHashAt").mockRejectedValue(new Error("not deployed"));
+
+    const adapter = new StarknetAdapter({ classHash });
+    const namespace = appNamespace({ appId: "app-1" });
+    const firstDeviceAddress = adapter.computeAddress({ namespace, initialSigner: { x: 1n, y: 2n } });
+    const registry: WalletRegistry = {
+      lookup: jest.fn(async () => ({ address: firstDeviceAddress })),
+      register: jest.fn(async () => ({ address: firstDeviceAddress, conflict: false })),
+    };
+    const connect = (publicKey: { x: bigint; y: bigint }) =>
+      Cavos.connect({
+        chain: "starknet",
+        network: "testnet",
+        identity: { userId: "google:two-devices" },
+        appSalt: "unused",
+        paymasterApiKey: "test-key",
+        classHash,
+        rpcUrl: "http://127.0.0.1:5050",
+        paymasterUrl: "http://127.0.0.1:5051",
+        appId: "app-1",
+        registry,
+        createSigner: async () => ({ ...signer, getPublicKey: async () => publicKey }),
+      });
+
+    // The device the address was derived from can deploy it on first use.
+    const first = await connect({ x: 1n, y: 2n });
+    expect(first.address).toBe(firstDeviceAddress);
+    expect(first.status).toBe("undeployed");
+
+    // Another device gets the same address from the registry, and must be
+    // authorized rather than told it can deploy.
+    const second = await connect({ x: 3n, y: 4n });
+    expect(second.address).toBe(firstDeviceAddress);
+    expect(second.status).toBe("needs-device-approval");
+    // Unauthorized, and on an account that does not exist yet: recovery has
+    // nothing on-chain to work with, and says so instead of failing on a read.
+    expect(second.isDeployed).toBe(false);
   });
 });
