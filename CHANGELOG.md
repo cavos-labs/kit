@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.2.6
+
+### Breaking: this release needs the current Cavos backend and recovery enclave
+
+Despite the patch number. Google and Apple logins, and everything that goes
+through the recovery enclave, speak a new protocol on both sides. This version
+does not work against an older backend, and older versions no longer sign in
+with Google or Apple against the current one. Upgrade; there is nothing to
+configure.
+
+- **A login is bound to the browser that started it.** The login `nonce` is now
+  the hash of a secret the kit keeps (OpenID Connect Core §15.5.2, with PKCE's
+  S256 transform); the backend prefixes the app. A Google or Apple callback
+  whose token does not answer a login this client started is refused with
+  `the sign-in response does not match this sign-in`, as the OpenID Connect
+  specification requires of clients. The secret rides to the enclave inside the
+  encrypted job, and the enclave requires it beside the token.
+
+  The secret is kept in `sessionStorage` for the trip to the provider and back.
+  A browser that blocks it cannot complete a Google or Apple login.
+
+- **The enclave's answer is authenticated.** The kit acts only on a copy of the
+  result sealed to a key it shares with the attested enclave (RFC 9180 §9.8),
+  not on the JSON relayed beside it.
+
+- **An existing recovery record is confirmed with the enclave.** When a wallet
+  already has one, the kit asks the enclave what it holds — the recovery public
+  key for a Starknet enrolment being resumed, and whether it seals this device's
+  DEK on Solana and Stellar — instead of taking the backend's word. A record
+  that does not hold the device's DEK is logged as an error; the wallet keeps
+  working.
+
+- **One enclave measurement is accepted**, `5ec16356…572825`. Earlier images do
+  not produce a sealed answer, so there is none this release could work with.
+
+- **`submitSocialRecoveryToken` / `useExternalSocialRecoveryToken` do not work
+  for Google and Apple tokens for now.** A token obtained by the host's own
+  login carries neither the app nor a login secret in its nonce. Email is
+  unaffected.
+
+### Removed: the Starknet recovery delay
+
+It was zero by default, and a delay only protects an owner who is told a
+recovery is pending and can cancel it; neither existed. Recovery on Starknet
+now always schedules and finalizes in one step.
+
+- `walletStatus.socialRecoveryReadyAt` is gone, with the countdown in
+  `CavosAuthModal`.
+- `Cavos.cancelSocialRecovery()` is gone.
+- `delaySeconds` is gone from `enrollSocialRecovery`,
+  `writeRecoveryAuthority`, `enrollHardwareIsolatedRecovery` and
+  `recoverHardwareIsolatedDevice`. `CoordinatedRecoveryResult` no longer has
+  `finalized` or `readyAt`.
+
+### Fixed on Starknet
+
+- **A second device no longer tries to deploy an account it cannot sign for.**
+  Under lazy deploy, a device that signed in before the first device's first
+  transaction was told the account was `undeployed` and sent a deployment built
+  from its own key, which the real account rejected with `SRC9: invalid
+  signature`. It is now `needs-device-approval`, and `isDeployed` is `false`.
+
+  That device still cannot be authorized through the enclave until the account
+  exists: the recovery authority is written on-chain by the first transaction
+  of the device that created the wallet. Recovery says so, instead of failing
+  on a contract read.
+
+- **Enclave enrolment and recovery ran only when the environment had a single
+  recovery provider configured.** With several offered, that setting is empty,
+  and both were skipped without an error. The provider is the credential's own.
+
+- **`walletStatus.isSocialRecovering` stayed `true` after a recovery.** The run
+  marked the wallet ready, which cancelled the run before it could reconnect.
+
+- **The owner was never told a device had been added by the enclave.** The
+  notice was sent without the user's token and refused.
+
 ## 0.2.5
 
 ### Breaking: Solana pays its own fee by default
