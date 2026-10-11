@@ -51,22 +51,8 @@ describe("adding a device on native Solana", () => {
       wallet,
       credential,
       network: "testnet",
-      delaySeconds: 0,
     });
     expect(calls).toEqual([]);
-    expect(outcome.finalized).toBe(true);
-  });
-
-  it("still does not schedule when a leftover timelock is configured", async () => {
-    const { wallet, calls } = walletDouble();
-    const outcome = await recoverHardwareIsolatedDevice({
-      client: clientDouble(),
-      wallet,
-      credential,
-      network: "testnet",
-      delaySeconds: 3600,
-    });
-    expect(calls).toEqual([]);
-    expect(outcome.finalized).toBe(true);
+    expect(outcome).toEqual({});
   });
 });

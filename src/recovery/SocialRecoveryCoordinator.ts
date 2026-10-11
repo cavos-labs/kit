@@ -30,9 +30,6 @@ interface RecoveryResult extends SocialRecoveryResult {
 }
 
 export interface CoordinatedRecoveryResult {
-  /** False means the exact signer is scheduled and must be finalized after readyAt. */
-  finalized: boolean;
-  readyAt: number;
   scheduleTransaction?: string;
   finalizeTransaction?: string;
 }
@@ -98,15 +95,13 @@ export async function writeRecoveryAuthority(params: {
   client: SocialRecoveryClient;
   wallet: CavosWallet;
   authority: AgreedRecoveryAuthority;
-  delaySeconds: number;
 }): Promise<{ sessionId: string; transactionHash?: string }> {
-  const { client, wallet, delaySeconds } = params;
+  const { client, wallet } = params;
   refuseOnChainSocial(wallet);
   const { sessionId, result } = params.authority;
   const { transactionHash } = await wallet.enrollSocialRecovery({
     recoveryXHex: result.recovery_x_hex,
     recoveryYHex: result.recovery_y_hex,
-    delaySeconds,
     policyHashHex: result.policy_hash_hex,
   });
   await client.confirmEnrollment(sessionId, transactionHash);
@@ -118,29 +113,29 @@ export async function enrollHardwareIsolatedRecovery(params: {
   client: SocialRecoveryClient;
   wallet: CavosWallet;
   credential: SocialRecoveryCredential;
-  delaySeconds: number;
 }): Promise<{ sessionId: string; transactionHash?: string }> {
   const authority = await agreeRecoveryAuthority(params);
   return writeRecoveryAuthority({ ...params, authority });
 }
 
-/**
- * Recover this exact new device. A non-zero timelock returns a scheduled result;
- * callers can invoke the wallet's finalize method at `readyAt`.
- */
+/** Recover this exact new device: schedule it on-chain, then finalize. */
 export async function recoverHardwareIsolatedDevice(params: {
   client: SocialRecoveryClient;
   wallet: CavosWallet;
   credential: SocialRecoveryCredential;
   network: NetworkEnv;
-  delaySeconds: number;
 }): Promise<CoordinatedRecoveryResult> {
-  const { client, wallet, credential, network, delaySeconds } = params;
-  if (wallet.chain === "stellar" || wallet.chain === "solana") {
-    return { finalized: true, readyAt: Math.floor(Date.now() / 1000) };
+  const { client, wallet, credential, network } = params;
+  if (wallet.chain === "stellar" || wallet.chain === "solana") return {};
+  // The recovery authority lives in the account, and the account is created by
+  // the first transaction from the device that owns its address. Until then
+  // there is nothing on-chain to authorize this device against.
+  if (!wallet.isDeployed) {
+    throw new Error(
+      "This wallet has not been used on the device that created it yet. Make a first transaction there, then sign in here again.",
+    );
   }
-  const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + Math.max(delaySeconds + 3600, 3600);
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
   const nonce = await wallet.socialRecoveryNonce();
   const recovered = await client.recover({
     walletAddress: wallet.address,
@@ -173,25 +168,18 @@ export async function recoverHardwareIsolatedDevice(params: {
     sHex: signed.s_hex,
     yParity: signed.y_parity,
   });
-  if (delaySeconds > 0) {
-    return {
-      finalized: false,
-      readyAt: now + delaySeconds,
-      scheduleTransaction: scheduled.transactionHash,
-    };
-  }
   const finalized = await wallet.finalizeSocialRecovery();
   return {
-    finalized: true,
-    readyAt: now,
     scheduleTransaction: scheduled.transactionHash,
     finalizeTransaction: finalized.transactionHash,
   };
 }
 
 function assertEnrollmentResult(result: EnrollmentResult): void {
+  // "confirmed" is an enrolment the enclave agreed earlier and has now
+  // described again; it carries the same authority.
   if (
-    result.result !== "enrolled" ||
+    (result.result !== "enrolled" && result.result !== "confirmed") ||
     !result.policy_hash_hex ||
     !result.recovery_pubkey_compressed_b64 ||
     !result.recovery_x_hex ||

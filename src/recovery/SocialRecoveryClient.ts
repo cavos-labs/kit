@@ -1,4 +1,4 @@
-import { utf8ToBytes } from "../crypto/encoding";
+import { bytesToUtf8, utf8ToBytes } from "../crypto/encoding";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
 import {
   verifyNitroAttestation,
@@ -53,7 +53,7 @@ export type ChainAuthorization =
     };
 
 export interface SocialRecoveryResult {
-  result: "enrolled" | "recovered";
+  result: "enrolled" | "recovered" | "confirmed";
   [key: string]: unknown;
 }
 
@@ -65,11 +65,13 @@ interface StartedSession {
   session_id: string;
   provider: SocialRecoveryProvider;
   policy: ProviderPolicy;
-  delay_seconds: number;
   ephemeral_public_key_b64?: string;
   attestation_document_b64?: string;
+  /**
+   * The wallet's existing record: always present for a recovery, and present
+   * for an enrolment when the wallet already has one.
+   */
   sealed_record_b64?: string;
-  resume_result?: SocialRecoveryResult;
 }
 
 /**
@@ -89,6 +91,8 @@ export class SocialRecoveryClient {
   async lookupDekEnrollment(params: {
     provider: SocialRecoveryCredential["provider"];
     subject: string;
+    /** Proves the caller is `subject`; the answer names that person's wallet. */
+    idToken: string;
   }): Promise<{ wallet_address: string } | null> {
     const query = new URLSearchParams({
       app_id: this.opts.appId,
@@ -100,7 +104,9 @@ export class SocialRecoveryClient {
     const url = new URL("/api/recovery/social/enrollment", this.opts.baseUrl);
     url.search = query.toString();
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(url, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${params.idToken}` },
+      });
       if (!response.ok) return null;
       row = await response.json();
     } catch {
@@ -123,33 +129,23 @@ export class SocialRecoveryClient {
       params.credential,
       Boolean(params.dek),
     );
-    if (session.resume_result?.result === "enrolled") {
-      if (params.dek) {
-        return {
-          sessionId: session.session_id,
-          result: {
-            result: "enrolled",
-            already_enrolled: true,
-            wallet_address: params.walletAddress,
-          },
-        };
-      }
-      return { sessionId: session.session_id, result: session.resume_result };
-    }
-
     const channelKey = await this.verifiedChannelKey(session);
+    if (session.sealed_record_b64) {
+      // The wallet already has a record. What it holds is the enclave's to say,
+      // not the control plane's: a resumed Starknet enrolment installs this
+      // public key on-chain for good, and "already protected" is only true if
+      // the record really is this identity's and seals this device's DEK.
+      const result = await this.runJob(session.session_id, channelKey, {
+        action: "confirm",
+        credential: jobCredential(params.credential),
+        sealed_record_b64: session.sealed_record_b64,
+        ...(params.dek ? { stellar_dek_b64: toB64(params.dek) } : {}),
+      });
+      return { sessionId: session.session_id, result };
+    }
     const result = await this.runJob(session.session_id, channelKey, {
       action: "enroll",
-      credential: {
-        // The credential's own provider, read from the token's `iss`, not the
-        // one the server echoed back. The enclave refuses a job whose credential
-        // provider differs from its policy, before it checks anything else, so
-        // echoing a stale field turned a correct token into an opaque
-        // `request_failed`. The token is the authority on who issued it.
-        provider: params.credential.provider,
-        id_token: params.credential.idToken,
-        token_fingerprint: params.credential.tokenFingerprint,
-      },
+      credential: jobCredential(params.credential),
       policy: session.policy,
       ...(params.dek ? { stellar_dek_b64: toB64(params.dek) } : {}),
     });
@@ -174,16 +170,7 @@ export class SocialRecoveryClient {
     const channelKey = await this.verifiedChannelKey(session);
     const result = await this.runJob(session.session_id, channelKey, {
       action: "recover",
-      credential: {
-        // The credential's own provider, read from the token's `iss`, not the
-        // one the server echoed back. The enclave refuses a job whose credential
-        // provider differs from its policy, before it checks anything else, so
-        // echoing a stale field turned a correct token into an opaque
-        // `request_failed`. The token is the authority on who issued it.
-        provider: params.credential.provider,
-        id_token: params.credential.idToken,
-        token_fingerprint: params.credential.tokenFingerprint,
-      },
+      credential: jobCredential(params.credential),
       sealed_record_b64: session.sealed_record_b64,
       authorizations: params.authorizations ?? [],
       ...(params.recipientPublicSec1
@@ -261,7 +248,7 @@ export class SocialRecoveryClient {
     channelKey: Uint8Array,
     job: unknown,
   ): Promise<SocialRecoveryResult> {
-    const encrypted = await encryptForEnclave(
+    const { encrypted, openResult } = await encryptForEnclave(
       sessionId,
       channelKey,
       utf8ToBytes(JSON.stringify(job)),
@@ -270,10 +257,15 @@ export class SocialRecoveryClient {
       `/api/recovery/social/sessions/${sessionId}/job`,
       { method: "POST", body: JSON.stringify(encrypted) },
     );
-    if (!response?.result) {
-      throw new Error("kit/social-recovery: the enclave returned no result");
+    // Only the sealed copy is used. The plain `result` beside it is for the
+    // control plane to persist; everything on the way back here could rewrite
+    // it, and the sealed copy opens only under a key this client shares with
+    // the attested enclave.
+    const sealed = response?.sealed_result;
+    if (typeof sealed?.nonce_b64 !== "string" || typeof sealed?.ciphertext_b64 !== "string") {
+      throw new Error("kit/social-recovery: the enclave's answer was not authenticated");
     }
-    return response.result as SocialRecoveryResult;
+    return openResult(sealed);
   }
 
   private async fetchJson(path: string, init?: RequestInit): Promise<any> {
@@ -289,14 +281,15 @@ export class SocialRecoveryClient {
   }
 }
 
-async function encryptForEnclave(
+/** Exported for its test; the client is the only caller. */
+export async function encryptForEnclave(
   sessionId: string,
   enclavePublicRaw: Uint8Array,
   plaintext: Uint8Array,
 ): Promise<{
-  client_public_key_b64: string;
-  nonce_b64: string;
-  ciphertext_b64: string;
+  encrypted: { client_public_key_b64: string; nonce_b64: string; ciphertext_b64: string };
+  /** Open the enclave's sealed answer to this job. */
+  openResult(sealed: { nonce_b64: string; ciphertext_b64: string }): Promise<SocialRecoveryResult>;
 }> {
   const enclavePublic = await crypto.subtle.importKey(
     "raw",
@@ -316,18 +309,24 @@ async function encryptForEnclave(
     256,
   );
   const hkdfKey = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  const aes = await crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: utf8ToBytes(sessionId) as unknown as BufferSource,
-      info: utf8ToBytes("cavos-confidential-channel-v1") as unknown as BufferSource,
-    },
-    hkdfKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt"],
-  );
+  // One exchange, two keys: the request and the answer are sealed under
+  // different `info` so neither direction can be replayed as the other
+  // (RFC 9180 §9.8).
+  const channelKey = (info: string, usage: KeyUsage) =>
+    crypto.subtle.deriveKey(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: utf8ToBytes(sessionId) as unknown as BufferSource,
+        info: utf8ToBytes(info) as unknown as BufferSource,
+      },
+      hkdfKey,
+      { name: "AES-GCM", length: 256 },
+      false,
+      [usage],
+    );
+  const aes = await channelKey("cavos-confidential-channel-v1", "encrypt");
+  const responseKey = await channelKey("cavos-confidential-channel-v1/response", "decrypt");
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
     {
@@ -342,9 +341,44 @@ async function encryptForEnclave(
     await crypto.subtle.exportKey("raw", client.publicKey),
   );
   return {
-    client_public_key_b64: toB64(clientPublic),
-    nonce_b64: toB64(nonce),
-    ciphertext_b64: toB64(new Uint8Array(ciphertext)),
+    encrypted: {
+      client_public_key_b64: toB64(clientPublic),
+      nonce_b64: toB64(nonce),
+      ciphertext_b64: toB64(new Uint8Array(ciphertext)),
+    },
+    async openResult(sealed) {
+      let plaintext: ArrayBuffer;
+      try {
+        plaintext = await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: fromB64(sealed.nonce_b64) as unknown as BufferSource,
+            additionalData: utf8ToBytes(sessionId) as unknown as BufferSource,
+          },
+          responseKey,
+          fromB64(sealed.ciphertext_b64) as unknown as BufferSource,
+        );
+      } catch {
+        throw new Error("kit/social-recovery: the enclave's answer failed authentication");
+      }
+      return JSON.parse(bytesToUtf8(new Uint8Array(plaintext))) as SocialRecoveryResult;
+    },
+  };
+}
+
+/**
+ * The credential as the enclave reads it.
+ *
+ * `provider` is the credential's own, read from the token's `iss`, not one the
+ * server echoed back: the enclave refuses a job whose credential provider
+ * differs from its policy before it checks anything else.
+ */
+function jobCredential(credential: SocialRecoveryCredential) {
+  return {
+    provider: credential.provider,
+    id_token: credential.idToken,
+    token_fingerprint: credential.tokenFingerprint,
+    ...(credential.noncePreimage ? { nonce_preimage: credential.noncePreimage } : {}),
   };
 }
 

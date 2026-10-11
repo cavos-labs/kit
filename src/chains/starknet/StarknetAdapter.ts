@@ -92,7 +92,6 @@ export class StarknetAdapter implements ChainAdapter {
   buildEnrollSocialRecovery(
     accountAddress: string,
     recoveryPubkey: DevicePublicKey,
-    delaySeconds: bigint,
     policyHash: bigint,
   ): ChainCall {
     const [policyLow, policyHigh] = u256ToFelts(policyHash);
@@ -101,7 +100,10 @@ export class StarknetAdapter implements ChainAdapter {
       entrypoint: "enroll_social_recovery",
       calldata: [
         ...pubkeyCalldata(recoveryPubkey),
-        num.toHex(delaySeconds),
+        // The contract takes a recovery delay. The kit enrols none: a delay
+        // only protects an owner who is told a recovery is pending and can
+        // cancel it, and neither exists yet.
+        "0x0",
         num.toHex(policyLow),
         num.toHex(policyHigh),
       ],
@@ -149,14 +151,6 @@ export class StarknetAdapter implements ChainAdapter {
     return {
       contractAddress: accountAddress,
       entrypoint: "finalize_social_recovery",
-      calldata: [],
-    };
-  }
-
-  buildCancelSocialRecovery(accountAddress: string): ChainCall {
-    return {
-      contractAddress: accountAddress,
-      entrypoint: "cancel_social_recovery",
       calldata: [],
     };
   }

@@ -23,16 +23,33 @@ describe("toEnclaveDekPort", () => {
     expect(enroll).toHaveBeenCalledWith({ walletAddress: "Addr1", credential, dek });
   });
 
-  it("treats already_enrolled as recover", async () => {
+  it("asks the enclave about a wallet that already has a record", async () => {
     const dek = generateMasterDEK();
-    const enroll = jest.fn(async () => {
-      throw new Error('kit/social-recovery: /api/recovery/social/sessions -> 409 {"error":"already_enrolled","wallet_address":"AddrCanonical"}');
-    });
+    const enroll = jest.fn(async () => ({
+      sessionId: "s1",
+      result: { result: "confirmed", dek_matches: true },
+    }));
     const port = toEnclaveDekPort({ enroll, recover: jest.fn() } as unknown as SocialRecoveryClient);
     await expect(port.enrollDek({ address: "Addr1", credential, dek })).resolves.toEqual({
       kind: "already-enrolled",
-      address: "AddrCanonical",
+      address: "Addr1",
     });
+  });
+
+  it("says so when the existing record does not seal this DEK, without locking the wallet", async () => {
+    const dek = generateMasterDEK();
+    const enroll = jest.fn(async () => ({
+      sessionId: "s1",
+      result: { result: "confirmed", dek_matches: false },
+    }));
+    const complaint = jest.spyOn(console, "error").mockImplementation(() => {});
+    const port = toEnclaveDekPort({ enroll, recover: jest.fn() } as unknown as SocialRecoveryClient);
+    await expect(port.enrollDek({ address: "Addr1", credential, dek })).resolves.toEqual({
+      kind: "already-enrolled",
+      address: "Addr1",
+    });
+    expect(complaint).toHaveBeenCalledWith(expect.stringContaining("does not hold its key"));
+    complaint.mockRestore();
   });
 
   it("wraps the sealed DEK to this device and parses the blob", async () => {
@@ -90,7 +107,7 @@ describe("toEnclaveDekPort", () => {
         credential: { idToken, tokenFingerprint: "fp", provider: "google" },
       }),
     ).resolves.toEqual({ address: "AddrEnrolled" });
-    expect(lookup).toHaveBeenCalledWith({ provider: "google", subject: "subject-1" });
+    expect(lookup).toHaveBeenCalledWith({ provider: "google", subject: "subject-1", idToken });
   });
 
   it("treats a rejected identity lookup as not enrolled", async () => {

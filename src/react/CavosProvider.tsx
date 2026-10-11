@@ -205,8 +205,6 @@ export interface WalletStatus {
   isNewAccount: boolean;
   /** The attested enclave is enrolling or recovering this wallet. */
   isSocialRecovering: boolean;
-  /** Unix seconds when an on-chain timelocked recovery can be finalized. */
-  socialRecoveryReadyAt: number | null;
   /**
    * Can this user get back in from a device they do not have yet?
    *
@@ -407,14 +405,12 @@ const INITIAL_STATUS: WalletStatus = {
   hasPasskey: false,
   isNewAccount: false,
   isSocialRecovering: false,
-  socialRecoveryReadyAt: null,
   recovery: { protected: false, methods: [] },
 };
 
 interface SocialRecoveryEnvironment {
   enabled: boolean;
   provider: SocialRecoveryProvider | null;
-  delaySeconds: number;
 }
 
 /**
@@ -517,6 +513,10 @@ export function CavosProvider({
       return session;
     }
   }, [session, selectedChain]);
+  // The wallet on screen right now, for work that outlives a render and must
+  // know whether the user is still on the wallet it started for.
+  const walletRef = useRef(wallet);
+  walletRef.current = wallet;
   // Keep children behind the loading state until we have checked for a
   // persisted identity and silently reconnected this browser's device signer.
   const [isLoading, setIsLoading] = useState(true);
@@ -627,10 +627,9 @@ export function CavosProvider({
           provider: ['google', 'apple', 'email'].includes(data.provider)
             ? data.provider
             : null,
-          delaySeconds: Number(data.delay_seconds) || 0,
         });
       })
-      .catch(() => setSocialRecovery({ enabled: false, provider: null, delaySeconds: 0 }));
+      .catch(() => setSocialRecovery({ enabled: false, provider: null }));
   }, [config.appId, config.environment, config.authBackendUrl]);
 
   /**
@@ -669,8 +668,7 @@ export function CavosProvider({
       if (social) socialEnrolledRef.current.add(`${wallet.chain}:${wallet.address}`);
       else socialEnrolledRef.current.delete(`${wallet.chain}:${wallet.address}`);
       const methods: ('passkey' | 'social')[] = [];
-      // Passkey first: it is the immediate route, where the enclave path waits
-      // out a timelock.
+      // Passkey first: it needs no round trip to the enclave.
       if (passkey) methods.push('passkey');
       if (social) methods.push('social');
       setWalletStatus((status) => ({
@@ -871,7 +869,6 @@ export function CavosProvider({
         hasPasskey,
         isNewAccount: w.isNewAccount,
         isSocialRecovering: false,
-        socialRecoveryReadyAt: null,
         // Unknown until the lookup above answers for this wallet.
         recovery: { protected: false, methods: [] },
       });
@@ -1028,9 +1025,11 @@ export function CavosProvider({
     // Solana and Stellar enroll the DEK at connect. This sweep only writes
     // Starknet's on-chain recovery authority.
     if (appDeviceApproval === 'passkey') return;
+    // `socialRecovery.provider` is not required: it is the environment's old
+    // single-provider setting, null once an app offers several. The provider
+    // is the credential's own, read from the token.
     if (
       !socialRecovery?.enabled ||
-      !socialRecovery.provider ||
       !socialRecoveryPolicy ||
       !session ||
       !identity ||
@@ -1103,7 +1102,6 @@ export function CavosProvider({
             client,
             wallet: w,
             authority,
-            delaySeconds: socialRecovery.delaySeconds,
           });
           agreedAuthorityRef.current.delete(key(w));
           socialEnrolledRef.current.add(key(w));
@@ -1160,7 +1158,6 @@ export function CavosProvider({
     if (wallet?.chain === 'stellar' || wallet?.chain === 'solana') return;
     if (
       !socialRecovery?.enabled ||
-      !socialRecovery.provider ||
       !wallet ||
       !identity ||
       !config.appId
@@ -1237,7 +1234,6 @@ export function CavosProvider({
               wallet,
               credential,
               network: config.network,
-              delaySeconds: socialRecovery.delaySeconds,
             });
             break;
           } catch (error) {
@@ -1263,18 +1259,14 @@ export function CavosProvider({
           }
         }
         if (cancelled) return;
-        if (!outcome.finalized) {
-          persistPendingSocialRecovery(wallet.chain, wallet.address, outcome.readyAt);
-          setWalletStatus((status) => ({
-            ...status,
-            isDeploying: false,
-            needsDeviceApproval: true,
-            isSocialRecovering: false,
-            socialRecoveryReadyAt: outcome.readyAt,
-          }));
-          return;
-        }
         await waitUntilWalletReady(wallet);
+        // From here `cancelled` no longer means "stop": the wait above marks
+        // the wallet ready, `wallet.status` is one of this effect's own
+        // dependencies, and so the next render cancels this very run. Gating
+        // the rest on it left the wallet working and `isSocialRecovering` true
+        // for good. What matters now is whether this is still the wallet on
+        // screen.
+        const stillThisWallet = () => walletRef.current === wallet;
         // This device is now an authorized signer, and it got there without the
         // owner approving anything — the enclave did. Tell them, with a link to
         // revoke it. Best-effort: the signer is already on-chain, so a failed
@@ -1285,6 +1277,8 @@ export function CavosProvider({
               baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
               appId: config.appId,
               ...(config.environment ? { environment: config.environment } : {}),
+              // The route only tells an owner about their own wallet.
+              authToken: () => auth.getAuthToken(),
             }).notifyDeviceAdded({
               accountAddress: wallet.address,
               signer: wallet.publicKey,
@@ -1295,7 +1289,7 @@ export function CavosProvider({
             console.warn('[CavosProvider] device-added notice failed:', e);
           }
         }
-        if (!cancelled) await connect(identity, { silent: true });
+        if (stillThisWallet()) await connect(identity, { silent: true });
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : 'Social recovery failed.';
@@ -1334,57 +1328,6 @@ export function CavosProvider({
     wallet?.status,
     externalSocialToken,
   ]);
-
-  // A non-zero timelock survives refreshes: scheduling is already committed
-  // on-chain and finalization needs no social credential. Resume it when due.
-  useEffect(() => {
-    if (!wallet || !identity || wallet.status !== 'needs-device-approval') return;
-    if (wallet.chain === 'stellar') return;
-    const persisted = loadPendingSocialRecovery(wallet.chain, wallet.address);
-    const readyAt = walletStatus.socialRecoveryReadyAt ?? persisted;
-    if (!readyAt) return;
-    if (walletStatus.socialRecoveryReadyAt !== readyAt) {
-      setWalletStatus((status) => ({ ...status, socialRecoveryReadyAt: readyAt }));
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const finalize = async () => {
-      const remaining = readyAt * 1000 - Date.now();
-      if (remaining > 0) {
-        timer = setTimeout(finalize, Math.min(remaining, 60_000));
-        return;
-      }
-      setWalletStatus((status) => ({
-        ...status,
-        isDeploying: true,
-        needsDeviceApproval: false,
-        isSocialRecovering: true,
-      }));
-      try {
-        if (wallet.chain === 'starknet') await wallet.finalizeSocialRecovery();
-        else return;
-        await waitUntilWalletReady(wallet);
-        clearPendingSocialRecovery(wallet.chain, wallet.address);
-        if (!cancelled) await connect(identity, { silent: true });
-      } catch (error) {
-        if (!cancelled) {
-          setAuthError(error instanceof Error ? error.message : 'Could not finalize recovery.');
-          setWalletStatus((status) => ({
-            ...status,
-            isDeploying: false,
-            needsDeviceApproval: true,
-            isSocialRecovering: false,
-          }));
-          timer = setTimeout(finalize, 10_000);
-        }
-      }
-    };
-    void finalize();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [connect, identity, wallet, walletStatus.socialRecoveryReadyAt]);
 
   // A device signer is already persisted securely in IndexedDB. Restore only
   // the non-secret identity metadata from localStorage, then reconnect the
@@ -2019,34 +1962,5 @@ async function waitUntilWalletReady(wallet: CavosWallet): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
-}
-
-function pendingSocialRecoveryKey(chain: Chain, address: string): string {
-  return `cavos-kit:social-recovery:${chain}:${address}`;
-}
-
-function persistPendingSocialRecovery(chain: Chain, address: string, readyAt: number): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(
-    pendingSocialRecoveryKey(chain, address),
-    JSON.stringify({ readyAt }),
-  );
-}
-
-function loadPendingSocialRecovery(chain: Chain, address: string): number | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const value = JSON.parse(
-      window.localStorage.getItem(pendingSocialRecoveryKey(chain, address)) ?? 'null',
-    );
-    return Number.isFinite(value?.readyAt) ? Number(value.readyAt) : null;
-  } catch {
-    return null;
-  }
-}
-
-function clearPendingSocialRecovery(chain: Chain, address: string): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.removeItem(pendingSocialRecoveryKey(chain, address));
 }
 

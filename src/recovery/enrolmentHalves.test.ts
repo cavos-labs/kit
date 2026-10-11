@@ -59,7 +59,6 @@ describe("the two halves of enrolment", () => {
       client,
       wallet,
       authority: { sessionId: "s1", result: result as never },
-      delaySeconds: 0,
     });
 
     expect(wallet.enrollSocialRecovery).toHaveBeenCalledTimes(1);
@@ -76,7 +75,6 @@ describe("the two halves of enrolment", () => {
       client,
       wallet: starknetWallet(),
       authority: { sessionId: "s1", result: result as never },
-      delaySeconds: 0,
     });
 
     expect(enroll).not.toHaveBeenCalled();
@@ -100,8 +98,7 @@ describe("the two halves of enrolment", () => {
         client,
         wallet,
         authority: { sessionId: "s1", result: result as never },
-        delaySeconds: 0,
-      }),
+        }),
     ).rejects.toThrow(/enroll the DEK at connect/);
     expect(wallet.enrollSocialRecovery).not.toHaveBeenCalled();
   });
@@ -114,9 +111,8 @@ describe("the two halves of enrolment", () => {
       wallet: stellarWallet(),
       credential,
       network: "testnet",
-      delaySeconds: 0,
     });
-    expect(outcome.finalized).toBe(true);
+    expect(outcome).toEqual({});
     expect(enroll).not.toHaveBeenCalled();
     expect(recover).not.toHaveBeenCalled();
   });
