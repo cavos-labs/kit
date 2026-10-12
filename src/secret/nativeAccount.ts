@@ -172,10 +172,8 @@ function recoveryCredential(input: ResolveNativeEd25519Input<{ address(): string
   if (input.credential) return input.credential;
   if (input.passkey && !input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
   if (!input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
-  // Reached on a new account as much as on a new device, and most often after
-  // an email code, which carries no token the enclave verifies.
   throw new Error(
-    `kit/${input.chain}: this wallet is protected by recovery. Sign in with Google, Apple or an email link to continue.`,
+    `kit/${input.chain}: this wallet is protected by recovery. Sign in again with Google, Apple or an email code to continue.`,
   );
 }
 

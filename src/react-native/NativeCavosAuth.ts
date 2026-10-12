@@ -1,4 +1,3 @@
-import { hash, num } from "starknet";
 import * as WebBrowser from "expo-web-browser";
 import type { AuthProvider, Identity } from "../auth/AuthProvider";
 import { decodeUtf8, fromBase64 } from "./encoding";
@@ -26,7 +25,8 @@ export type NativeCavosAuthErrorCode =
   | "cancelled"
   | "callback-invalid"
   | "not-authenticated"
-  | "http-error";
+  | "http-error"
+  | "unsupported";
 
 export class NativeCavosAuthError extends Error {
   readonly name = "NativeCavosAuthError";
@@ -90,31 +90,12 @@ export class NativeCavosAuth implements AuthProvider {
     return this.handleCallback(result.url, provider);
   }
 
-  async sendOtp(email: string): Promise<void> {
-    await this.post("/api/oauth/firebase/otp/request", {
-      email,
-      nonce: await this.freshNonce(),
-      app_id: this.opts.appId,
-    });
+  async sendOtp(_email: string): Promise<void> {
+    throw emailUnsupported();
   }
 
-  async sendMagicLink(email: string): Promise<void> {
-    await this.post("/api/oauth/v2/firebase/magic-link", {
-      email,
-      nonce: await this.freshNonce(),
-      app_id: this.opts.appId,
-      redirect_uri: this.opts.redirectUri,
-    });
-  }
-
-  async verifyOtp(email: string, code: string): Promise<Identity> {
-    const res = await this.post("/api/oauth/firebase/otp/verify", {
-      email,
-      code,
-      nonce: await this.consumeNonce(),
-      app_id: this.opts.appId,
-    });
-    return this.identityFromAuthData(res.id_token ?? res.jwt ?? res.token ?? JSON.stringify(res), "otp", email);
+  async verifyOtp(_email: string, _code: string): Promise<Identity> {
+    throw emailUnsupported();
   }
 
   async handleCallback(input: string, provider = "oauth"): Promise<Identity> {
@@ -150,22 +131,6 @@ export class NativeCavosAuth implements AuthProvider {
     return this.recoveryCredential;
   }
 
-  private async freshNonce(): Promise<string> {
-    const bytes = fromBase64(await nativeModule().randomBytes(31));
-    let word = 0n;
-    for (const byte of bytes) word = (word << 8n) | BigInt(byte);
-    const nonce = num.toHex(hash.computePoseidonHashOnElements([word]));
-    await nativeModule().setStoredValue(`${this.storageKey}:nonce`, nonce);
-    return nonce;
-  }
-
-  private async consumeNonce(): Promise<string> {
-    const key = `${this.storageKey}:nonce`;
-    const nonce = await nativeModule().getStoredValue(key);
-    await nativeModule().setStoredValue(key, null);
-    return nonce ?? this.freshNonce();
-  }
-
   private async identityFromAuthData(data: string, provider: string, email?: string): Promise<Identity> {
     let token = data;
     try {
@@ -193,7 +158,7 @@ export class NativeCavosAuth implements AuthProvider {
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? email,
       name: claims.name,
-      provider: claims.firebase?.sign_in_provider ?? claims.provider ?? provider,
+      provider: claims.provider ?? provider,
     };
     this.last = identity;
     await nativeModule().setStoredValue(this.storageKey, JSON.stringify(identity));
@@ -226,4 +191,11 @@ function extractCallbackCode(input: string): string | null {
   if (/^[A-Za-z0-9_-]{43}$/.test(input)) return input;
   try { return new URL(input).searchParams.get("cavos_auth_code"); }
   catch { return null; }
+}
+
+function emailUnsupported(): NativeCavosAuthError {
+  return new NativeCavosAuthError(
+    "unsupported",
+    "kit/native-auth: email sign-in is not supported in React Native yet. It needs to verify the enclave's attestation, which this build cannot do. Use Google or Apple.",
+  );
 }

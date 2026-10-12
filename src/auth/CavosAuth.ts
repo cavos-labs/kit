@@ -1,11 +1,15 @@
-import { hash, num } from "starknet";
 import type { AuthProvider, Identity } from "./AuthProvider";
 import {
   createSocialRecoveryCredential,
+  ENCLAVE_EMAIL_ISSUER,
   isSocialRecoveryIssuer,
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
+import type { AttestationPolicy } from "../recovery/SocialRecoveryClient";
+import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
+import { runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
 import { secureRandomBytes } from "../crypto/encoding";
+import { normalizeEmailCode } from "./emailCode";
 import {
   assertLoginBinding,
   loginNonce,
@@ -25,11 +29,17 @@ export interface CavosAuthOptions {
    * signed in across tabs and restarts).
    */
   persistSession?: boolean;
+  /**
+   * The enclave measurements email login verifies before it sends a code to
+   * the enclave. Defaults to the enclave shipped with this package.
+   */
+  attestation?: AttestationPolicy;
 }
 
 /**
  * Hosted login (Privy-like) backed by the Cavos backend — same endpoints
- * `@cavos/react` uses (Google / Apple OAuth + Firebase email OTP). Login only
+ * `@cavos/react` uses for Google / Apple OAuth, plus an email code the recovery
+ * enclave generates and verifies itself. Login only
  * resolves a stable `userId` (the OAuth `sub` claim); it never touches signing.
  * Feed the returned `Identity` to `Cavos.connect`.
  *
@@ -57,8 +67,6 @@ export class CavosAuth implements AuthProvider {
   private readonly loginSecretKey: string;
   /** The login secret, for a callback this same instance handles. */
   private loginSecret: string | null = null;
-  /** Most recent nonce sent to the backend (for the pending OAuth/OTP request). */
-  private pendingNonce: string | null = null;
   private last: Identity | null = null;
   /** Fresh OIDC proof retained only in memory for an immediate TEE recovery.
    * Never persisted to localStorage and never sent to the Cavos control plane
@@ -179,34 +187,54 @@ export class CavosAuth implements AuthProvider {
     return this.identityFromAuthData(authData, "oauth");
   }
 
-  /** Send a one-time code to an email (Firebase OTP). */
+  /**
+   * Email a 9-character sign-in code. The code is generated and mailed by the
+   * recovery enclave, so the Cavos control plane never sees it.
+   */
   async sendOtp(email: string): Promise<void> {
-    await this.post("/api/oauth/firebase/otp/request", {
-      email,
-      nonce: this.freshNonce(),
-      ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
+    await this.emailPost("/api/oauth/email/code", {
+      app_id: this.requireAppId(),
+      email: normalizeEmail(email),
     });
   }
 
-  /** Send a passwordless magic-link sign-in email (Firebase). */
-  async sendMagicLink(email: string): Promise<void> {
-    await this.post("/api/oauth/v2/firebase/magic-link", {
-      email,
-      nonce: this.freshNonce(),
-      ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
-      ...(typeof window !== "undefined" ? { redirect_uri: window.location.href } : {}),
-    });
-  }
-
-  /** Verify the OTP and resolve the identity. */
+  /**
+   * Verify the emailed code inside the attested enclave and resolve the
+   * identity. The enclave answers with its own signed token, bound to a secret
+   * created here, and that token is used exactly like a Google id_token.
+   */
   async verifyOtp(email: string, code: string): Promise<Identity> {
-    const res = await this.post("/api/oauth/firebase/otp/verify", {
-      email,
-      code,
-      nonce: this.consumeNonce(),
-      ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
-    });
-    return this.identityFromAuthData(res.id_token ?? res.jwt ?? res.token ?? JSON.stringify(res), "otp", email);
+    const appId = this.requireAppId();
+    const address = normalizeEmail(email);
+    const secret = loginSecretFrom(secureRandomBytes(32));
+    const session = await this.emailPost("/api/oauth/email/session", { app_id: appId });
+    const sessionId: unknown = session?.session_id;
+    if (typeof sessionId !== "string") {
+      throw new Error("kit/auth: the email session carried no id");
+    }
+    const channelKey = await verifiedChannelKey(
+      sessionId,
+      session.attestation_document_b64,
+      this.opts.attestation ?? DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
+    );
+    const result = await runEnclaveJob<{ result?: string; id_token?: unknown }>(
+      sessionId,
+      channelKey,
+      {
+        action: "verify_email",
+        email: address,
+        code: normalizeEmailCode(code),
+        client_nonce: loginNonce(secret),
+      },
+      (job) => this.emailPost("/api/oauth/email/verify", { session_id: sessionId, job }),
+    );
+    if (result.result !== "email_verified" || typeof result.id_token !== "string") {
+      throw new Error("kit/auth: the enclave did not verify this email");
+    }
+    if (parseJwt(result.id_token).iss !== ENCLAVE_EMAIL_ISSUER) {
+      throw new Error("kit/auth: the email token was not issued by the enclave");
+    }
+    return this.identityFromAuthData(result.id_token, "email", address, secret);
   }
 
   /** AuthProvider: returns the identity resolved by the last login step. */
@@ -292,6 +320,7 @@ export class CavosAuth implements AuthProvider {
     authData: string,
     provider: string,
     emailOverride?: string,
+    presentedSecret?: string,
   ): Promise<Identity> {
     let token = authData;
     try {
@@ -303,7 +332,7 @@ export class CavosAuth implements AuthProvider {
     const claims = parseJwt(token);
     let loginSecret: string | undefined;
     if (requiresLoginBinding(claims.iss)) {
-      const kept = this.takeLoginSecret();
+      const kept = presentedSecret ?? this.takeLoginSecret();
       assertLoginBinding(claims.nonce, kept);
       loginSecret = kept;
     }
@@ -314,8 +343,6 @@ export class CavosAuth implements AuthProvider {
     return this.remember({
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? emailOverride,
-      // Standard OIDC `name` — present on Google's id_token, absent on the
-      // Cavos-signed Firebase JWT (email/OTP/magic-link) and Apple's token.
       name: claims.name,
       provider: providerFromClaims(claims, provider),
     });
@@ -381,24 +408,6 @@ export class CavosAuth implements AuthProvider {
     return secret;
   }
 
-  /** Generate (and remember) the nonce the Cavos backend expects on requests. */
-  private freshNonce(): string {
-    // 31-byte random felt; matches the shape the backend validates, value is
-    // irrelevant to the device-signer model.
-    const bytes = crypto.getRandomValues(new Uint8Array(31));
-    const h = hash.computePoseidonHashOnElements([bytesToChunks(bytes)]);
-    this.pendingNonce = num.toHex(h);
-    return this.pendingNonce;
-  }
-
-  /** Return the pending nonce (for the verify step), clearing it. */
-  private consumeNonce(): string {
-    if (!this.pendingNonce) return this.freshNonce();
-    const n = this.pendingNonce;
-    this.pendingNonce = null;
-    return n;
-  }
-
   private remember(id: Identity): Identity {
     this.last = id;
     if (typeof window !== "undefined") {
@@ -419,6 +428,29 @@ export class CavosAuth implements AuthProvider {
     return r.json();
   }
 
+  private requireAppId(): string {
+    if (!this.opts.appId) throw new Error("kit/auth: email sign-in needs an appId");
+    return this.opts.appId;
+  }
+
+  private async emailPost(path: string, body: unknown): Promise<any> {
+    const r = await fetch(`${this.backendUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) return r.json();
+    const text = await r.text().catch(() => "");
+    let code: unknown;
+    try {
+      code = JSON.parse(text)?.error;
+    } catch {
+      code = undefined;
+    }
+    const known = typeof code === "string" ? EMAIL_ERRORS[code] : undefined;
+    throw new Error(known ?? `kit/auth: ${path} -> ${r.status} ${text}`);
+  }
+
   private async post(path: string, body: unknown): Promise<any> {
     const r = await fetch(`${this.backendUrl}${path}`, {
       method: "POST",
@@ -428,6 +460,21 @@ export class CavosAuth implements AuthProvider {
     if (!r.ok) throw new Error(`kit/auth: ${path} -> ${r.status} ${await r.text()}`);
     return r.json();
   }
+}
+
+const EMAIL_ERRORS: Record<string, string> = {
+  invalid_request: "Enter a valid email address.",
+  app_not_found: "kit/auth: this app is not registered with Cavos.",
+  email_undeliverable: "This email provider is not supported yet.",
+  code_cooldown: "A code was just sent to this address. Wait a minute before requesting another.",
+  rate_limited: "Too many attempts. Try again in a few minutes.",
+  email_unavailable: "Email sign-in is unavailable right now. Try again later.",
+  enclave_unavailable: "Email sign-in is unavailable right now. Try again later.",
+  code_rejected: "That code is wrong or has expired. Request a new one.",
+};
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
 /** Pull the `auth_data` / `zk_auth_data` value out of a callback string. */
@@ -464,22 +511,18 @@ function currentCleanCallbackUrl(): string | null {
 /**
  * Which provider actually signed this token.
  *
- * A raw Google or Apple id_token carries neither `provider` nor Firebase's
- * `sign_in_provider`, so the OAuth path used to fall through to the literal
- * "oauth" — true, and useless to anything that wants to name the provider back
- * to the user. The issuer is the authoritative answer and is always there.
+ * A raw Google or Apple id_token carries no `provider` claim, so the OAuth
+ * path would fall through to the literal "oauth" — true, and useless to
+ * anything that wants to name the provider back to the user. The issuer is the
+ * authoritative answer and is always there.
  */
 function providerFromClaims(claims: any, fallback: string): string {
-  // Firebase's own value passes through untouched ("google.com", "password"):
-  // it is already public API and callers switch on it.
-  const signIn: string | undefined = claims?.firebase?.sign_in_provider;
-  if (signIn) return signIn;
   switch (claims?.iss) {
     case "https://accounts.google.com":
       return "google";
     case "https://appleid.apple.com":
       return "apple";
-    case "https://cavos.app/firebase":
+    case ENCLAVE_EMAIL_ISSUER:
       return "email";
     default:
       return claims?.provider ?? fallback;
@@ -491,11 +534,4 @@ function parseJwt(jwt: string): any {
   if (!part) throw new Error("kit/auth: malformed JWT");
   const json = atob(part.replace(/-/g, "+").replace(/_/g, "/"));
   return JSON.parse(json);
-}
-
-/** Pack a byte array into the felt252 chunks Poseidon hashes over. */
-function bytesToChunks(bytes: Uint8Array): bigint {
-  let w = 0n;
-  for (const b of bytes.subarray(0, 31)) w = (w << 8n) | BigInt(b);
-  return w;
 }

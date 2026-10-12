@@ -1,5 +1,6 @@
 import {
   createSocialRecoveryCredential,
+  isSocialRecoveryIssuer,
   readTokenSubject,
   socialRecoveryProvider,
 } from "./SocialRecoveryCredential";
@@ -31,21 +32,16 @@ describe("socialRecoveryProvider", () => {
     expect(socialRecoveryProvider(token({ iss: "https://accounts.google.com" }))).toBe("google");
     expect(socialRecoveryProvider(token({ iss: "accounts.google.com" }))).toBe("google");
     expect(socialRecoveryProvider(token({ iss: "https://appleid.apple.com" }))).toBe("apple");
-    expect(
-      socialRecoveryProvider(token({ iss: "https://securetoken.google.com/cavos-prod" })),
-    ).toBe("email");
+    expect(socialRecoveryProvider(token({ iss: "https://enclave.cavos.xyz" }))).toBe("email");
   });
 
-  it("separates Firebase from plain Google, which share a domain", () => {
-    // Both are Google-operated and the prefixes are similar enough to swap by
-    // accident, but they are different issuers with different JWKS, so a
-    // mix-up would build a policy the token cannot verify against.
-    const firebase = socialRecoveryProvider(
-      token({ iss: "https://securetoken.google.com/project-1" }),
-    );
-    const google = socialRecoveryProvider(token({ iss: "https://accounts.google.com" }));
-    expect(firebase).toBe("email");
-    expect(google).toBe("google");
+  it("accepts the enclave's issuer and refuses Firebase's", () => {
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz")).toBe(true);
+    expect(isSocialRecoveryIssuer("https://securetoken.google.com/cavos-prod")).toBe(false);
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz.evil.test")).toBe(false);
+    expect(() =>
+      socialRecoveryProvider(token({ iss: "https://securetoken.google.com/project-1" })),
+    ).toThrow(/no social recovery provider/);
   });
 
   it("refuses an issuer no provider in the policy set uses", () => {

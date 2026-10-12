@@ -34,13 +34,20 @@ describe("useExternalSocialRecoveryToken", () => {
     ).not.toThrow();
   });
 
-  it("accepts a Firebase token", () => {
+  it("accepts an enclave email token", () => {
+    const a = auth();
+    expect(() =>
+      a.useExternalSocialRecoveryToken(jwt({ iss: "https://enclave.cavos.xyz", sub: "u1" })),
+    ).not.toThrow();
+  });
+
+  it("rejects a Firebase token", () => {
     const a = auth();
     expect(() =>
       a.useExternalSocialRecoveryToken(
         jwt({ iss: "https://securetoken.google.com/some-project", sub: "u1" }),
       ),
-    ).not.toThrow();
+    ).toThrow(/cannot be used for social recovery/);
   });
 
   it("rejects the host's own session JWT", () => {

@@ -38,7 +38,6 @@ export interface CavosConfig {
 export interface CavosModalConfig {
   appName?: string;
   providers?: ("google" | "apple" | "email")[];
-  emailMode?: "magic-link" | "otp";
   secureStep?: "optional" | "required" | "off";
   primaryColor?: string;
   onSuccess?: (address: string) => void;
@@ -78,7 +77,6 @@ export interface CavosContextValue {
   authError: string | null;
   clearAuthError(): void;
   login(provider: "google" | "apple"): Promise<void>;
-  sendMagicLink(email: string): Promise<void>;
   sendOtp(email: string): Promise<void>;
   verifyOtp(email: string, code: string): Promise<void>;
   handleCallback(url: string): Promise<void>;
@@ -170,6 +168,11 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
     try { await finishIdentity(await auth.login(provider)); }
     catch (error) { setAuthError(messageOf(error)); throw error; }
   }, [auth, finishIdentity]);
+
+  const sendOtp = useCallback(async (email: string) => {
+    try { await auth.sendOtp(email); }
+    catch (error) { setAuthError(messageOf(error)); throw error; }
+  }, [auth]);
 
   const verifyOtp = useCallback(async (email: string, code: string) => {
     try { await finishIdentity(await auth.verifyOtp(email, code)); }
@@ -325,7 +328,7 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
     isAuthenticated: !!wallet, user: identity, chain: config.chain ?? "starknet",
     wallet, address: wallet?.address ?? null, walletStatus: status, capabilities,
     isLoading, authError, clearAuthError: () => setAuthError(null), login,
-    sendMagicLink: (email) => auth.sendMagicLink(email), sendOtp: (email) => auth.sendOtp(email),
+    sendOtp,
     verifyOtp, handleCallback, execute, signMessage, enrollPasskeyDefault,
     approveDeviceWithPasskey, setupRecovery, recover, resendDeviceApproval, logout,
   };

@@ -33,7 +33,7 @@ npm install @cavos/kit
 
 ## How connect works
 
-1. **Authenticate** — OAuth, magic link, or OTP resolves a stable `userId`.
+1. **Authenticate** — OAuth (Google, Apple) or an emailed 9-character code resolves a stable `userId`.
 2. **Registry lookup** — `(userId, appId, chain, network) → address`. If the
    user already has an address for this app + chain, they get that address. If
    not, this device claims one: Starknet from the fresh P-256 device key;
@@ -495,7 +495,7 @@ never asks for a passkey.
 ## Hardware-isolated social recovery
 
 Social recovery is **opt-in** per Cavos environment. The developer selects
-exactly one provider in the dashboard (`google`, `apple`, or email magic link),
+exactly one provider in the dashboard (`google`, `apple`, or email code),
 so the user is never shown a three-provider recovery selector.
 
 The kit verifies **AWS Nitro Enclave** attestation, with measurements pinned in
@@ -598,7 +598,7 @@ export function Root() {
         redirectUri: "myapp://cavos-auth",
         rpId: "app.example.com",
       }}
-      modal={{ appName: "My App", emailMode: "otp" }}
+      modal={{ appName: "My App" }}
     >
       <App />
     </CavosProvider>

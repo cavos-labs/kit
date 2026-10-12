@@ -9,6 +9,9 @@ import { utf8ToBytes } from "../crypto/encoding";
  */
 export type SocialRecoveryProvider = "google" | "apple" | "email";
 
+/** The `iss` of the tokens the recovery enclave itself issues for email login. */
+export const ENCLAVE_EMAIL_ISSUER = "https://enclave.cavos.xyz";
+
 export interface SocialRecoveryCredential {
   idToken: string;
   tokenFingerprint: string;
@@ -25,9 +28,8 @@ export interface SocialRecoveryCredential {
   provider: SocialRecoveryProvider;
   /**
    * The secret whose hash this login sent as the `nonce` (see
-   * `auth/loginBinding`). The enclave requires it beside a Google or Apple
-   * token; it travels only inside the job encrypted to the enclave. Absent for
-   * email, whose tokens carry no nonce.
+   * `auth/loginBinding`). The enclave requires it beside every token; it
+   * travels only inside the job encrypted to the enclave.
    */
   noncePreimage?: string;
 }
@@ -58,7 +60,7 @@ export function socialRecoveryProvider(
     );
   }
   if (issuer === "https://appleid.apple.com") return "apple";
-  if (issuer.startsWith("https://securetoken.google.com/")) return "email";
+  if (issuer === ENCLAVE_EMAIL_ISSUER) return "email";
   return "google";
 }
 
@@ -98,8 +100,7 @@ export function isSocialRecoveryIssuer(issuer: unknown): issuer is string {
     issuer === "https://accounts.google.com" ||
     issuer === "accounts.google.com" ||
     issuer === "https://appleid.apple.com" ||
-    (typeof issuer === "string" &&
-      issuer.startsWith("https://securetoken.google.com/"))
+    issuer === ENCLAVE_EMAIL_ISSUER
   );
 }
 
