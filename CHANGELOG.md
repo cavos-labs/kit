@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- **The code screen fits its card.** The nine code boxes share the card's width
+  instead of a fixed 44px each, which overflowed the modal.
+
 ## 0.4.0
 
 ### Breaking: email sign-in is a code verified inside the recovery enclave
