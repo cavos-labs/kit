@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0
+
+### Breaking: email sign-in is a code verified inside the recovery enclave
+
+Needs the current Cavos backend and recovery enclave. Google and Apple sign-in
+are unchanged.
+
+- **`sendOtp` / `verifyOtp` talk to the enclave.** The enclave generates a
+  9-character code, mails it straight to the user's mail server, and verifies
+  it. The code travels to the enclave encrypted to its attested key, and the
+  enclave answers with its own token (`iss: https://enclave.cavos.xyz`), bound
+  to a login secret this client keeps — the same binding Google and Apple
+  tokens have. An email login can therefore enrol and recover like any other.
+- **Magic links are gone.** `sendMagicLink` and the `emailMode` option are
+  removed from `CavosAuth`, the React and React Native providers, and the auth
+  modal. The modal's code screen takes 9 characters, and accepts a pasted code
+  with spaces or hyphens.
+- **Firebase email tokens are no longer recovery credentials.**
+  `isSocialRecoveryIssuer` accepts the enclave issuer and rejects
+  `securetoken.google.com`.
+- **Email sign-in is not available in React Native yet.** It needs the
+  attestation check, which the React Native build cannot run today, so
+  `sendOtp` and `verifyOtp` throw an `unsupported` error there. Use Google or
+  Apple.
+- **Email identities change.** The user id of an email login is now derived
+  from the address, so a user who signed in by email before gets a new identity.
+- **Two enclave measurements are accepted**, `f388b0bf…a150f9` (current) and
+  `5ec16356…572825`, so apps keep working while the enclave is replaced.
+
 ## 0.3.0
 
 ### Breaking: this release needs the current Cavos backend and recovery enclave

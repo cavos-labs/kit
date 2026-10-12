@@ -46,13 +46,11 @@ export function CavosAuthModal({ open, onClose, config }: CavosAuthModalProps) {
           {providers.includes("apple") ? <Button label="Continue with Apple" color={color} onPress={() => run(() => cavos.login("apple"))} /> : null}
           {providers.includes("email") ? <>
             <TextInput style={styles.input} value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" placeholder="Email" />
-            {config.emailMode === "otp" ? <>
-              {otpSent ? <TextInput style={styles.input} value={code} onChangeText={setCode} keyboardType="number-pad" placeholder="Verification code" /> : null}
-              <Button color={color} label={otpSent ? "Verify code" : "Send code"} onPress={() => run(async () => {
-                if (otpSent) await cavos.verifyOtp(email, code);
-                else { await cavos.sendOtp(email); setOtpSent(true); }
-              })} />
-            </> : <Button color={color} label="Email me a sign-in link" onPress={() => run(() => cavos.sendMagicLink(email))} />}
+            {otpSent ? <TextInput style={styles.input} value={code} onChangeText={setCode} autoCapitalize="none" autoCorrect={false} placeholder="9-character code" /> : null}
+            <Button color={color} label={otpSent ? "Verify code" : "Send code"} onPress={() => run(async () => {
+              if (otpSent) await cavos.verifyOtp(email, code);
+              else { await cavos.sendOtp(email); setOtpSent(true); }
+            })} />
           </> : null}
         </View> : null}
 

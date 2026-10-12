@@ -1,9 +1,7 @@
-import { bytesToUtf8, utf8ToBytes } from "../crypto/encoding";
+import { bytesToBase64Url } from "../crypto/encoding";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
-import {
-  verifyNitroAttestation,
-  type NitroAttestationPolicy,
-} from "./nitro/attestation";
+import type { NitroAttestationPolicy } from "./nitro/attestation";
+import { runEnclaveJob, verifiedChannelKey } from "./enclaveChannel";
 
 export type SocialRecoveryProvider = "google" | "apple" | "email";
 export type SocialRecoveryAction = "enroll" | "recover";
@@ -129,7 +127,11 @@ export class SocialRecoveryClient {
       params.credential,
       Boolean(params.dek),
     );
-    const channelKey = await this.verifiedChannelKey(session);
+    const channelKey = await verifiedChannelKey(
+      session.session_id,
+      session.attestation_document_b64,
+      this.opts.attestation,
+    );
     if (session.sealed_record_b64) {
       // The wallet already has a record. What it holds is the enclave's to say,
       // not the control plane's: a resumed Starknet enrolment installs this
@@ -139,7 +141,7 @@ export class SocialRecoveryClient {
         action: "confirm",
         credential: jobCredential(params.credential),
         sealed_record_b64: session.sealed_record_b64,
-        ...(params.dek ? { stellar_dek_b64: toB64(params.dek) } : {}),
+        ...(params.dek ? { stellar_dek_b64: bytesToBase64Url(params.dek) } : {}),
       });
       return { sessionId: session.session_id, result };
     }
@@ -147,7 +149,7 @@ export class SocialRecoveryClient {
       action: "enroll",
       credential: jobCredential(params.credential),
       policy: session.policy,
-      ...(params.dek ? { stellar_dek_b64: toB64(params.dek) } : {}),
+      ...(params.dek ? { stellar_dek_b64: bytesToBase64Url(params.dek) } : {}),
     });
     return { sessionId: session.session_id, result };
   }
@@ -167,14 +169,18 @@ export class SocialRecoveryClient {
       throw new Error("kit/social-recovery: enrollment record is missing");
     }
 
-    const channelKey = await this.verifiedChannelKey(session);
+    const channelKey = await verifiedChannelKey(
+      session.session_id,
+      session.attestation_document_b64,
+      this.opts.attestation,
+    );
     const result = await this.runJob(session.session_id, channelKey, {
       action: "recover",
       credential: jobCredential(params.credential),
       sealed_record_b64: session.sealed_record_b64,
       authorizations: params.authorizations ?? [],
       ...(params.recipientPublicSec1
-        ? { stellar_recipient_pubkey_b64: toB64(params.recipientPublicSec1) }
+        ? { stellar_recipient_pubkey_b64: bytesToBase64Url(params.recipientPublicSec1) }
         : {}),
     });
     return { sessionId: session.session_id, result };
@@ -210,62 +216,17 @@ export class SocialRecoveryClient {
     });
   }
 
-  /**
-   * Verify the enclave's attestation and return the channel key **from inside
-   * it**.
-   *
-   * This is the security boundary of the whole flow. The key is deliberately
-   * read out of the signed document rather than from the JSON field beside it:
-   * that way there is nothing to cross-check, because a relay that substituted
-   * a key it controls would have to produce an AWS-signed document containing
-   * it. `user_data` binds the document to this session, so a document minted
-   * for one session cannot be replayed as the answer to another.
-   */
-  private async verifiedChannelKey(session: StartedSession): Promise<Uint8Array> {
-    if (!session.attestation_document_b64) {
-      throw new Error("kit/social-recovery: the session carried no attestation");
-    }
-    const attestation = await verifyNitroAttestation(
-      fromB64(session.attestation_document_b64),
-      this.opts.attestation,
-    );
-
-    if (!attestation.publicKey) {
-      throw new Error("kit/social-recovery: the attestation carried no channel key");
-    }
-    const expectedBinding = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", utf8ToBytes(session.session_id) as unknown as BufferSource),
-    );
-    if (!attestation.userData || !bytesEqual(attestation.userData, expectedBinding)) {
-      throw new Error("kit/social-recovery: the attestation is not bound to this session");
-    }
-    return attestation.publicKey;
-  }
-
-  /** Encrypt the job to the attested key and return the enclave's result. */
   private async runJob(
     sessionId: string,
     channelKey: Uint8Array,
     job: unknown,
   ): Promise<SocialRecoveryResult> {
-    const { encrypted, openResult } = await encryptForEnclave(
-      sessionId,
-      channelKey,
-      utf8ToBytes(JSON.stringify(job)),
+    return runEnclaveJob<SocialRecoveryResult>(sessionId, channelKey, job, (encrypted) =>
+      this.fetchJson(`/api/recovery/social/sessions/${sessionId}/job`, {
+        method: "POST",
+        body: JSON.stringify(encrypted),
+      }),
     );
-    const response = await this.fetchJson(
-      `/api/recovery/social/sessions/${sessionId}/job`,
-      { method: "POST", body: JSON.stringify(encrypted) },
-    );
-    // Only the sealed copy is used. The plain `result` beside it is for the
-    // control plane to persist; everything on the way back here could rewrite
-    // it, and the sealed copy opens only under a key this client shares with
-    // the attested enclave.
-    const sealed = response?.sealed_result;
-    if (typeof sealed?.nonce_b64 !== "string" || typeof sealed?.ciphertext_b64 !== "string") {
-      throw new Error("kit/social-recovery: the enclave's answer was not authenticated");
-    }
-    return openResult(sealed);
   }
 
   private async fetchJson(path: string, init?: RequestInit): Promise<any> {
@@ -279,91 +240,6 @@ export class SocialRecoveryClient {
     }
     return response.json();
   }
-}
-
-/** Exported for its test; the client is the only caller. */
-export async function encryptForEnclave(
-  sessionId: string,
-  enclavePublicRaw: Uint8Array,
-  plaintext: Uint8Array,
-): Promise<{
-  encrypted: { client_public_key_b64: string; nonce_b64: string; ciphertext_b64: string };
-  /** Open the enclave's sealed answer to this job. */
-  openResult(sealed: { nonce_b64: string; ciphertext_b64: string }): Promise<SocialRecoveryResult>;
-}> {
-  const enclavePublic = await crypto.subtle.importKey(
-    "raw",
-    enclavePublicRaw as unknown as BufferSource,
-    { name: "ECDH", namedCurve: "P-256" },
-    false,
-    [],
-  );
-  const client = await crypto.subtle.generateKey(
-    { name: "ECDH", namedCurve: "P-256" },
-    false,
-    ["deriveBits"],
-  );
-  const shared = await crypto.subtle.deriveBits(
-    { name: "ECDH", public: enclavePublic },
-    client.privateKey,
-    256,
-  );
-  const hkdfKey = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  // One exchange, two keys: the request and the answer are sealed under
-  // different `info` so neither direction can be replayed as the other
-  // (RFC 9180 §9.8).
-  const channelKey = (info: string, usage: KeyUsage) =>
-    crypto.subtle.deriveKey(
-      {
-        name: "HKDF",
-        hash: "SHA-256",
-        salt: utf8ToBytes(sessionId) as unknown as BufferSource,
-        info: utf8ToBytes(info) as unknown as BufferSource,
-      },
-      hkdfKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      [usage],
-    );
-  const aes = await channelKey("cavos-confidential-channel-v1", "encrypt");
-  const responseKey = await channelKey("cavos-confidential-channel-v1/response", "decrypt");
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce as unknown as BufferSource,
-      additionalData: utf8ToBytes(sessionId) as unknown as BufferSource,
-    },
-    aes,
-    plaintext as unknown as BufferSource,
-  );
-  const clientPublic = new Uint8Array(
-    await crypto.subtle.exportKey("raw", client.publicKey),
-  );
-  return {
-    encrypted: {
-      client_public_key_b64: toB64(clientPublic),
-      nonce_b64: toB64(nonce),
-      ciphertext_b64: toB64(new Uint8Array(ciphertext)),
-    },
-    async openResult(sealed) {
-      let plaintext: ArrayBuffer;
-      try {
-        plaintext = await crypto.subtle.decrypt(
-          {
-            name: "AES-GCM",
-            iv: fromB64(sealed.nonce_b64) as unknown as BufferSource,
-            additionalData: utf8ToBytes(sessionId) as unknown as BufferSource,
-          },
-          responseKey,
-          fromB64(sealed.ciphertext_b64) as unknown as BufferSource,
-        );
-      } catch {
-        throw new Error("kit/social-recovery: the enclave's answer failed authentication");
-      }
-      return JSON.parse(bytesToUtf8(new Uint8Array(plaintext))) as SocialRecoveryResult;
-    },
-  };
 }
 
 /**
@@ -380,23 +256,4 @@ function jobCredential(credential: SocialRecoveryCredential) {
     token_fingerprint: credential.tokenFingerprint,
     ...(credential.noncePreimage ? { nonce_preimage: credential.noncePreimage } : {}),
   };
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let difference = 0;
-  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index];
-  return difference === 0;
-}
-
-function toB64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function fromB64(value: string): Uint8Array {
-  const normal = value.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(normal.padEnd(Math.ceil(normal.length / 4) * 4, "="));
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }

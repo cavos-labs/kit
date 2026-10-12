@@ -105,4 +105,10 @@ describe("NativeCavosAuth", () => {
     expect(() => auth.getSocialRecoveryCredential()).toThrow("fresh social login");
     expect(bridge.deleteKeys).not.toHaveBeenCalled();
   });
+
+  test("email sign-in refuses rather than skip enclave attestation", async () => {
+    const auth = new NativeCavosAuth({ appId: "app", redirectUri: "myapp://cb" });
+    await expect(auth.sendOtp("a@b.test")).rejects.toMatchObject({ code: "unsupported" });
+    await expect(auth.verifyOtp("a@b.test", "qpzry9x8g")).rejects.toMatchObject({ code: "unsupported" });
+  });
 });

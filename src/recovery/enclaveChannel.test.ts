@@ -1,4 +1,4 @@
-import { encryptForEnclave } from "./SocialRecoveryClient";
+import { encryptForEnclave } from "./enclaveChannel";
 
 /**
  * The enclave's side of the channel, in WebCrypto, to the same construction

@@ -5,8 +5,8 @@ import { requiresLoginBinding } from "./loginBinding";
 
 /**
  * `user.provider` is public API and the UI names it back to the user
- * ("Connected with Google"). A raw Google or Apple id_token carries neither
- * `provider` nor Firebase's `sign_in_provider`, so this used to resolve to the
+ * ("Connected with Google"). A raw Google or Apple id_token carries no
+ * `provider` claim, so this used to resolve to the
  * literal "oauth" — true, and useless to say out loud.
  */
 async function identityFrom(claims: Record<string, unknown>): Promise<{ provider?: string }> {
@@ -33,20 +33,9 @@ describe("provider from the credential", () => {
     expect(id.provider).toBe("apple");
   });
 
-  it("calls the Cavos-signed email token email, not firebase", async () => {
-    const id = await identityFrom({ iss: "https://cavos.app/firebase", sub: "u1" });
+  it("names the enclave's email token email", async () => {
+    const id = await identityFrom({ iss: "https://enclave.cavos.xyz", sub: "u1" });
     expect(id.provider).toBe("email");
-  });
-
-  it("passes Firebase's own sign-in provider through unchanged", async () => {
-    // Already public API — callers switch on "google.com", so normalising it
-    // here would be a silent breaking change. Display code normalises instead.
-    const id = await identityFrom({
-      iss: "https://securetoken.google.com/x",
-      sub: "u1",
-      firebase: { sign_in_provider: "google.com" },
-    });
-    expect(id.provider).toBe("google.com");
   });
 
   it("falls back rather than inventing a provider it cannot know", async () => {

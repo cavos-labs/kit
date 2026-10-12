@@ -10,7 +10,7 @@ import React, {
 import { Fingerprint } from '@phosphor-icons/react';
 import { useCavos } from './CavosProvider';
 import { useDismissibleSheet } from './useDismissibleSheet';
-import { emailModeFor } from './deviceAuthorization';
+import { EMAIL_CODE_LENGTH, normalizeEmailCode } from '../auth/emailCode';
 import { screenForAuthError } from './authErrorScreen';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -25,7 +25,6 @@ export interface CavosAuthModalProps {
    *  default Cavos star. Defaults to 40 (img) / 34 (star). */
   appLogoSize?: number;
   providers?: ('google' | 'apple' | 'email')[];
-  emailMode?: 'magic-link' | 'otp';
   primaryColor?: string;
   /** 'light' (default) or 'dark' */
   theme?: 'light' | 'dark';
@@ -97,8 +96,7 @@ function CavosStar({ size = 34 }: { size?: number }) {
 
 type Screen =
   | 'select'
-  | 'magic-link'
-  | 'verify'
+  | 'email'
   | 'otp-code'
   | 'deploying'
   | 'device-approval'
@@ -482,7 +480,6 @@ export function CavosAuthModal({
   appLogo,
   appLogoSize,
   providers = ['google', 'apple', 'email'],
-  emailMode: requestedEmailMode = 'magic-link',
   primaryColor = '#402AFF',
   theme = 'light',
   backgroundColor: backgroundColorProp,
@@ -493,7 +490,6 @@ export function CavosAuthModal({
   const {
     user,
     login,
-    sendMagicLink,
     sendOtp,
     verifyOtp,
     isAuthenticated,
@@ -511,7 +507,6 @@ export function CavosAuthModal({
     setupRecovery,
   } = useCavos();
   const isMobile = useIsMobile();
-  const emailMode = emailModeFor(deviceAuthorization, requestedEmailMode);
 
   // Theme-derived values
   const isLight = theme !== 'dark';
@@ -642,19 +637,16 @@ export function CavosAuthModal({
   const secureHandledRef = useRef(false);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // One ref per OTP box for focus management / auto-advance.
-  const otpBoxRefs = useRef<Array<HTMLInputElement | null>>([null, null, null, null, null, null]);
+  const otpBoxRefs = useRef<Array<HTMLInputElement | null>>(Array.from({ length: EMAIL_CODE_LENGTH }, () => null));
 
-  // Segmented OTP input helpers: keep `otpCode` (6-digit string) as the single
-  // source of truth, drive focus by index, and handle paste/keystrokes cleanly.
   const setOtpDigit = (i: number, raw: string) => {
-    const digit = raw.replace(/\D/g, '').slice(-1);
+    const digit = normalizeEmailCode(raw).slice(-1);
     setOtpCode(prev => {
       const chars = prev.split('');
-      while (chars.length < 6) chars.push('');
+      while (chars.length < EMAIL_CODE_LENGTH) chars.push('');
       chars[i] = digit;
-      const next = chars.join('').slice(0, 6);
-      // Auto-advance to the next empty box when a digit is typed.
-      if (digit && i < 5) {
+      const next = chars.join('').slice(0, EMAIL_CODE_LENGTH);
+      if (digit && i < EMAIL_CODE_LENGTH - 1) {
         const target = i + 1;
         otpBoxRefs.current[target]?.focus();
       }
@@ -670,19 +662,19 @@ export function CavosAuthModal({
     } else if (e.key === 'ArrowLeft' && i > 0) {
       otpBoxRefs.current[i - 1]?.focus();
       e.preventDefault();
-    } else if (e.key === 'ArrowRight' && i < 5) {
+    } else if (e.key === 'ArrowRight' && i < EMAIL_CODE_LENGTH - 1) {
       otpBoxRefs.current[i + 1]?.focus();
       e.preventDefault();
     }
   };
 
   const onOtpPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const text = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    const text = normalizeEmailCode(e.clipboardData.getData('text')).slice(0, EMAIL_CODE_LENGTH);
     if (!text) return;
     e.preventDefault();
     setOtpCode(text);
     // Focus the box after the last pasted digit (or the last box).
-    const focusIdx = Math.min(text.length, 5);
+    const focusIdx = Math.min(text.length, EMAIL_CODE_LENGTH - 1);
     otpBoxRefs.current[focusIdx]?.focus();
   };
 
@@ -758,7 +750,7 @@ export function CavosAuthModal({
   useEffect(() => {
     if (!open) return;
 
-    if (walletStatus.isDeploying && screen !== 'deploying' && screen !== 'verify') {
+    if (walletStatus.isDeploying && screen !== 'deploying') {
       setScreen('deploying');
       setDeployState('loading');
       doneHandledRef.current = false;
@@ -922,21 +914,6 @@ export function CavosAuthModal({
     }
   };
 
-  const handleMagicLinkSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email) return;
-    setError(''); setBusy(true);
-    try {
-      await sendMagicLink(email);
-      setScreen('verify');
-      setResendCountdown(60);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to send magic link.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleOtpRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
@@ -955,7 +932,7 @@ export function CavosAuthModal({
 
   const handleOtpVerifySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || otpCode.length !== 6) return;
+    if (!email || otpCode.length !== EMAIL_CODE_LENGTH) return;
     setError(''); setBusy(true);
     try {
       await verifyOtp(email, otpCode);
@@ -971,12 +948,8 @@ export function CavosAuthModal({
     if (resendCountdown > 0) return;
     setError('');
     try {
-      if (emailMode === 'otp') {
-        await sendOtp(email);
-        setOtpCode('');
-      } else {
-        await sendMagicLink(email);
-      }
+      await sendOtp(email);
+      setOtpCode('');
       setResendCountdown(60);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to resend.');
@@ -1290,9 +1263,7 @@ export function CavosAuthModal({
           return { name: 'Google', icon: <GoogleIcon size={40} /> };
         case 'apple':
           return { name: 'Apple', icon: <AppleIcon size={38} /> };
-        case 'password':
         case 'email':
-        case 'emailLink':
           return { name: 'email', icon: null };
         default:
           return { name: null, icon: null };
@@ -1397,38 +1368,6 @@ export function CavosAuthModal({
     );
   }
 
-  // ── Check your inbox ───────────────────────────────────────────────────────
-
-  if (screen === 'verify') {
-    return (
-      <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
-        <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
-          {isMobile && <div style={handle} />}
-          <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
-          <div style={{ padding: isMobile ? '28px 24px 32px' : '40px 24px 24px', textAlign: 'center' }}>
-            <div style={{ width: 48, height: 48, borderRadius: '50%', margin: '0 auto 16px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-              </svg>
-            </div>
-            <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>Check your inbox</h2>
-            <p style={{ margin: '0 0 22px', fontSize: '13px', color: subTextColor, lineHeight: 1.55 }}>
-              We sent a sign-in link to <strong style={{ color: textColor, fontWeight: 500 }}>{email}</strong>.<br />Open it on this device to continue.
-            </p>
-            {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '9px 13px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{error}</div>}
-            <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : primaryColor, color: resendCountdown > 0 ? subTextColor : '#fff', fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginBottom: '8px' }} onClick={handleResend} disabled={resendCountdown > 0}>
-              {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : 'Resend link'}
-            </button>
-            <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '8px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('magic-link'); setError(''); }}>
-              Use a different email
-            </button>
-          </div>
-          {renderFooter()}
-        </div>
-      </div>
-    );
-  }
-
   // ── OTP code entry ─────────────────────────────────────────────────────────
 
   if (screen === 'otp-code') {
@@ -1436,19 +1375,19 @@ export function CavosAuthModal({
       <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
         <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
           {isMobile && <div style={handle} />}
-          <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen('magic-link'); setError(''); setOtpCode(''); }} aria-label="Back">
+          <button className="cavos-close" style={{ ...close, left: '16px', right: 'auto' }} onClick={() => { setScreen('email'); setError(''); setOtpCode(''); }} aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
           </button>
           <button className="cavos-close" style={close} onClick={handleClose} aria-label="Close"><CloseX /></button>
           <div style={{ padding: isMobile ? '28px 22px 32px' : '52px 22px 22px', textAlign: 'center' }}>
             <h2 style={{ margin: '0 0 8px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em' }}>Enter your code</h2>
             <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, lineHeight: 1.5 }}>
-              We sent a 6-digit code to <strong style={{ color: textColor, fontWeight: 500 }}>{email}</strong>.
+              We sent a 9-character code to <strong style={{ color: textColor, fontWeight: 500 }}>{email}</strong>.
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: errColor, marginBottom: '14px', textAlign: 'left' }}>{error}</div>}
             <form onSubmit={handleOtpVerifySubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }} onPaste={onOtpPaste}>
-                {[0, 1, 2, 3, 4, 5].map(i => (
+                {Array.from({ length: EMAIL_CODE_LENGTH }, (_, i) => i).map(i => (
                   <input
                     key={i}
                     ref={el => { otpBoxRefs.current[i] = el; }}
@@ -1468,7 +1407,10 @@ export function CavosAuthModal({
                       textAlign: 'center',
                     }}
                     type="text"
-                    inputMode="numeric"
+                    inputMode="text"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     autoComplete={i === 0 ? 'one-time-code' : 'off'}
                     maxLength={1}
                     value={otpCode[i] ?? ''}
@@ -1480,7 +1422,7 @@ export function CavosAuthModal({
                   />
                 ))}
               </div>
-              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy || otpCode.length !== 6 ? 0.65 : 1 }} disabled={busy || otpCode.length !== 6}>
+              <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy || otpCode.length !== EMAIL_CODE_LENGTH ? 0.65 : 1 }} disabled={busy || otpCode.length !== EMAIL_CODE_LENGTH}>
                 {busy && <Spinner size={15} color="#fff" />}
                 {busy ? 'Verifying…' : 'Continue'}
               </button>
@@ -1488,7 +1430,7 @@ export function CavosAuthModal({
             <button className="cavos-primary-btn" style={{ width: '100%', padding: '12px', borderRadius: `${btnRadius}px`, border: 'none', background: resendCountdown > 0 ? (isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)') : 'transparent', color: resendCountdown > 0 ? subTextColor : primaryColor, fontSize: '14px', fontWeight: 500, cursor: resendCountdown > 0 ? 'default' : 'pointer', fontFamily: 'inherit', transition: 'opacity 0.15s', marginTop: '8px' }} onClick={handleResend} disabled={resendCountdown > 0 || busy}>
               {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : 'Resend code'}
             </button>
-            <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '8px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('magic-link'); setError(''); setOtpCode(''); }}>
+            <button className="cavos-sub-btn" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: subTextColor, width: '100%', textAlign: 'center', padding: '8px 0 0', fontFamily: 'inherit', transition: 'color 0.15s' }} onClick={() => { setScreen('email'); setError(''); setOtpCode(''); }}>
               Use a different email
             </button>
           </div>
@@ -1500,8 +1442,7 @@ export function CavosAuthModal({
 
   // ── Email form ─────────────────────────────────────────────────────────────
 
-  if (screen === 'magic-link') {
-    const isOtp = emailMode === 'otp';
+  if (screen === 'email') {
     return (
       <div className="cavos-root cavos-overlay" style={overlay} data-cavos-theme={theme} role="dialog" aria-modal onClick={e => { if (e.target === e.currentTarget) handleClose(); }}>
         <div className="cavos-root cavos-card" style={{ ...card, position: 'relative', touchAction: sheet.draggable ? 'none' : undefined }} onAnimationEnd={e => { if (exiting && !sheet.draggable && e.target === e.currentTarget) finishClose(); }} {...sheet.handlers}>
@@ -1513,14 +1454,14 @@ export function CavosAuthModal({
           <div style={{ padding: isMobile ? '28px 22px 32px' : '52px 22px 22px' }}>
             <h2 style={{ margin: '0 0 6px', fontSize: '17px', fontWeight: 600, color: textColor, letterSpacing: '-0.02em', textAlign: 'center' }}>Sign in with email</h2>
             <p style={{ margin: '0 0 20px', fontSize: '13px', color: subTextColor, textAlign: 'center', lineHeight: 1.5 }}>
-              {isOtp ? "We'll send a secure sign-in code to your inbox." : "We'll send a secure sign-in link to your inbox."}
+              We'll send a secure sign-in code to your inbox.
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: errColor, marginBottom: '14px' }}>{error}</div>}
-            <form onSubmit={isOtp ? handleOtpRequestSubmit : handleMagicLinkSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <form onSubmit={handleOtpRequestSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <input className="cavos-input-inner" style={{ width: '100%', padding: '12px 14px', border: inputBorder, borderRadius: `${btnRadius}px`, fontSize: '14px', color: textColor, background: inputBg, fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color 0.15s' }} type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} required disabled={busy} autoFocus />
               <button type="submit" className="cavos-primary-btn" style={{ width: '100%', padding: '12px', marginTop: '4px', borderRadius: `${btnRadius}px`, border: 'none', background: primaryColor, color: '#fff', fontSize: '14px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', transition: 'opacity 0.15s, transform 0.1s', opacity: busy ? 0.65 : 1 }} disabled={busy}>
                 {busy && <Spinner size={15} color="#fff" />}
-                {busy ? 'Sending…' : (isOtp ? 'Send code' : 'Send magic link')}
+                {busy ? 'Sending…' : 'Send code'}
               </button>
             </form>
           </div>
@@ -1599,7 +1540,7 @@ export function CavosAuthModal({
             )}
 
             {showEmail && (
-              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => { rememberProvider('email'); setScreen('magic-link'); }} disabled={busy}>
+              <button className="cavos-provider" style={{ ...pBtn, cursor: busy ? 'not-allowed' : 'pointer' }} onClick={() => { rememberProvider('email'); setScreen('email'); }} disabled={busy}>
                 {btnIcon(<EmailIcon />, <Spinner size={14} color={primaryColor} />, primaryColor)}
                 <span>Continue with email</span>
               </button>

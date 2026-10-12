@@ -1,10 +1,12 @@
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToBase64Url, utf8ToBytes } from "../crypto/encoding";
+import { ENCLAVE_EMAIL_ISSUER } from "../recovery/SocialRecoveryCredential";
 
 /**
  * Binding a provider token to the login that asked for it.
  *
- * Google and Apple sign one value the client chooses: the `nonce`. The kit
+ * Google, Apple and the enclave's email token sign one value the client
+ * chooses: the `nonce`. The kit
  * sends the hash of a secret it keeps; the Cavos backend prefixes the app, so
  * the token carries `<app_id>.<base64url(SHA-256(secret))>`. The recovery
  * enclave then only accepts the token together with the secret, which never
@@ -25,12 +27,13 @@ export function loginNonce(secret: string): string {
   return bytesToBase64Url(sha256(utf8ToBytes(secret)));
 }
 
-/** Google and Apple tokens carry a nonce this login chose; email tokens do not. */
+/** Google, Apple and enclave email tokens all carry a nonce this login chose. */
 export function requiresLoginBinding(issuer: unknown): boolean {
   return (
     issuer === "https://accounts.google.com" ||
     issuer === "accounts.google.com" ||
-    issuer === "https://appleid.apple.com"
+    issuer === "https://appleid.apple.com" ||
+    issuer === ENCLAVE_EMAIL_ISSUER
   );
 }
 

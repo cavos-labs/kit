@@ -8,7 +8,7 @@ import { loginNonce } from "./loginBinding";
  * `identityFromAuthData` — it only base64-decodes the JWT payload and projects
  * claims onto an `Identity`. These tests lock in that projection, especially
  * the optional `name` claim (present on Google's id_token, absent on the
- * Cavos-signed Firebase JWT used by email/OTP/magic-link).
+ * enclave-issued token used by email login).
  */
 
 // Build a JWT-shaped string from an arbitrary claims object. Only the payload
@@ -60,34 +60,30 @@ describe("CavosAuth.handleCallback -> Identity", () => {
         sub: "google-user-123",
         email: "ada@example.com",
         name: "Ada Lovelace",
-        firebase: { sign_in_provider: "google.com" },
       }),
     );
     expect(id.userId).toBe("google-user-123");
     expect(id.email).toBe("ada@example.com");
     expect(id.name).toBe("Ada Lovelace");
-    expect(id.provider).toBe("google.com");
+    expect(id.provider).toBe("google");
   });
 
-  it("yields name: undefined when the token has no `name` claim (Cavos Firebase JWT)", async () => {
-    // Mirrors the 5-field payload cavos-web/lib/firebase-jwt.ts actually mints
-    // for email/OTP/magic-link — no `name`.
+  it("yields name: undefined when the token has no `name` claim (enclave email token)", async () => {
     const auth = new CavosAuth();
     const id = await auth.handleCallback(
       jwt({
-        iss: "https://cavos.xyz",
-        sub: "firebase-uid-456",
+        iss: "https://enclave.cavos.xyz",
+        sub: "email-subject-456",
         email: "anon@example.com",
-        nonce: "n-0",
+        nonce: await beginLogin(auth),
         iat: 1_700_000_000,
         exp: 1_700_003_600,
-        firebase: { sign_in_provider: "password" },
       }),
     );
-    expect(id.userId).toBe("firebase-uid-456");
+    expect(id.userId).toBe("email-subject-456");
     expect(id.email).toBe("anon@example.com");
     expect(id.name).toBeUndefined();
-    expect(id.provider).toBe("password");
+    expect(id.provider).toBe("email");
   });
 
   it("accepts ?auth_data=<jwt> callback strings", async () => {
