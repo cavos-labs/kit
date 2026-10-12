@@ -1386,19 +1386,21 @@ export function CavosAuthModal({
             </p>
             {error && <div style={{ background: errBg, border: `1px solid ${errBorder}`, borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: errColor, marginBottom: '14px', textAlign: 'left' }}>{error}</div>}
             <form onSubmit={handleOtpVerifySubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }} onPaste={onOtpPaste}>
+              <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', width: '100%' }} onPaste={onOtpPaste}>
                 {Array.from({ length: EMAIL_CODE_LENGTH }, (_, i) => i).map(i => (
                   <input
                     key={i}
                     ref={el => { otpBoxRefs.current[i] = el; }}
                     className={`cavos-input-inner cavos-otp-box ${otpCode[i] ? 'cavos-otp-box-filled' : ''}`}
                     style={{
-                      width: '44px',
-                      height: '52px',
+                      flex: '1 1 0',
+                      minWidth: 0,
+                      maxWidth: '44px',
+                      height: '48px',
                       padding: 0,
                       border: inputBorder,
-                      borderRadius: `${btnRadius}px`,
-                      fontSize: '22px',
+                      borderRadius: `${Math.min(btnRadius, 10)}px`,
+                      fontSize: '20px',
                       fontWeight: 600,
                       color: textColor,
                       background: inputBg,
