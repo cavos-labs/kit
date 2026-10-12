@@ -21,11 +21,7 @@ import type { AttestationPolicy } from "./SocialRecoveryClient";
  */
 export const DEFAULT_SOCIAL_RECOVERY_ATTESTATION: AttestationPolicy = {
   pcr0: [
-    // 2026-10-11 — the enclave that binds a token to the app and the login,
-    // and seals its answers. Deployed, and read back from the running enclave
-    // on the host. It is the only measurement accepted: this release reads the
-    // sealed answer, which no earlier enclave produces, so there is no older
-    // image it could work with.
+    "f388b0bf627bdad34968ebab083688b999da2aaa369a65323a3085725de0fc79d7cf0fab6527d57e06b4b10950a150f9",
     "5ec163560006f105b5448c2db77ecf5ec442e00abd475f65349d6d93e837279652708770c50b3aa2e8676f553f572825",
   ],
 };
