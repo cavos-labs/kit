@@ -12,13 +12,12 @@ import type { Identity } from "../auth/AuthProvider";
 import type { Chain, CavosWallet, NetworkEnv } from "../Cavos";
 import type { ChainCall, ExecuteOptions } from "../chains/ChainAdapter";
 import type { MessageSignature } from "../signing";
-import { generateRecoveryCode } from "../recovery/BackupSigner";
-import { HttpRecoveryClient } from "../recovery/HttpRecoveryClient";
+import { generateRecoveryCode } from "../recovery/recoveryCode";
 import { Cavos, type NativeConnectOptions } from "./CavosNative";
 import { NativeCavosAuth } from "./NativeCavosAuth";
-import { NativePasskeyPrf, NativePasskeySigner } from "./NativePasskeys";
+import { NativePasskeyPrf } from "./NativePasskeys";
 import { nativeModule, type NativeCapabilities } from "./NativeModule";
-import type { MinimumKeySecurity } from "./NativeDeviceSigner";
+import type { MinimumKeySecurity } from "./NativeDeviceUnwrapKey";
 import { CavosAuthModal } from "./CavosAuthModal";
 
 export interface CavosConfig {
@@ -47,8 +46,6 @@ export interface WalletStatus {
   isDeploying: boolean;
   isReady: boolean;
   needsDeviceApproval: boolean;
-  awaitingApproval: boolean;
-  pendingRequestId: string | null;
   hasPasskey: boolean;
   isNewAccount: boolean;
 }
@@ -57,8 +54,6 @@ const INITIAL_STATUS: WalletStatus = {
   isDeploying: false,
   isReady: false,
   needsDeviceApproval: false,
-  awaitingApproval: false,
-  pendingRequestId: null,
   hasPasskey: false,
   isNewAccount: false,
 };
@@ -86,7 +81,6 @@ export interface CavosContextValue {
   approveDeviceWithPasskey(): Promise<void>;
   setupRecovery(): Promise<string>;
   recover(code: string): Promise<void>;
-  resendDeviceApproval(): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -109,7 +103,7 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
   const [modalOpen, setModalOpen] = useState(false);
   const [capabilities, setCapabilities] = useState<NativeCapabilities | null>(null);
 
-  const connect = useCallback(async (id: Identity): Promise<CavosWallet> => {
+  const connect = useCallback(async (id: Identity, connectOpts?: { passkey?: boolean }): Promise<CavosWallet> => {
     const cfg = configRef.current;
     setStatus({ ...INITIAL_STATUS, isDeploying: true });
     const opts: NativeConnectOptions = {
@@ -123,21 +117,21 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
       rpcUrl: cfg.rpcUrl,
       paymasterApiKey: cfg.paymasterApiKey,
       minimumKeySecurity: cfg.minimumKeySecurity,
+      ...(connectOpts?.passkey
+        ? { passkeyPrf: new NativePasskeyPrf({ rpId: cfg.rpId, rpName: modal?.appName ?? "Cavos" }) }
+        : {}),
     };
     const next = await Cavos.connect(opts);
     let hasPasskey = false;
     if (next.status === "needs-device-approval") {
       try { hasPasskey = await next.hasPasskey(); } catch { /* factor is optional */ }
     }
-    const pendingRequestId = next.chain === "starknet" ? next.pendingRequestId : null;
     setWallet(next);
     setIdentity(id);
     setStatus({
       isDeploying: false,
       isReady: next.status === "ready",
       needsDeviceApproval: next.status === "needs-device-approval",
-      awaitingApproval: next.status === "needs-device-approval" && !!pendingRequestId,
-      pendingRequestId,
       hasPasskey,
       isNewAccount: next.isNewAccount,
     });
@@ -198,39 +192,31 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
 
   const enrollPasskeyDefault = useCallback(async () => {
     if (!wallet || !identity || wallet.status !== "ready") throw new Error("kit/native: ready wallet required");
-    const rpName = modal?.appName ?? "Cavos";
-    if (wallet.chain === "stellar") {
-      const passkey = new NativePasskeyPrf({ rpId: config.rpId, rpName });
-      const result = await passkey.enroll({
-        userId: identity.userId,
-        userName: identity.email ?? identity.userId,
-      });
-      await wallet.enrollPasskey(result.secret ?? await passkey.getSecret());
-    } else {
-      const passkey = new NativePasskeySigner({ rpId: config.rpId, rpName });
-      await wallet.enrollPasskey(passkey, {
-        userId: identity.userId,
-        userName: identity.email ?? identity.userId,
-      });
+    if (wallet.chain !== "stellar") {
+      throw new Error("kit/native: adding a passkey is not available on Solana and Starknet in React Native yet");
     }
+    const passkey = new NativePasskeyPrf({ rpId: config.rpId, rpName: modal?.appName ?? "Cavos" });
+    const result = await passkey.enroll({
+      userId: identity.userId,
+      userName: identity.email ?? identity.userId,
+    });
+    await wallet.enrollPasskey(result.secret ?? await passkey.getSecret());
   }, [wallet, identity, modal?.appName, config.rpId]);
 
   const approveDeviceWithPasskey = useCallback(async () => {
     if (!wallet || !identity) throw new Error("kit/native: sign in first");
-    const rpName = modal?.appName ?? "Cavos";
-    if (wallet.chain === "stellar") {
-      const passkey = new NativePasskeyPrf({ rpId: config.rpId, rpName });
+    if (wallet.chain === "stellar" && !wallet.nativeDek) {
+      const passkey = new NativePasskeyPrf({ rpId: config.rpId, rpName: modal?.appName ?? "Cavos" });
       await wallet.approveThisDeviceWithPasskey(await passkey.getSecret());
-    } else {
-      const passkey = new NativePasskeySigner({ rpId: config.rpId, rpName });
-      if (wallet.chain === "starknet") await wallet.approveThisDeviceWithPasskey({ passkey });
-      else await wallet.approveThisDeviceWithPasskey(passkey);
+      await connect(identity);
+      return;
     }
-    await connect(identity);
+    await connect(identity, { passkey: true });
   }, [wallet, identity, modal?.appName, config.rpId, connect]);
 
   const setupRecovery = useCallback(async () => {
     if (!wallet) throw new Error("kit/native: not connected");
+    if (wallet.chain !== "stellar") throw new Error("kit/native: recovery codes are Stellar-only");
     const code = generateRecoveryCode();
     await wallet.setupRecovery(code);
     return code;
@@ -239,81 +225,21 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
   const recover = useCallback(async (code: string) => {
     if (!identity) throw new Error("kit/native: sign in before recovery");
     const cfg = configRef.current;
-    let next: CavosWallet;
-    if ((cfg.chain ?? "starknet") === "solana") {
-      next = await Cavos.connect({
-        chain: "solana",
-        network: cfg.network,
-        identity,
-        appSalt: cfg.appSalt,
-        appId: cfg.appId,
-        environment: cfg.environment,
-        backendUrl: cfg.authBackendUrl,
-        rpcUrl: cfg.rpcUrl,
-        minimumKeySecurity: cfg.minimumKeySecurity,
-      });
-    } else if (cfg.chain === "stellar") {
-      next = await Cavos.connect({
-        chain: "stellar", network: cfg.network, identity, appSalt: cfg.appSalt,
-        appId: cfg.appId, environment: cfg.environment, backendUrl: cfg.authBackendUrl,
-        minimumKeySecurity: cfg.minimumKeySecurity,
-      });
-      if (next.chain === "stellar" && next.status === "needs-device-approval") {
-        await next.approveThisDeviceWithRecovery(code);
-      }
-    } else {
-      next = await Cavos.recover({
-        code, identity, network: cfg.network, appSalt: cfg.appSalt,
-        appId: cfg.appId, environment: cfg.environment, backendUrl: cfg.authBackendUrl,
-        rpcUrl: cfg.rpcUrl, paymasterApiKey: cfg.paymasterApiKey ?? "",
-        minimumKeySecurity: cfg.minimumKeySecurity,
-      });
+    if (cfg.chain !== "stellar") {
+      await connect(identity);
+      return;
+    }
+    const next = await Cavos.connect({
+      chain: "stellar", network: cfg.network, identity, appSalt: cfg.appSalt,
+      appId: cfg.appId, environment: cfg.environment, backendUrl: cfg.authBackendUrl,
+      minimumKeySecurity: cfg.minimumKeySecurity,
+    });
+    if (next.chain === "stellar" && next.status === "needs-device-approval") {
+      await next.approveThisDeviceWithRecovery(code);
     }
     setWallet(next);
     setStatus({ ...INITIAL_STATUS, isReady: true });
-  }, [identity]);
-
-  const resendDeviceApproval = useCallback(async () => {
-    if (!wallet || !identity || !status.pendingRequestId) return;
-    if (wallet.chain !== "starknet") return;
-    const cfg = configRef.current;
-    await new HttpRecoveryClient({
-      baseUrl: cfg.authBackendUrl ?? "https://cavos.xyz",
-      appId: cfg.appId,
-      environment: cfg.environment,
-    }).requestDeviceAddition({
-      userId: identity.userId,
-      accountAddress: wallet.address,
-      newSigner: wallet.publicKey,
-      ...(identity.email ? { email: identity.email } : {}),
-    });
-  }, [wallet, identity, status.pendingRequestId]);
-
-  useEffect(() => {
-    if (!status.awaitingApproval || !status.pendingRequestId || !identity || !config.appId) return;
-    const recovery = new HttpRecoveryClient({
-      baseUrl: config.authBackendUrl ?? "https://cavos.xyz",
-      appId: config.appId,
-      environment: config.environment,
-    });
-    const requestId = status.pendingRequestId;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const pending = await recovery.getPendingRequest(requestId);
-        if (cancelled || !pending) return;
-        if (pending.status === "expired") {
-          setStatus((current) => ({ ...current, awaitingApproval: false, pendingRequestId: null }));
-        } else if (pending.status === "approved") {
-          await connect(identity);
-        }
-      } catch { /* retry transient failures on the next interval */ }
-    };
-    void tick();
-    const interval = setInterval(tick, 4000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [status.awaitingApproval, status.pendingRequestId, identity, config.appId,
-    config.authBackendUrl, config.environment, connect]);
+  }, [identity, connect]);
 
   const logout = useCallback(async () => {
     await auth.clearStoredIdentity();
@@ -330,7 +256,7 @@ export function CavosProvider(props: { config: CavosConfig; modal?: CavosModalCo
     isLoading, authError, clearAuthError: () => setAuthError(null), login,
     sendOtp,
     verifyOtp, handleCallback, execute, signMessage, enrollPasskeyDefault,
-    approveDeviceWithPasskey, setupRecovery, recover, resendDeviceApproval, logout,
+    approveDeviceWithPasskey, setupRecovery, recover, logout,
   };
 
   return <Context.Provider value={value}>

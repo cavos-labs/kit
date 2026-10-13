@@ -55,18 +55,19 @@ export function CavosAuthModal({ open, onClose, config }: CavosAuthModalProps) {
         </View> : null}
 
         {approval && !busy ? <View style={styles.stack}>
-          <Text style={styles.body}>This is a new device. Approve it with your passkey, recovery code, or another authorized device.</Text>
+          <Text style={styles.body}>This is a new device. Restore it with your passkey{cavos.chain === "stellar" ? " or recovery code" : ""}.</Text>
           {cavos.capabilities?.passkey ? <Button color={color} label="Approve with passkey" onPress={() => run(cavos.approveDeviceWithPasskey)} /> : null}
-          <TextInput style={styles.input} value={recoveryCode} onChangeText={setRecoveryCode} autoCapitalize="characters" placeholder="Recovery code" />
-          <Button color={color} label="Recover this device" onPress={() => run(() => cavos.recover(recoveryCode))} />
-          {cavos.walletStatus.awaitingApproval ? <Button color={color} label="Resend approval" onPress={() => run(cavos.resendDeviceApproval)} /> : null}
+          {cavos.chain === "stellar" ? <>
+            <TextInput style={styles.input} value={recoveryCode} onChangeText={setRecoveryCode} autoCapitalize="characters" placeholder="Recovery code" />
+            <Button color={color} label="Recover this device" onPress={() => run(() => cavos.recover(recoveryCode))} />
+          </> : null}
         </View> : null}
 
         {ready && !busy ? <View style={styles.stack}>
           <Text style={styles.body}>Wallet ready: {cavos.address}</Text>
           { (config.secureStep === "optional" || config.secureStep === "required") && cavos.walletStatus.isNewAccount ? <>
-            {cavos.capabilities?.passkey ? <Button color={color} label="Secure with passkey" onPress={() => run(cavos.enrollPasskeyDefault)} /> : null}
-            <Button color={color} label="Create recovery code" onPress={() => run(async () => setGeneratedRecoveryCode(await cavos.setupRecovery()))} />
+            {cavos.chain === "stellar" && cavos.capabilities?.passkey ? <Button color={color} label="Secure with passkey" onPress={() => run(cavos.enrollPasskeyDefault)} /> : null}
+            {cavos.chain === "stellar" ? <Button color={color} label="Create recovery code" onPress={() => run(async () => setGeneratedRecoveryCode(await cavos.setupRecovery()))} /> : null}
             {generatedRecoveryCode ? <Text selectable style={styles.recovery}>{generatedRecoveryCode}</Text> : null}
           </> : null}
           <Button color={color} label="Done" onPress={onClose} />

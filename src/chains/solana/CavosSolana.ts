@@ -6,14 +6,12 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 import type { AuthProvider, Identity } from "../../auth/AuthProvider";
-import type { DevicePublicKey } from "../../signer/DeviceSigner";
 import type { WalletRegistry } from "../../registry/WalletRegistry";
 import { InMemoryWalletRegistry } from "../../registry/WalletRegistry";
 import { HttpWalletRegistry } from "../../registry/HttpWalletRegistry";
-import { appNamespace } from "../../identity";
 import { SolanaRelayer } from "./SolanaRelayer";
 import { SOLANA_NETWORKS, type SolanaNetwork } from "./constants";
-import type { PasskeyApprover, PasskeyEnrollParams, PasskeyPrfProvider } from "../../signer/PasskeyProvider";
+import type { PasskeyPrfProvider } from "../../signer/PasskeyProvider";
 import { resolveFeeMode, type SolanaExecuteOptions } from "../../chains/ChainAdapter";
 import { utf8ToBytes } from "../../crypto/encoding";
 import type { MessageSignature, SolanaSignedTransaction } from "../../signing";
@@ -78,7 +76,6 @@ export class CavosSolana {
   readonly identity: Identity;
   readonly address: string;
   readonly connection: Connection;
-  pendingRequestId: string | null = null;
   isNewAccount = false;
   onAuthorizationNeeded?: () => Promise<void>;
   private statusValue: ConnectStatus;
@@ -156,7 +153,6 @@ export class CavosSolana {
       );
     }
     const connection = new Connection(opts.rpcUrl ?? SOLANA_NETWORKS[opts.network], "confirmed");
-    const namespace = appNamespace({ appId: opts.appId ?? "local", environmentId: opts.environment });
     const backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     const registry =
       opts.registry ??
@@ -204,7 +200,6 @@ export class CavosSolana {
           }),
         });
 
-    void namespace;
     void registry;
     const wallet = new CavosSolana({
       identity,
@@ -221,53 +216,6 @@ export class CavosSolana {
     return wallet;
   }
 
-  async addSigner(_pubkey: DevicePublicKey): Promise<string> {
-    throw new Error("kit/solana: a native account has one spend key");
-  }
-
-  async removeSigner(_pubkey: DevicePublicKey): Promise<string> {
-    throw new Error("kit/solana: a native account has one spend key");
-  }
-
-  async pendingSocialRecovery(): Promise<null> {
-    return null;
-  }
-
-  async pendingRecoveryIsForThisDevice(): Promise<boolean> {
-    return false;
-  }
-
-  async enrollSocialRecovery(): Promise<{ transactionHash: string }> {
-    throw new Error("kit/solana: native accounts enroll the DEK at connect");
-  }
-
-  async socialRecoveryNonce(): Promise<bigint> {
-    throw new Error("kit/solana: native accounts have no on-chain recovery nonce");
-  }
-
-  async scheduleSocialRecovery(): Promise<{ transactionHash: string }> {
-    throw new Error("kit/solana: native accounts restore by connecting");
-  }
-
-  async finalizeSocialRecovery(): Promise<{ transactionHash: string }> {
-    throw new Error("kit/solana: native accounts restore by connecting");
-  }
-
-  async enrollPasskey(
-    _passkey: PasskeyApprover,
-    _params: PasskeyEnrollParams,
-  ): Promise<{ publicKey: DevicePublicKey; transactionHash?: string }> {
-    throw new Error("kit/solana: a passkey derives the spend key at connect; it is not an on-chain approver");
-  }
-
-  async addApprover(_pubkey: DevicePublicKey): Promise<{ transactionHash?: string }> {
-    throw new Error("kit/solana: a native account has one spend key");
-  }
-
-  async isApprover(_pubkey: DevicePublicKey): Promise<boolean> {
-    return false;
-  }
-
   async hasPasskey(): Promise<boolean> {
     return this.passkeyRestore;
   }
@@ -281,10 +229,6 @@ export class CavosSolana {
     if (!this.spend) return false;
     this.setStatus("ready");
     return true;
-  }
-
-  async approveThisDeviceWithPasskey(_passkey: PasskeyApprover): Promise<string> {
-    throw new Error("kit/solana: restore this device by connecting with your passkey");
   }
 
   async execute(amount: bigint, destination: string, opts?: SolanaExecuteOptions): Promise<string> {
@@ -342,10 +286,6 @@ export class CavosSolana {
     const message = tx.serializeMessage();
     const signature = await spend.signTransaction(message);
     return { chain: "solana", message, signature, publicKey: spend.publicKeyRaw() };
-  }
-
-  async setupRecovery(_code: string): Promise<string | undefined> {
-    return undefined;
   }
 
   private requireSpend(): Ed25519SpendSigner {
@@ -430,10 +370,6 @@ export class CavosSolana {
       quote.quote,
       tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
     );
-  }
-
-  static async recover(): Promise<CavosSolana> {
-    throw new Error("kit/solana: native accounts restore by connecting with the enclave or a passkey");
   }
 }
 

@@ -7,7 +7,7 @@ import { WebCryptoDeviceUnwrapKey } from "../chains/stellar/WebCryptoDeviceUnwra
 import { HttpPasskeyWrapStore, type PasskeyWrapStore } from "../registry/PasskeyWrapStore";
 import type { PasskeyPrfProvider } from "../signer/PasskeyProvider";
 import { addressIndexFromRegistry } from "./addressIndex";
-import { deriveSeed, parseAppSalt, type Ed25519Chain } from "./derive";
+import { deriveSeed, parseAppSalt, type NativeChain } from "./derive";
 import { ensureEnclave, NO_WRAP_SOURCE } from "./DeviceSecret";
 import type { DeviceFactor, EnclaveDekPort, WrapStore } from "./DeviceSecret";
 import { deviceFactorFromUnwrapKey } from "./factor";
@@ -16,8 +16,8 @@ import { toPasskeyDekPort } from "./PasskeyDekPort";
 import { zeroize, type Ed25519Seed } from "./dek";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
 
-export interface ResolveNativeEd25519Input<S extends { address(): string } = Ed25519SpendSigner> {
-  chain: Ed25519Chain;
+export interface ResolveNativeInput<S extends { address(): string } = Ed25519SpendSigner> {
+  chain: NativeChain;
   identity: Identity;
   appSalt: string;
   registry: WalletRegistry;
@@ -64,8 +64,8 @@ function localOnlyDekPort(): EnclaveDekPort {
   };
 }
 
-export async function resolveNativeEd25519<S extends { address(): string } = Ed25519SpendSigner>(
-  input: ResolveNativeEd25519Input<S>,
+export async function resolveNative<S extends { address(): string } = Ed25519SpendSigner>(
+  input: ResolveNativeInput<S>,
 ): Promise<{ address: string; spend: S | null; isNewAccount: boolean }> {
   const appSalt = parseAppSalt(input.appSalt);
   const scoped = (id: string) => (input.keyScope ? `${input.keyScope}|${id}` : id);
@@ -154,7 +154,7 @@ export function passkeyRestoreInput(opts: {
   backendUrl: string;
   environment?: "development" | "production";
   authToken: () => string | null;
-}): Pick<ResolveNativeEd25519Input, "passkey" | "passkeyWraps" | "appId"> {
+}): Pick<ResolveNativeInput, "passkey" | "passkeyWraps" | "appId"> {
   if (!opts.passkey || !opts.appId) return {};
   return {
     passkey: opts.passkey,
@@ -168,7 +168,7 @@ export function passkeyRestoreInput(opts: {
   };
 }
 
-function recoveryCredential(input: ResolveNativeEd25519Input<{ address(): string }>): SocialRecoveryCredential {
+function recoveryCredential(input: ResolveNativeInput<{ address(): string }>): SocialRecoveryCredential {
   if (input.credential) return input.credential;
   if (input.passkey && !input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
   if (!input.socialRecovery && !input.recovery) return PASSKEY_CREDENTIAL;
@@ -177,7 +177,7 @@ function recoveryCredential(input: ResolveNativeEd25519Input<{ address(): string
   );
 }
 
-function dekPort(input: ResolveNativeEd25519Input<{ address(): string }>): EnclaveDekPort {
+function dekPort(input: ResolveNativeInput<{ address(): string }>): EnclaveDekPort {
   if (input.recovery) return input.recovery;
   if (input.socialRecovery) return toEnclaveDekPort(input.socialRecovery);
   if (input.passkey) {
