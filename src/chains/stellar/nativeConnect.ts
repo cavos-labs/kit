@@ -1,18 +1,18 @@
 import { WebCryptoControlKey, type ControlKey } from "./WebCryptoControlKey";
 import {
-  resolveNativeEd25519,
-  type ResolveNativeEd25519Input,
+  resolveNative,
+  type ResolveNativeInput,
 } from "../../secret/nativeAccount";
 import type { Ed25519Seed } from "../../secret/dek";
 
-export type ResolveNativeStellarInput = Omit<ResolveNativeEd25519Input, "chain" | "importSpend" | "loadPersisted">;
+export type ResolveNativeStellarInput = Omit<ResolveNativeInput, "chain" | "importSpend" | "loadPersisted">;
 
 type StellarSpend = { address(): string; control: ControlKey };
 
 export async function resolveNativeStellar(
   input: ResolveNativeStellarInput,
 ): Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }> {
-  const native = await resolveNativeEd25519<StellarSpend>({
+  const native = await resolveNative<StellarSpend>({
     ...input,
     chain: "stellar",
     loadPersisted: async (keyId) => {

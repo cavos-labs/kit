@@ -9,29 +9,31 @@
  * returning the signed artifact a relayer/backend can broadcast later.
  */
 
+import type { TypedData } from "starknet";
 import { utf8ToBytes } from "./crypto/encoding";
 
 /** Curve a signature was produced with. Determines how a verifier checks it. */
-export type SignatureCurve = "secp256r1" | "ed25519";
+export type SignatureCurve = "secp256r1" | "ed25519" | "stark";
 
 /**
- * Result of `wallet.signMessage(message)`. The signature is over
- * `sha256(prefixedMessage)` for secp256r1 chains (Starknet, Solana) and over
- * the raw message bytes for the ed25519 control key (Stellar). `publicKey` is
- * the string a verifier needs to confirm ownership:
- *  - Starknet: uncompressed hex `04‖x‖y` of the device P-256 key.
+ * Result of `wallet.signMessage(message)`. The signature is over the SNIP-12
+ * typed-data hash for Starknet (stark curve) and over `prefixedMessageBytes`
+ * for the Ed25519 keys of Solana and Stellar. `publicKey` is the string a verifier needs to confirm ownership:
+ *  - Starknet: the stark public key (hex) the account was deployed with.
  *  - Solana: the system-account address (ed25519).
  *  - Stellar: the `G…` control address (ed25519).
  *
  * Check `curve` to know which verification path to use.
  */
 export interface MessageSignature {
-  /** Chain-native signature bytes (64 bytes for both secp256r1 r‖s and ed25519). */
+  /** Chain-native signature bytes (64 bytes: stark r‖s, or ed25519). */
   signature: Uint8Array;
   /** Verifier input: the key/address that owns this wallet's signing authority. */
   publicKey: string;
   /** Curve used to produce the signature. */
   curve: SignatureCurve;
+  /** The SNIP-12 typed data that was signed (Starknet). */
+  typedData?: TypedData;
 }
 
 /**
@@ -48,12 +50,12 @@ export type SignedTransaction =
   | StellarSignedTransaction
   | SolanaSignedTransaction;
 
-/** Starknet invoke, signed by the device key (5-felt signature), not broadcast. */
+/** Starknet invoke, signed by the account key (2-felt stark signature), not broadcast. */
 export interface StarknetSignedTransaction {
   chain: "starknet";
   /** Hex-encoded calldata felts of the built invoke. */
   calldata: string[];
-  /** The 5-felt device signature as hex strings: `[r_low, r_high, s_low, s_high, y_parity]`. */
+  /** The stark signature as hex strings: `[r, s]`. */
   signature: string[];
   /** Account nonce the signature binds to. */
   nonce: string;
@@ -90,7 +92,7 @@ export interface SolanaSignedTransaction {
 /** Prefix scheme for off-chain messages, mirroring EIP-191 / Solana's convention. */
 export const CAVOS_MESSAGE_PREFIX = "Cavos Signed Message:\n";
 
-/** Build the prefixed message bytes a secp256r1 chain signs for `signMessage`.
+/** Build the prefixed message bytes an Ed25519 chain signs for `signMessage`.
  *  Format: `CAVOS_MESSAGE_PREFIX` + ASCII decimal length + `\n` + message. */
 export function prefixedMessageBytes(message: Uint8Array): Uint8Array {
   const len = String(message.length);

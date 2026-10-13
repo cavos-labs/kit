@@ -1,23 +1,21 @@
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
+import { resolveNativeStarknet, type StarknetSpend } from "../chains/starknet/nativeConnect";
 import { resolveNativeSolana } from "../chains/solana/nativeConnect";
 import { resolveNativeStellar } from "../chains/stellar/nativeConnect";
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
 import { SocialRecoveryClient, type AttestationPolicy } from "../recovery/SocialRecoveryClient";
 import { HttpWalletRegistry } from "../registry/HttpWalletRegistry";
-import type { ResolveNativeEd25519Input } from "../secret/nativeAccount";
+import type { ResolveNativeInput } from "../secret/nativeAccount";
 import { zeroize, type MasterDEK } from "../secret/dek";
 import { readLocalDek, type LocalDekInput } from "../secret/localDek";
 import { addPasskey } from "../secret/PasskeyDekPort";
 import { HttpPasskeyWrapStore, type PasskeyWrapStore } from "../registry/PasskeyWrapStore";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
 import type { PasskeyPrfProvider } from "../signer/PasskeyProvider";
-import type { DeviceSigner } from "../signer/DeviceSigner";
-import { WebCryptoSigner } from "../signer/WebCryptoSigner";
-import { StarknetDeviceSigner } from "../chains/starknet/StarknetDeviceSigner";
 import { bigIntTo32Bytes } from "../crypto/encoding";
-import { prefixedMessageBytes } from "../signing";
 import { solanaNetworkName, starknetNetworkName, stellarNetworkName, stellarNetworkNameFromId } from "./network";
 import { VersionedMessage } from "@solana/web3.js";
+import { Signer, stark, type Signature } from "starknet";
 import { xdr } from "@stellar/stellar-sdk";
 import { isQueryVersion, parseStarknetCalls, parseStarknetTypedData, selectorOf } from "./parseStarknet";
 import { idbLedger, type SpendLedger } from "./ledger";
@@ -36,7 +34,7 @@ import {
   type VaultRequest,
 } from "./protocol";
 
-type NativeInput = Omit<ResolveNativeEd25519Input, "chain">;
+type NativeBase = Omit<ResolveNativeInput, "chain" | "importSpend" | "loadPersisted">;
 
 export interface VaultHandlerDeps {
   appId: string;
@@ -48,9 +46,9 @@ export interface VaultHandlerDeps {
   passkey(user: { userId: string; userName: string }): PasskeyPrfProvider;
   passkeyWraps?: (auth: { environment?: "development" | "production"; authToken?: string | null }) => PasskeyWrapStore;
   readDek?: (input: LocalDekInput) => Promise<MasterDEK>;
-  resolveSolana?: (input: NativeInput) => Promise<{ address: string; spend: Ed25519SpendSigner | null; isNewAccount: boolean }>;
-  resolveStellar?: (input: NativeInput) => Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }>;
-  loadStarknetDevice?: (keyId: string) => Promise<DeviceSigner>;
+  resolveSolana?: (input: NativeBase) => Promise<{ address: string; spend: Ed25519SpendSigner | null; isNewAccount: boolean }>;
+  resolveStellar?: (input: NativeBase) => Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }>;
+  resolveStarknet?: (input: NativeBase) => Promise<{ address: string; spend: StarknetSpend | null; isNewAccount: boolean }>;
   solanaNetwork?: (recentBlockhash: string) => Promise<string>;
 }
 
@@ -60,14 +58,14 @@ interface Account {
   network: string;
   solana?: Ed25519SpendSigner;
   stellar?: ControlKey;
-  starknet?: DeviceSigner;
+  starknet?: StarknetSpend;
 }
 
 export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultRequest) => Promise<unknown> {
   const accounts = new Map<string, Account>();
   const resolveSolana = deps.resolveSolana ?? resolveNativeSolana;
   const resolveStellar = deps.resolveStellar ?? resolveNativeStellar;
-  const loadStarknetDevice = deps.loadStarknetDevice ?? ((keyId: string) => WebCryptoSigner.loadOrCreate({ keyId }));
+  const resolveStarknet = deps.resolveStarknet ?? resolveNativeStarknet;
   const readDek = deps.readDek ?? readLocalDek;
   const passkeyWraps =
     deps.passkeyWraps ??
@@ -86,20 +84,8 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
 
   async function connect(params: ConnectParams): Promise<ConnectResult> {
     const handle = `${params.chain}:${params.userId}:${params.appSalt}`;
-    if (params.chain === "starknet") {
-      // The account is a contract that lists its device keys, so there is no
-      // DEK to restore: this browser's key is added on-chain like any device.
-      const device = await loadStarknetDevice(`${scope}|${params.userId}:${params.appSalt}`);
-      const { x, y } = await device.getPublicKey();
-      accounts.set(handle, { userId: params.userId, address: "", network: params.network, starknet: device });
-      const publicKey = new Uint8Array(65);
-      publicKey[0] = 4;
-      publicKey.set(bigIntTo32Bytes(x), 1);
-      publicKey.set(bigIntTo32Bytes(y), 33);
-      return { handle, address: "", publicKey, isNewAccount: false, passkey: false };
-    }
     const wraps = params.recovery === "passkey" ? passkeyWraps(params) : undefined;
-    const input: NativeInput = {
+    const input: NativeBase = {
       identity: { userId: params.userId, ...(params.userName ? { email: params.userName } : {}) },
       appSalt: params.appSalt,
       keyScope: scope,
@@ -145,6 +131,17 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
         handle,
         address: native.address,
         publicKey: native.spend?.publicKeyRaw() ?? null,
+        isNewAccount: native.isNewAccount,
+        passkey: await hasPasskey(),
+      };
+    }
+    if (params.chain === "starknet") {
+      const native = await resolveStarknet(input);
+      accounts.set(handle, { userId: params.userId, address: native.address, network: params.network, starknet: native.spend ?? undefined });
+      return {
+        handle,
+        address: native.address,
+        publicKey: native.spend ? bigIntTo32Bytes(BigInt(native.spend.publicKey())) : null,
         isNewAccount: native.isNewAccount,
         passkey: await hasPasskey(),
       };
@@ -227,7 +224,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
     },
     async signStarknetTypedData({ handle, typedData, accountAddress }) {
       const acct = account(handle);
-      const signer = new StarknetDeviceSigner(requireKey(acct.starknet));
+      const signer = new Signer(requireKey(acct.starknet).privateKey());
       const network = starknetNetworkName(typedData.domain.chainId);
       return authorizeAndSign(acct, parseStarknetTypedData(typedData, accountAddress), async () => network, async () =>
         toFelts(await signer.signMessage(typedData, accountAddress)),
@@ -235,7 +232,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
     },
     async signStarknetInvoke({ handle, calls, details }) {
       const acct = account(handle);
-      const signer = new StarknetDeviceSigner(requireKey(acct.starknet));
+      const signer = new Signer(requireKey(acct.starknet).privateKey());
       const sign = async () => toFelts(await signer.signTransaction(calls, details));
       if (isQueryVersion(details.version)) return sign();
       const network = starknetNetworkName(details.chainId);
@@ -249,18 +246,14 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       );
       return authorizeAndSign(acct, parsed, async () => network, sign);
     },
-    async signStarknetMessage({ handle, message }) {
-      return requireKey(account(handle).starknet).sign(prefixedMessageBytes(message));
-    },
     async forget({ userId, appSalt }) {
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.
       for (const chain of ["solana", "stellar", "starknet"]) accounts.delete(`${chain}:${userId}:${appSalt}`);
     },
     async enrollPasskey({ userId, appSalt, userName, environment, authToken }) {
-      // Solana and Stellar derive from the same DEK, so either connected account proves which DEK this is.
-      const chain = (["solana", "stellar"] as const).find((c) => accounts.get(`${c}:${userId}:${appSalt}`)?.address);
-      if (!chain) throw new Error("kit/vault: connect a Solana or Stellar wallet before adding a passkey");
+      const chain = (["solana", "stellar", "starknet"] as const).find((c) => accounts.get(`${c}:${userId}:${appSalt}`)?.address);
+      if (!chain) throw new Error("kit/vault: connect a wallet before adding a passkey");
       const { address } = accounts.get(`${chain}:${userId}:${appSalt}`)!;
       const dek = await readDek({ chain, userId, appSalt, address, keyScope: scope });
       const user = { userId, userName: userName ?? userId };
@@ -289,9 +282,8 @@ function stellarAuthNetworkId(preimage: Uint8Array): Uint8Array {
   return new Uint8Array(xdr.HashIdPreimage.fromXDR(Buffer.from(preimage)).sorobanAuthorization().networkId());
 }
 
-function toFelts(signature: unknown): string[] {
-  if (!Array.isArray(signature)) throw new Error("kit/vault: unexpected Starknet signature");
-  return signature.map(String);
+function toFelts(signature: Signature): string[] {
+  return stark.formatSignature(signature);
 }
 
 function requireKey<T>(key: T | undefined): T {

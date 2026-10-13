@@ -13,10 +13,6 @@ export const STARKNET_NETWORKS = {
 
 export type StarknetNetwork = keyof typeof STARKNET_NETWORKS;
 
-/** Universal Deployer Contract (same address on mainnet & sepolia). */
-export const UDC_ADDRESS =
-  "0x041a78e741e5af2fec34b695679bc6891742439f7afb8484ecd7766661ad02bf";
-
 /** Cavos-hosted SNIP-29 paymaster (same service @cavos/react uses). */
 export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
   sepolia: "https://sepolia-paymaster.cavos.xyz",
@@ -24,19 +20,11 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
 };
 
 /**
- * DeviceAccount class hash, per network. Populated from
- * `account-contracts/starknet/deployments/<network>.json` after declaring.
- *
- * Sepolia re-declared 2026-08-27:
- *   - `constructor(app_namespace, pub_x, pub_y)` registers the first device
- *     signer, so the pubkey is part of the address and nobody else can claim it.
- *   - `initialize` is GONE, and with it the uninitialized window: no unsigned
- *     __validate__ / is_valid_signature bypass, no __execute__ selector guard.
- *   - Addresses under the previous class are identity-derived and are NOT
- *     migrated; the Cavos registry is the source of truth for user -> address.
- * Mainnet still runs the prior class until it is re-declared.
+ * OpenZeppelin `AccountUpgradeable` v3.0.0 class hash (Scarb 2.13.1,
+ * `--release`), declared on mainnet and Sepolia. Pinned forever: the account
+ * address derives from it, and `ensureEnclave` clears the local wrap when the
+ * derived address differs from the registered one. Later implementation changes go through the account's
+ * `upgrade`, which keeps the address.
  */
-export const DEVICE_ACCOUNT_CLASS_HASH: Record<StarknetNetwork, string> = {
-  sepolia: "0x10716331f5880dd2778cbb6cff6d825e9f5441dcf9dbc8746e58042590aa621",
-  mainnet: "0x1840aded59e8a0d2b440a134cb9079a7fc11b06c77f58ed189ab436a034ca6a",
-};
+export const OZ_ACCOUNT_CLASS_HASH =
+  "0x01d1777db36cdd06dd62cfde77b1b6ae06412af95d57a13dc40ac77b8a702381";

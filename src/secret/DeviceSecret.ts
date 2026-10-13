@@ -3,7 +3,7 @@ import { generateMasterDEK, zeroize, type MasterDEK } from "./dek";
 import {
   nativeAddress,
   type AppSalt,
-  type Ed25519Chain,
+  type NativeChain,
 } from "./derive";
 import { parseWrappedDEK, type WrappedDEK } from "./wrap";
 
@@ -23,10 +23,10 @@ export interface WrapStore {
 }
 
 export interface AddressIndex {
-  lookup(userId: string, chain: Ed25519Chain): Promise<string | null>;
+  lookup(userId: string, chain: NativeChain): Promise<string | null>;
   claim(
     userId: string,
-    chain: Ed25519Chain,
+    chain: NativeChain,
     address: string,
   ): Promise<{ address: string; existing: boolean }>;
 }
@@ -64,13 +64,13 @@ export interface EnclaveDekPort {
 export type ReadySecret = {
   kind: "ready";
   wrap: WrappedDEK;
-  addresses: Partial<Record<Ed25519Chain, string>>;
+  addresses: Partial<Record<NativeChain, string>>;
 };
 
 export type EnclaveEnsureInput = {
   userId: string;
   appSalt: AppSalt;
-  chains: readonly Ed25519Chain[];
+  chains: readonly NativeChain[];
   factor: DeviceFactor;
   recovery: EnclaveDekPort;
   registry: AddressIndex;
@@ -221,8 +221,8 @@ async function runEnsure(input: EnclaveEnsureInput): Promise<ReadySecret> {
 async function lookupAny(
   registry: AddressIndex,
   userId: string,
-  chains: readonly Ed25519Chain[],
-): Promise<{ chain: Ed25519Chain; address: string } | null> {
+  chains: readonly NativeChain[],
+): Promise<{ chain: NativeChain; address: string } | null> {
   for (const chain of chains) {
     const address = await registry.lookup(userId, chain);
     if (address) return { chain, address };
@@ -233,7 +233,7 @@ async function lookupAny(
 async function claimAll(
   registry: AddressIndex,
   userId: string,
-  chains: readonly Ed25519Chain[],
+  chains: readonly NativeChain[],
   dek: MasterDEK,
   appSalt: AppSalt,
 ): Promise<void> {
@@ -251,7 +251,7 @@ async function finish(
   userId: string,
   wrap: WrappedDEK,
   dek: MasterDEK,
-  chains: readonly Ed25519Chain[],
+  chains: readonly NativeChain[],
   appSalt: AppSalt,
 ): Promise<ReadySecret> {
   const addresses: ReadySecret["addresses"] = {};

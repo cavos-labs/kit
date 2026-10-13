@@ -13,9 +13,8 @@ import { createVaultHandler, serveVault } from "./host";
 import { memoryLedger } from "./ledger";
 import type { OverLimit } from "./limits";
 import type { Line } from "./policy";
-import { hash, typedData as typed } from "starknet";
-import type { DeviceSigner } from "../signer/DeviceSigner";
-import { bigIntTo32Bytes } from "../crypto/encoding";
+import { ec, hash, num, typedData as typed } from "starknet";
+import { starknetSpendFromSeed } from "../chains/starknet/nativeConnect";
 import { outsideExecution } from "./fixtures";
 import { VaultClient } from "./VaultClient";
 
@@ -28,7 +27,7 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
   const stellarKey = Keypair.random();
   const asked: Line[][] = [];
   const networks: string[] = [];
-  const starknetDevice = new RecordingDevice();
+  const starknetSpend = starknetSpendFromSeed(parseEd25519Seed(randomBytes(32)));
   const scopes: (string | undefined)[] = [];
   const dek = generateMasterDEK();
   const prf = new Uint8Array(32).fill(5);
@@ -69,9 +68,9 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
       scopes.push(input.keyScope);
       return { address: spend.address(), spend, isNewAccount: true };
     },
-    loadStarknetDevice: async (keyId) => {
-      scopes.push(keyId);
-      return starknetDevice;
+    resolveStarknet: async (input) => {
+      scopes.push(input.keyScope);
+      return { address: starknetSpend.address(), spend: starknetSpend, isNewAccount: true };
     },
     solanaNetwork: async () => "Solana Devnet",
     resolveStellar: async () => ({
@@ -87,19 +86,7 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
     channel.port1.close();
     channel.port2.close();
   };
-  return { client, asked, networks, scopes, stellarKey, starknetDevice, close, dek, prf, dekReads, wraps, spend };
-}
-
-/** Records what it was asked to sign; the signature itself is not under test here. */
-class RecordingDevice implements DeviceSigner {
-  signed: Uint8Array[] = [];
-  async getPublicKey() {
-    return { x: 7n, y: 11n };
-  }
-  async sign(bytes: Uint8Array) {
-    this.signed.push(bytes);
-    return { r: 1n, s: 2n, yParity: false };
-  }
+  return { client, asked, networks, scopes, stellarKey, starknetSpend, close, dek, prf, dekReads, wraps, spend };
 }
 
 function solTransfer(from: string, lamports: number): Uint8Array {
@@ -204,24 +191,56 @@ describe("vault client and host", () => {
     close();
   });
 
-  it("signs a Starknet outside execution over the hash it computes itself", async () => {
-    const { client, asked, starknetDevice, close } = setup();
-    const device = await client.connectStarknet({ ...params, network: "sepolia" });
-    expect(device.publicKey).toEqual({ x: 7n, y: 11n });
+  it("connects a Starknet account and signs an outside execution over the hash it computes itself", async () => {
+    const { client, asked, starknetSpend, close } = setup();
+    const { address, signer, isNewAccount } = await client.connectStarknet({ ...params, network: "sepolia" });
+    expect(address).toBe(starknetSpend.address());
+    expect(isNewAccount).toBe(true);
+    expect(await signer!.getPubKey()).toBe(starknetSpend.publicKey());
 
-    const account = "0x0123";
     const eth = "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
     const transfer = hash.getSelectorFromName("transfer");
     const small = outsideExecution([{ To: eth, Selector: transfer, Calldata: ["0xabc", "0x2386f26fc10000", "0x0"] }]);
-    const signature = await device.accountSigner.signMessage(small, account);
-    expect(signature).toHaveLength(5);
+    const signature = await signer!.signMessage(small, address);
+    expect(signature).toHaveLength(2);
     expect(asked).toHaveLength(0);
-    expect(starknetDevice.signed[0]).toEqual(bigIntTo32Bytes(BigInt(typed.getMessageHash(small, account))));
+    const full = ec.starkCurve.getPublicKey(starknetSpend.privateKey(), false);
+    const [r, s] = signature as string[];
+    expect(ec.starkCurve.verify(new ec.starkCurve.Signature(BigInt(r), BigInt(s)), typed.getMessageHash(small, address), full)).toBe(true);
 
     const large = outsideExecution([{ To: eth, Selector: transfer, Calldata: ["0xabc", "0xde0b6b3a7640000", "0x0"] }]);
-    await device.accountSigner.signMessage(large, account);
+    await signer!.signMessage(large, address);
     expect(asked).toHaveLength(1);
     expect(asked[0][0]).toMatchObject({ kind: "send", amount: "1", asset: "ETH" });
+    close();
+  });
+
+  it("asks before signing a Starknet typed message that is not an outside execution", async () => {
+    const { client, asked, close } = setup();
+    const { address, signer } = await client.connectStarknet({ ...params, network: "sepolia" });
+    const message = {
+      types: {
+        StarknetDomain: [
+          { name: "name", type: "shortstring" },
+          { name: "version", type: "shortstring" },
+          { name: "chainId", type: "shortstring" },
+          { name: "revision", type: "shortstring" },
+        ],
+        Message: [{ name: "content", type: "string" }],
+      },
+      primaryType: "Message",
+      domain: { name: "Cavos", version: "1", chainId: "0x534e5f5345504f4c4941", revision: "1" },
+      message: { content: "hello" },
+    };
+    await signer!.signMessage(message, address);
+    expect(asked).toHaveLength(1);
+    close();
+  });
+
+  it("returns the 32-byte stark public key and no signer when the browser holds no key", async () => {
+    const { client, starknetSpend, close } = setup();
+    const result = await client.connectStarknet({ ...params, network: "sepolia" });
+    expect(num.toHex(await result.signer!.getPubKey())).toBe(starknetSpend.publicKey());
     close();
   });
 
@@ -229,7 +248,7 @@ describe("vault client and host", () => {
     const { client, scopes, close } = setup();
     await client.connectSolana(params);
     await client.connectStarknet({ ...params, network: "sepolia" });
-    expect(scopes).toEqual(["app", "app|u1:salt"]);
+    expect(scopes).toEqual(["app", "app"]);
     close();
   });
 
@@ -253,7 +272,7 @@ describe("vault passkeys", () => {
   it("refuses to add a passkey before a native account is connected", async () => {
     const { client, wraps, close } = setup();
     await expect(client.enrollPasskey({ userId: "u1", appSalt: "salt" })).rejects.toThrow(
-      "connect a Solana or Stellar wallet",
+      "connect a wallet before adding a passkey",
     );
     expect(wraps).toHaveLength(0);
     close();

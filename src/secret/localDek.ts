@@ -1,13 +1,13 @@
 import type { DeviceUnwrapKey } from "../chains/stellar/DeviceUnwrapKey";
 import { WebCryptoDeviceUnwrapKey } from "../chains/stellar/WebCryptoDeviceUnwrapKey";
 import { zeroize, type MasterDEK } from "./dek";
-import { nativeAddress, parseAppSalt, type Ed25519Chain } from "./derive";
+import { nativeAddress, parseAppSalt, type NativeChain } from "./derive";
 import type { WrapStore } from "./DeviceSecret";
 import { deviceFactorFromUnwrapKey } from "./factor";
 import { idbWrapStore } from "./idbWrapStore";
 
 export interface LocalDekInput {
-  chain: Ed25519Chain;
+  chain: NativeChain;
   userId: string;
   appSalt: string;
   /** The account's address. The DEK is refused unless it derives it. */

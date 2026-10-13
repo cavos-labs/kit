@@ -1,17 +1,17 @@
 import { WebCryptoControlKey } from "../stellar/WebCryptoControlKey";
 import {
-  resolveNativeEd25519,
-  type ResolveNativeEd25519Input,
+  resolveNative,
+  type ResolveNativeInput,
 } from "../../secret/nativeAccount";
 import { solanaSpendFromSeed, spendSignerFrom, type Ed25519SpendSigner } from "../../signer/Ed25519SpendSigner";
 import type { Ed25519Seed } from "../../secret/dek";
 
-export type ResolveNativeSolanaInput = Omit<ResolveNativeEd25519Input, "chain">;
+export type ResolveNativeSolanaInput = Omit<ResolveNativeInput, "chain">;
 
 export async function resolveNativeSolana(
   input: ResolveNativeSolanaInput,
 ): Promise<{ address: string; spend: Ed25519SpendSigner | null; isNewAccount: boolean }> {
-  return resolveNativeEd25519({
+  return resolveNative({
     ...input,
     chain: "solana",
     loadPersisted: input.loadPersisted ?? loadPersistedSolana,

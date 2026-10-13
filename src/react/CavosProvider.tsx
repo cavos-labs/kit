@@ -16,18 +16,13 @@ import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
 import { CavosAuth } from '../auth/CavosAuth';
 import type { Identity } from '../auth/AuthProvider';
 import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
-import { PasskeySigner } from '../signer/PasskeySigner';
-import type { PasskeyApprover, PasskeyEnrollParams } from '../signer/PasskeyProvider';
-import { HttpRecoveryClient } from '../recovery/HttpRecoveryClient';
-import { decideSocialRecovery } from './socialRecoveryDecision';
 import { assertDeviceApprovalScope } from './deviceApprovalScope';
 import {
   resolveDeviceAuthorization,
   type DeviceApproval,
   type DeviceAuthorizationMethod,
 } from './deviceAuthorization';
-import { HttpWalletRegistry } from '../registry/HttpWalletRegistry';
-import { generateRecoveryCode } from '../recovery/BackupSigner';
+import { generateRecoveryCode } from '../recovery/recoveryCode';
 import {
   shouldSkipSilentReconnect,
   urlHasOAuthCallbackCode,
@@ -37,13 +32,6 @@ import {
   type AttestationPolicy,
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
-import {
-  agreeRecoveryAuthority,
-  writeRecoveryAuthority,
-  recoverHardwareIsolatedDevice,
-  type AgreedRecoveryAuthority,
-} from '../recovery/SocialRecoveryCoordinator';
-import type { SocialRecoveryCredential } from '../recovery/SocialRecoveryCredential';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
 import { VaultClient } from '../vault/VaultClient';
 import { zeroize } from '../secret/dek';
@@ -180,9 +168,9 @@ export interface CavosModalConfig {
 
 /** Minimal wallet-status surface the React layer (and modal) needs. */
 export interface WalletStatus {
-  /** True while the device-signer account is being deployed. */
+  /** True while the account is being connected or deployed. */
   isDeploying: boolean;
-  /** True once deployed and this device is an authorized signer. */
+  /** True once this device holds the wallet key. */
   isReady: boolean;
   /**
    * True if the account has not been deployed on-chain yet. First execute
@@ -191,18 +179,11 @@ export interface WalletStatus {
   isUndeployed: boolean;
   /** True if this device still needs approval to operate the wallet. */
   needsDeviceApproval: boolean;
-  /** True while waiting for the owner to approve this device from another device. */
-  awaitingApproval: boolean;
-  /** The pending device-addition request id, when awaitingApproval. */
-  pendingRequestId: string | null;
-  /** True if the account already has a passkey enrolled as an approver, so the
-   * modal can offer passkey approval over email on the new-device path. */
+  /** True if the account has a passkey that can restore it on a new device. */
   hasPasskey: boolean;
   /** True right after a brand-new account is created (first sign-up), so the UI
    * can offer a one-time "secure your account" step. Cleared once handled. */
   isNewAccount: boolean;
-  /** The attested enclave is enrolling or recovering this wallet. */
-  isSocialRecovering: boolean;
   /**
    * Can this user get back in from a device they do not have yet?
    *
@@ -272,7 +253,7 @@ export interface CavosContextValue {
   /** Resolve identity from an OAuth callback (?auth_data=…) and deploy. */
   handleCallback: (authData: string) => Promise<void>;
   /**
-   * Execute a multicall signed by the device key (Starknet-only — on Solana /
+   * Execute a multicall signed by the account key (Starknet-only — on Solana /
    * Stellar call `wallet.execute(...)` directly). Sponsored (gasless) by default;
    * pass `{ sponsored: false }` to submit directly with the account paying its
    * own fee.
@@ -286,27 +267,6 @@ export interface CavosContextValue {
    * and verification.
    */
   signMessage: (message: string | Uint8Array) => Promise<MessageSignature>;
-  /** Authorize another device signer on this wallet (sponsored add_signer). */
-  addSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
-  /**
-   * Revoke a device signer (sponsored remove_signer) — the escape hatch behind
-   * the "this wasn't me" link in the device-added email. Must be called from a
-   * device that is already an authorized signer, and cannot revoke itself.
-   * Stellar revokes by envelope slot instead: use `wallet.removeDevice(...)`.
-   */
-  removeSigner: (pubkey: { x: bigint; y: bigint }) => Promise<{ transactionHash: string }>;
-  /** Device signers currently authorized on this wallet, for a management UI. */
-  listDevices: () => Promise<{ x: bigint; y: bigint }[]>;
-  /** Re-request the device-approval email for the current pending request. */
-  resendDeviceApproval: () => Promise<void>;
-  /**
-   * Enroll a passkey as an approver (2FA-style step-up). Requires a ready device;
-   * returns the passkey's public key.
-   */
-  enrollPasskey: (
-    passkey: PasskeyApprover,
-    params: PasskeyEnrollParams,
-  ) => Promise<{ publicKey: { x: bigint; y: bigint }; transactionHash?: string }>;
   /** Whether this device can use a platform passkey (Face ID / Touch ID / PIN). */
   passkeySupported: boolean;
   /**
@@ -328,38 +288,37 @@ export interface CavosContextValue {
    */
   authorizingDevice: boolean;
   /**
-   * Modal-friendly wrapper: enroll a synced passkey as an approver using the
-   * signed-in user's identity + the app name. Requires a ready device.
+   * Modal-friendly wrapper: add a synced passkey that restores the wallet on a
+   * new device, using the signed-in user's identity + the app name. Requires a
+   * ready device.
    */
   enrollPasskeyDefault: () => Promise<void>;
   /**
    * Modal-friendly wrapper for the new-device flow: prompt the user's synced
-   * passkey to approve THIS device, then refresh to a ready state. Sponsored by
-   * the default paymaster/relayer.
+   * passkey to restore the wallet key on THIS device, then refresh to a ready state.
    */
   approveDeviceWithPasskey: () => Promise<void>;
   /**
-   * Register a backup signer derived from a generated recovery code (gasless).
-   * Resolves with the code so the caller can display it once.
+   * Stellar only: register a backup signer derived from a generated recovery
+   * code (gasless). Resolves with the code so the caller can display it once.
    */
   setupRecovery: () => Promise<string>;
   /**
-   * Recover access after losing every device. Requires the recovery code. Brings
-   * the provider to a ready state.
+   * Stellar only: recover access after losing every device with the recovery
+   * code. Brings the provider to a ready state.
    */
   recover: (code: string) => Promise<void>;
   /**
    * Drive social recovery with a provider id_token your own login already
    * obtained, so the user never signs in twice.
    *
-   * Enrols when this device is ready and recovers when it is not — the wallet's
-   * state decides. Pass the raw Google or Apple `id_token`, not your own session
-   * JWT, and pass it straight from a sign-in: the enclave requires the
-   * authentication to be under five minutes old.
+   * Reconnects the wallet with that proof, so the enclave seals a new wallet or
+   * restores this device onto an existing one. Pass the raw Google or Apple
+   * `id_token`, not your own session JWT, and pass it straight from a sign-in:
+   * the enclave requires the authentication to be under five minutes old.
    *
    * Requires the app's own OAuth client ID to be registered for the environment
    * in the dashboard, so the enclave accepts tokens minted for your client.
-   * Progress shows up on `walletStatus.isSocialRecovering`.
    */
   submitSocialRecoveryToken: (idToken: string) => void;
   logout: () => void;
@@ -396,11 +355,8 @@ const INITIAL_STATUS: WalletStatus = {
   isReady: false,
   isUndeployed: false,
   needsDeviceApproval: false,
-  awaitingApproval: false,
-  pendingRequestId: null,
   hasPasskey: false,
   isNewAccount: false,
-  isSocialRecovering: false,
   recovery: { protected: false, methods: [] },
 };
 
@@ -419,8 +375,8 @@ interface SocialRecoveryEnvironment {
  *   </CavosProvider>
  *
  * Behind the scenes: login (social / email) resolves a stable identity, the kit
- * deploys a device-signer smart account gaslessly, and the wallet handle submits
- * gasless transactions signed silently by the browser's device key.
+ * derives the account key from a MasterDEK, and the wallet handle submits
+ * gasless transactions signed silently by that key.
  */
 /**
  * Resolve the attestation policy this app verifies the enclave against.
@@ -468,7 +424,6 @@ export function CavosProvider({
 
   // Bumped when the host hands us a provider token, so the enrol/recover
   // effect below re-runs — the credential lives on `auth`, not in React state.
-  const [externalSocialToken, setExternalSocialToken] = useState(0);
 
   const socialRecoveryPolicy = useMemo(
     () => resolveSocialRecoveryPolicy(config),
@@ -510,10 +465,6 @@ export function CavosProvider({
       return session;
     }
   }, [session, selectedChain]);
-  // The wallet on screen right now, for work that outlives a render and must
-  // know whether the user is still on the wallet it started for.
-  const walletRef = useRef(wallet);
-  walletRef.current = wallet;
   // Keep children behind the loading state until we have checked for a
   // persisted identity and silently reconnected this browser's device signer.
   const [isLoading, setIsLoading] = useState(true);
@@ -538,14 +489,6 @@ export function CavosProvider({
   const socialEnrolledRef = useRef(new Set<string>());
   const [socialRecovery, setSocialRecovery] =
     useState<SocialRecoveryEnvironment | null>(null);
-  const socialAttemptRef = useRef(new Set<string>());
-  /**
-   * Authorities agreed with the enclave but not yet on-chain, per wallet. The
-   * two halves of enrolment are separated in time on purpose: the enclave half
-   * needs a login proof that expires in five minutes, the chain half needs an
-   * account that does not exist until the user's first transaction.
-   */
-  const agreedAuthorityRef = useRef(new Map<string, AgreedRecoveryAuthority>());
   /** App name/logo fetched from the backend; overrides manual modal props when present. */
   const [branding, setBranding] = useState<{ appName?: string; appLogo?: string }>({});
   /**
@@ -560,7 +503,7 @@ export function CavosProvider({
   // on devices/browsers that can't offer them.
   useEffect(() => {
     let cancelled = false;
-    PasskeySigner.isSupported()
+    PasskeyPrf.isSupported()
       .then((ok) => { if (!cancelled) setPasskeySupported(ok); })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -694,28 +637,6 @@ export function CavosProvider({
   const closeModal = useCallback(() => setModalOpen(false), []);
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
-  // Re-request the device-approval email for the current pending request
-  // (Starknet-only email flow). The backend dedups within its TTL.
-  const resendDeviceApproval = useCallback(async () => {
-    const cfg = configRef.current;
-    // Email device-approval works on both Starknet and Solana (same secp256r1
-    // device key; backend is chain-agnostic). Other chains have no email flow.
-    // Also the FIRST request, not only a resend: connect no longer mails one on
-    // sight, so this is where the email path actually begins — once the UI has
-    // chosen it.
-    if (!identity || !wallet || wallet.chain !== 'starknet') return;
-    const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
-    if (!cfg.appId) return;
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
-    const { requestId } = await recovery.requestDeviceAddition({
-      userId: identity.userId,
-      accountAddress: wallet.address,
-      newSigner: wallet.publicKey,
-      ...(identity.email ? { email: identity.email } : {}),
-    });
-    setWalletStatus((status) => ({ ...status, awaitingApproval: true, pendingRequestId: requestId }));
-  }, [identity, wallet, auth]);
-
   // One decision, taken before anything runs. Passkey first (instant, needs
   // nothing else), then the enclave, then email — which needs a second device
   // and the user's attention twice, so it is the floor rather than the default
@@ -845,15 +766,11 @@ export function CavosProvider({
       // Get the default wallet for status updates
       const w = s.wallet(s.defaultChain);
 
-      // Starknet and Solana both support the email device-approval flow (both carry
-      // a pendingRequestId when a returning-new-device request was filed). Stellar
-      // has its own passkey-PRF device model with no email flow today.
-      const pendingRequestId = w.chain === 'starknet' ? w.pendingRequestId : null;
       let hasPasskey = false;
       if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
         // Also raced: this reads the chain, so it can stall like anything else,
         // and a hang here would strand the connect just as completely.
-        try { hasPasskey = await race(w.hasPasskey()); } catch { /* leave false → email flow */ }
+        try { hasPasskey = await race(w.hasPasskey()); } catch { hasPasskey = false; }
       }
 
       setWalletStatus({
@@ -861,11 +778,8 @@ export function CavosProvider({
         isReady: w.status === 'ready',
         isUndeployed: w.status === 'undeployed',
         needsDeviceApproval: w.status === 'needs-device-approval',
-        awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
-        pendingRequestId,
         hasPasskey,
         isNewAccount: w.isNewAccount,
-        isSocialRecovering: false,
         // Unknown until the lookup above answers for this wallet.
         recovery: { protected: false, methods: [] },
       });
@@ -897,10 +811,9 @@ export function CavosProvider({
 
     // Update wallet status for the new chain
     const w = session.wallet(chain);
-    const pendingRequestId = w.chain === 'starknet' ? w.pendingRequestId : null;
     let hasPasskey = false;
     if (w.status === 'needs-device-approval' || w.status === 'undeployed') {
-      try { hasPasskey = await w.hasPasskey(); } catch { /* leave false */ }
+      try { hasPasskey = await w.hasPasskey(); } catch { hasPasskey = false; }
     }
 
     setWalletStatus((status) => ({
@@ -908,8 +821,6 @@ export function CavosProvider({
       isReady: w.status === 'ready',
       isUndeployed: w.status === 'undeployed',
       needsDeviceApproval: w.status === 'needs-device-approval',
-      awaitingApproval: w.status === 'needs-device-approval' && !!pendingRequestId,
-      pendingRequestId,
       hasPasskey,
       isNewAccount: w.isNewAccount,
     }));
@@ -991,340 +902,6 @@ export function CavosProvider({
       }
     };
   }, [session, selectedChain]);
-
-  /**
-   * Set up recovery on every wallet in the session, in two halves.
-   *
-   * Agreeing the authority with the enclave needs the login proof, which is
-   * minted by the sign-in and rejected once it is five minutes old. Writing it
-   * on-chain needs the account, which under lazy deploy does not exist until
-   * the user's first transaction -- ten minutes later, or tomorrow. Doing both
-   * at once meant neither happened for anyone who did not transact immediately.
-   *
-   * So: agree at login, write when there is an account. The written half is
-   * device-signed and needs no proof, and an authority already agreed is
-   * returned again rather than replaced, so a browser that dies in between
-   * loses nothing.
-   *
-   * Every chain, not the visible one. Only one wallet is on screen --
-   * `chains[0]` after a login -- and enrolling just that one left the others
-   * deployed and unrecoverable, silently, until a second device tried to
-   * restore one. Recovery itself stays with the active wallet below: it belongs
-   * to the action the user is taking.
-   */
-  useEffect(() => {
-    // The app picked one method. `socialRecovery.enabled` says the environment
-    // has an enclave, not that this app uses it -- reading it alone meant an
-    // app on passkeys still had recovery authorities written into its accounts,
-    // and had its one login credential spent doing it.
-    //
-    // Use the app's choice, not the visible wallet's resolved method. Native
-    // Solana and Stellar enroll the DEK at connect. This sweep only writes
-    // Starknet's on-chain recovery authority.
-    if (appDeviceApproval === 'passkey') return;
-    // `socialRecovery.provider` is not required: it is the environment's old
-    // single-provider setting, null once an app offers several. The provider
-    // is the credential's own, read from the token.
-    if (
-      !socialRecovery?.enabled ||
-      !socialRecoveryPolicy ||
-      !session ||
-      !identity ||
-      !config.appId
-    ) return;
-
-    const targets = session.chains
-      .map((c) => session.wallet(c))
-      .filter((w) => w.chain === 'starknet')
-      .map((w) => ({
-        wallet: w,
-        action: decideSocialRecovery(
-          w.status,
-          socialEnrolledRef.current.has(`${w.chain}:${w.address}`),
-        ).action,
-      }))
-      .filter((t) => t.action === 'pre-enroll' || t.action === 'enroll');
-    if (targets.length === 0) return;
-
-    const client = new SocialRecoveryClient({
-      baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
-      appId: config.appId,
-      environment: config.environment,
-      attestation: socialRecoveryPolicy,
-    });
-
-    // Writing an authority already agreed needs no login proof, so those go
-    // ahead whatever this session has. Only agreeing a new one needs it.
-    const key = (w: CavosWallet) => `${w.chain}:${w.address}`;
-    const needsCredential = targets.some((t) => !agreedAuthorityRef.current.has(key(t.wallet)));
-    let credential: SocialRecoveryCredential | null = null;
-    if (needsCredential) {
-      try {
-        credential = auth.consumeSocialRecoveryCredential();
-      } catch {
-        // Deliberately never persisted -- it is what the enclave verifies -- so
-        // a reloaded page has none and the next sign-in agrees the authority
-        // instead. Say so: silence here is how a wallet came to be deployed
-        // with no recovery at all.
-        console.warn(
-          '[CavosProvider] no fresh login proof this session; recovery will be set up on the next sign-in.',
-        );
-      }
-    }
-
-    let cancelled = false;
-
-    void Promise.all(
-      targets.map(async ({ wallet: w, action }) => {
-        const attemptKey = `${key(w)}:${action}:${credential?.tokenFingerprint ?? 'agreed'}`;
-        if (socialAttemptRef.current.has(attemptKey)) return;
-        socialAttemptRef.current.add(attemptKey);
-        try {
-          // Agree the authority with the enclave while the login proof is
-          // fresh. It expires in five minutes and, under lazy deploy, the
-          // account it protects does not exist until the user's first
-          // transaction -- so waiting for the account meant a user who signed
-          // in and transacted ten minutes later was never enrolled at all.
-          let authority = agreedAuthorityRef.current.get(key(w));
-          if (!authority) {
-            if (!credential) return;
-            authority = await agreeRecoveryAuthority({ client, wallet: w, credential });
-            if (cancelled) return;
-            agreedAuthorityRef.current.set(key(w), authority);
-          }
-          // The chain half is device-signed and needs no proof, so it can wait
-          // for the account however long that takes.
-          if (action !== 'enroll') return;
-          await writeRecoveryAuthority({
-            client,
-            wallet: w,
-            authority,
-          });
-          agreedAuthorityRef.current.delete(key(w));
-          socialEnrolledRef.current.add(key(w));
-          if (cancelled) return;
-          setWalletStatus((status) => ({
-            ...status,
-            recovery: {
-              protected: true,
-              methods: status.recovery.methods.includes('social')
-                ? status.recovery.methods
-                : [...status.recovery.methods, 'social'],
-            },
-          }));
-        } catch (error) {
-          // Hardening must never break a working wallet. A 409 means an earlier
-          // login already did it.
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes('already_enrolled')) {
-            console.error(`[CavosProvider] recovery setup failed on ${w.chain}:`, error);
-          }
-        }
-      }),
-    );
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    auth,
-    config.appId,
-    config.authBackendUrl,
-    config.environment,
-    appDeviceApproval,
-    socialRecovery,
-    socialRecoveryPolicy,
-    session,
-    identity,
-    // Wallets are mutated in place when the first execute deploys them, so the
-    // session reference alone never re-runs this.
-    walletStatus.isReady,
-    walletStatus.isUndeployed,
-  ]);
-
-  /**
-   * Restore this exact device on the active wallet, using the provider
-   * credential that is available only immediately after login. The credential
-   * is encrypted to the independently-attested enclave by the SDK.
-   */
-  useEffect(() => {
-    // Same rule as the sweep above: on passkeys the enclave is not this app's
-    // to use, and a device is authorized by the gesture instead. Classic
-    // Stellar never uses the enclave either — passkey or recovery code.
-    if (deviceAuthorization === 'passkey') return;
-    if (wallet?.chain === 'stellar' || wallet?.chain === 'solana') return;
-    if (
-      !socialRecovery?.enabled ||
-      !wallet ||
-      !identity ||
-      !config.appId
-    ) return;
-
-    // What to do, and whether the one-shot credential may be taken at all. The
-    // ordering lives in `decideSocialRecovery` because getting it wrong is
-    // silent: taking the credential for a wallet we then skip burns it, and the
-    // enrolment that should follow the first execute never runs.
-    const decision = decideSocialRecovery(
-      wallet.status,
-      socialEnrolledRef.current.has(`${wallet.chain}:${wallet.address}`),
-    );
-    // Enrolment belongs to the sweep above, which does every chain. This is
-    // recovery: restoring the device the user is holding.
-    if (decision.action !== 'recover') return;
-
-    let credential: SocialRecoveryCredential;
-    try {
-      credential = auth.consumeSocialRecoveryCredential();
-    } catch {
-      // No error here. The proof is deliberately never persisted — it is what
-      // the enclave verifies — so a reloaded device simply does not have one,
-      // and `resolveDeviceAuthorization` already reports that as
-      // `social-needs-login`: a sign-in button, not a failure notice pinned to
-      // somebody else's screen.
-      return;
-    }
-    const action = decision.action;
-    const attemptKey =
-      `${wallet.chain}:${wallet.address}:${action}:${credential.tokenFingerprint}`;
-    if (socialAttemptRef.current.has(attemptKey)) return;
-    socialAttemptRef.current.add(attemptKey);
-
-    if (!socialRecoveryPolicy) {
-      if (action === 'recover') {
-        setAuthError(
-          'Social recovery is enabled for this environment, but the app has not turned it on. ' +
-            'Set `socialRecovery: true` in the Cavos config, or pass your own AttestationPolicy.',
-        );
-      }
-      return;
-    }
-
-    const client = new SocialRecoveryClient({
-      baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
-      appId: config.appId,
-      environment: config.environment,
-      attestation: socialRecoveryPolicy,
-    });
-    let cancelled = false;
-
-    (async () => {
-      setWalletStatus((status) => ({
-        ...status,
-        isDeploying: true,
-        needsDeviceApproval: false,
-        awaitingApproval: false,
-        isSocialRecovering: true,
-      }));
-      try {
-        // A second device can arrive while the first device's automatic TEE
-        // enrollment is still finishing. Treat that short race as a pending
-        // state instead of immediately surfacing the backend's `not_enrolled`
-        // response. The same fresh credential is safe to retry because the
-        // control plane does not reserve its fingerprint until an enrollment
-        // actually exists and a recovery session is created.
-        const enrollmentDeadline = Date.now() + 5 * 60_000;
-        let outcome: Awaited<ReturnType<typeof recoverHardwareIsolatedDevice>>;
-        for (;;) {
-          try {
-            outcome = await recoverHardwareIsolatedDevice({
-              client,
-              wallet,
-              credential,
-              network: config.network,
-            });
-            break;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            // Only an enrolment actually in flight is worth waiting for.
-            // `not_enrolled` means no recovery authority was ever written
-            // on-chain, so there is nothing to wait for and retrying just spins
-            // for five minutes behind a spinner. Older control planes answer
-            // `not_enrolled` for both, so it stays in the retryable set for
-            // them; newer ones distinguish it.
-            const enrollmentIsPending =
-              message.includes('enrollment_pending') ||
-              message.includes('social recovery is not enrolled') ||
-              (message.includes('not_enrolled') && !message.includes('nothing to recover'));
-            if (
-              !enrollmentIsPending ||
-              Date.now() >= enrollmentDeadline ||
-              cancelled
-            ) {
-              throw error;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 5_000));
-          }
-        }
-        if (cancelled) return;
-        await waitUntilWalletReady(wallet);
-        // From here `cancelled` no longer means "stop": the wait above marks
-        // the wallet ready, `wallet.status` is one of this effect's own
-        // dependencies, and so the next render cancels this very run. Gating
-        // the rest on it left the wallet working and `isSocialRecovering` true
-        // for good. What matters now is whether this is still the wallet on
-        // screen.
-        const stillThisWallet = () => walletRef.current === wallet;
-        // This device is now an authorized signer, and it got there without the
-        // owner approving anything — the enclave did. Tell them, with a link to
-        // revoke it. Best-effort: the signer is already on-chain, so a failed
-        // notice must never fail the recovery the user is standing in front of.
-        if (config.appId) {
-          try {
-            await new HttpRecoveryClient({
-              baseUrl: config.authBackendUrl ?? 'https://cavos.xyz',
-              appId: config.appId,
-              ...(config.environment ? { environment: config.environment } : {}),
-              // The route only tells an owner about their own wallet.
-              authToken: () => auth.getAuthToken(),
-            }).notifyDeviceAdded({
-              accountAddress: wallet.address,
-              signer: wallet.publicKey,
-              ...(identity.email ? { email: identity.email } : {}),
-              ...(outcome.finalizeTransaction ? { txHash: outcome.finalizeTransaction } : {}),
-            });
-          } catch (e) {
-            console.warn('[CavosProvider] device-added notice failed:', e);
-          }
-        }
-        if (stillThisWallet()) await connect(identity, { silent: true });
-      } catch (error) {
-        if (!cancelled) {
-          const message = error instanceof Error ? error.message : 'Social recovery failed.';
-          // Also ends any action waiting on this authorization, rather than
-          // leaving it to time out having already been refused.
-          authorizationErrorRef.current = message;
-          setAuthError(message);
-          setWalletStatus((status) => ({
-            ...status,
-            isDeploying: false,
-            needsDeviceApproval: true,
-            isSocialRecovering: false,
-          }));
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    auth,
-    config.appId,
-    config.authBackendUrl,
-    config.environment,
-    config.network,
-    socialRecoveryPolicy,
-    connect,
-    deviceAuthorization,
-    identity,
-    socialRecovery,
-    wallet,
-    // The wallet object is mutated in place when the first execute deploys it,
-    // so depending on the reference alone never re-runs this. The status is the
-    // thing that actually changed, and enrolment is what has to follow it.
-    wallet?.status,
-    externalSocialToken,
-  ]);
 
   // A device signer is already persisted securely in IndexedDB. Restore only
   // the non-secret identity metadata from localStorage, then reconnect the
@@ -1463,177 +1040,72 @@ export function CavosProvider({
     [wallet],
   );
 
-  const addSigner = useCallback(
-    async (pubkey: { x: bigint; y: bigint }) => {
-      if (!wallet) throw new Error('Not logged in');
-      if (wallet.chain !== 'starknet') {
-        throw new Error('kit: addSigner via useCavos() is Starknet-only; use the `wallet` handle on other chains.');
-      }
-      return wallet.addSigner(pubkey);
-    },
-    [wallet],
-  );
-
-  const removeSigner = useCallback(
-    async (pubkey: { x: bigint; y: bigint }) => {
-      if (!wallet) throw new Error('Not logged in');
-      if (wallet.chain === 'stellar') {
-        throw new Error(
-          'kit: on Stellar, use wallet.removeDevice({ slotId }) — slotId is the device G public key.',
-        );
-      }
-      if (wallet.chain !== 'starknet') {
-        throw new Error('kit: removeSigner via useCavos() is Starknet-only; use the `wallet` handle on other chains.');
-      }
-      return wallet.removeSigner(pubkey);
-    },
-    [wallet],
-  );
-
-  // The authorized device signers, read from the backend's `wallet_devices`
-  // mirror (`/api/wallets`). On Stellar the account is self-describing, so its
-  // own envelope slots are the source of truth instead.
-  const listDevices = useCallback(async (): Promise<{ x: bigint; y: bigint }[]> => {
-    const cfg = configRef.current;
-    if (!identity || !wallet) throw new Error('Not logged in');
-    if (wallet.chain === 'stellar') {
-      throw new Error(
-        'kit: on Stellar, use wallet.listDevices() — devices are Horizon signer keys, not envelope slots.',
-      );
-    }
-    if (!cfg.appId) throw new Error('kit: listDevices requires an appId');
-    const registry = new HttpWalletRegistry({
-      baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
-      appId: cfg.appId,
-      network: cfg.network,
-      ...(cfg.environment ? { environment: cfg.environment } : {}),
-      authToken: () => auth.getAuthToken(),
-    });
-    const found = await registry.lookup(identity.userId);
-    return found?.devices ?? [];
-  }, [identity, wallet]);
-
-  const enrollPasskey = useCallback(
-    async (passkey: PasskeyApprover, params: PasskeyEnrollParams) => {
-      if (!wallet) throw new Error('Not logged in');
-      if (wallet.chain === 'stellar' || wallet.chain === 'solana') {
-        throw new Error(
-          'kit: on Solana and Stellar the passkey derives the spend key at connect; use deviceApproval: "passkey".',
-        );
-      }
-      return wallet.enrollPasskey(passkey, params);
-    },
-    [wallet],
-  );
-
   const rpName = branding.appName ?? modal?.appName ?? 'Cavos';
 
-  // Enroll a synced passkey as an approver on the connected chain (single OS prompt).
   /**
-   * Turn on passkey approvals for the whole session, with one gesture.
+   * Add a passkey that restores the wallet on a new device, with one gesture.
    *
-   * It used to enrol the wallet on screen and no other, so the chains the user
-   * was not looking at stayed without a passkey -- and switching chain to fix
-   * that meant another prompt, and another passkey. One credential is created
-   * here and registered everywhere: as an on-chain approver on the chains that
-   * verify assertions, and as a derived ed25519 signer on Stellar, which does not.
-   *
-   * Works before the first transaction too: an undeployed wallet keeps the
-   * approver pending and includes it in its deploy.
+   * Success means a copy of the DEK is stored under the passkey. A passkey that
+   * merely exists would restore nothing on the next device. Every chain in the
+   * session derives from the same DEK, so one passkey covers them all.
    */
   const enrollPasskeyDefault = useCallback(async () => {
     if (!session || !identity) throw new Error('Not logged in');
-    const wallets = session.chains.map((c) => session.wallet(c));
-    const nativeOnly = wallets.every((w) => w.chain === 'solana' || w.chain === 'stellar');
-    if (nativeOnly) {
-      // Success means a copy of the DEK is stored under the passkey. A passkey
-      // that merely exists would restore nothing on the next device.
-      const cfg = configRef.current;
-      if (!cfg.appId) throw new Error('kit: adding a passkey requires an appId');
-      const vault = vaultSetting(cfg);
-      const user = { userId: identity.userId, userName: identity.email ?? identity.userId };
-      const authToken = auth.getAuthToken();
-      if (vault) {
-        await VaultClient.attach({ appId: cfg.appId, ...(typeof vault === 'object' ? vault : {}) }).enrollPasskey({
-          ...user,
-          appSalt: cfg.appSalt,
-          ...(cfg.environment ? { environment: cfg.environment } : {}),
-          authToken,
-        });
-      } else {
-        const w = wallets.find((x) => x.status === 'ready');
-        if (!w || (w.chain !== 'solana' && w.chain !== 'stellar')) {
-          throw new Error('kit: this device does not hold the wallet key, so it cannot add a passkey');
-        }
-        const dek = await readLocalDek({ chain: w.chain, userId: identity.userId, appSalt: cfg.appSalt, address: w.address });
-        try {
-          await addPasskey({
-            passkey: new PasskeyPrf({ rpName, ...(cfg.rpId ? { rpId: cfg.rpId } : {}) }),
-            wraps: new HttpPasskeyWrapStore({
-              baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
-              appId: cfg.appId,
-              ...(cfg.environment ? { environment: cfg.environment } : {}),
-              authToken: () => auth.getAuthToken(),
-            }),
-            owner: { appId: cfg.appId, userId: identity.userId },
-            dek,
-            user,
-          });
-        } finally {
-          zeroize(dek);
-        }
+    const cfg = configRef.current;
+    if (!cfg.appId) throw new Error('kit: adding a passkey requires an appId');
+    const vault = vaultSetting(cfg);
+    const user = { userId: identity.userId, userName: identity.email ?? identity.userId };
+    const authToken = auth.getAuthToken();
+    if (vault) {
+      await VaultClient.attach({ appId: cfg.appId, ...(typeof vault === 'object' ? vault : {}) }).enrollPasskey({
+        ...user,
+        appSalt: cfg.appSalt,
+        ...(cfg.environment ? { environment: cfg.environment } : {}),
+        authToken,
+      });
+    } else {
+      const w = session.chains.map((c) => session.wallet(c)).find((x) => x.status !== 'needs-device-approval');
+      if (!w) {
+        throw new Error('kit: this device does not hold the wallet key, so it cannot add a passkey');
       }
-      setWalletStatus((status) => ({ ...status, hasPasskey: true }));
-      return;
+      const dek = await readLocalDek({ chain: w.chain, userId: identity.userId, appSalt: cfg.appSalt, address: w.address });
+      try {
+        await addPasskey({
+          passkey: new PasskeyPrf({ rpName, ...(cfg.rpId ? { rpId: cfg.rpId } : {}) }),
+          wraps: new HttpPasskeyWrapStore({
+            baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+            appId: cfg.appId,
+            ...(cfg.environment ? { environment: cfg.environment } : {}),
+            authToken: () => auth.getAuthToken(),
+          }),
+          owner: { appId: cfg.appId, userId: identity.userId },
+          dek,
+          user,
+        });
+      } finally {
+        zeroize(dek);
+      }
     }
-
-    const enrolled = await new PasskeySigner({ rpName }).enroll({
-      userId: identity.userId,
-      userName: identity.email ?? identity.userId,
-      ...(identity.email ? { displayName: identity.email } : {}),
-    });
-
-    // Register it where the account exists, and on exactly one that does not,
-    // so there is somewhere to check a recovered key against later. Deploying
-    // every configured chain here would buy gas on chains the user may never
-    // touch; each of those picks the passkey up when it is created.
-    // One chain, so there is nowhere to propagate to: register it here and the
-    // account is created if it does not exist yet.
-    for (const w of wallets) {
-      if (w.chain === 'stellar' || w.chain === 'solana') continue;
-      await w.addApprover(enrolled.publicKey);
-    }
-
-    const stellar = wallets.find((w) => w.chain === 'stellar');
-    if (!stellar || stellar.chain !== 'stellar') return;
-    if (stellar.nativeDek) return;
-    const secret =
-      enrolled.secret ?? (await new PasskeyPrf({ rpName }).getSecret(enrolled.credentialId));
-    await stellar.enrollPasskey(secret);
+    setWalletStatus((status) => ({ ...status, hasPasskey: true }));
   }, [session, identity, rpName, auth]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
   const approveDeviceWithPasskey = useCallback(async () => {
     if (!wallet || !identity) throw new Error('Not logged in');
-    if (wallet.chain === 'solana' || (wallet.chain === 'stellar' && wallet.nativeDek)) {
+    if (wallet.chain !== 'stellar' || wallet.nativeDek) {
       await connect(identity, { passkey: true });
       return;
     }
     if (wallet.status !== 'needs-device-approval') {
-      await connect(identity, wallet.chain === 'stellar' ? { passkey: true } : undefined);
+      await connect(identity, { passkey: true });
       return;
     }
-    if (wallet.chain === 'stellar') {
-      const prf = new PasskeyPrf({ rpName });
-      await wallet.approveThisDeviceWithPasskey(await prf.getSecret());
-    } else {
-      const passkey = new PasskeySigner({ rpName });
-      await wallet.approveThisDeviceWithPasskey({ passkey });
-    }
+    const prf = new PasskeyPrf({ rpName });
+    await wallet.approveThisDeviceWithPasskey(await prf.getSecret());
     // The on-chain add_signer isn't indexed the instant the tx submits — show the
     // deploying state and poll readiness (cheap, side-effect free) until it lands.
-    setWalletStatus((s) => ({ ...s, isDeploying: true, needsDeviceApproval: false, awaitingApproval: false }));
+    setWalletStatus((s) => ({ ...s, isDeploying: true, needsDeviceApproval: false }));
     const deadline = Date.now() + 60_000;
     for (;;) {
       let ready = false;
@@ -1745,6 +1217,9 @@ export function CavosProvider({
   // The code is returned so the UI can display it once — never persisted.
   const setupRecovery = useCallback(async (): Promise<string> => {
     if (!wallet) throw new Error('Not logged in');
+    if (wallet.chain !== 'stellar') {
+      throw new Error('kit: recovery codes are Stellar-only; use a passkey or the enclave on other chains.');
+    }
     const code = generateRecoveryCode();
     await wallet.setupRecovery(code);
     return code;
@@ -1758,10 +1233,7 @@ export function CavosProvider({
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
     try {
       const chain = cfg.chain ?? cfg.defaultChain ?? cfg.chains?.[0] ?? 'starknet';
-      if (chain === 'solana') {
-        // Native Ed25519 restores on connect (enclave or passkey). There is no
-        // backup add_signer.
-      } else if (chain === 'stellar') {
+      if (chain === 'stellar') {
         // Classic `G…`: reconnect this (fresh) device, then use the recovery code
         // to approve it — the code unlocks the control key which authorizes adding
         // this device's slot. The account already exists, so no funder is needed.
@@ -1777,19 +1249,6 @@ export function CavosProvider({
         if (sw.chain === 'stellar' && sw.status === 'needs-device-approval') {
           await sw.approveThisDeviceWithRecovery(code);
         }
-      } else {
-        await Cavos.recover({
-          code,
-          identity,
-          auth,
-          network: cfg.network,
-          appSalt: cfg.appSalt,
-          paymasterApiKey: cfg.paymasterApiKey ?? '',
-          ...(cfg.appId ? { appId: cfg.appId } : {}),
-          ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
-          ...(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {}),
-          vault: vaultSetting(cfg),
-        });
       }
       // After recovery, reconnect to get a proper session with all chains
       await connect(identity);
@@ -1802,44 +1261,12 @@ export function CavosProvider({
     }
   }, [identity, modal, connect, wallet]);
 
-  // Poll the pending device-addition request while awaiting the owner's approval
-  // (Starknet email flow). Once approved, reconnect to flip to "ready".
-  useEffect(() => {
-    if (!walletStatus.awaitingApproval || !walletStatus.pendingRequestId || !identity) return;
-    const cfg = configRef.current;
-    if (!cfg.appId) return;
-    const backendUrl = cfg.authBackendUrl ?? 'https://cavos.xyz';
-    const recovery = new HttpRecoveryClient({ baseUrl: backendUrl, appId: cfg.appId, environment: cfg.environment, authToken: () => auth.getAuthToken() });
-    const requestId = walletStatus.pendingRequestId;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const r = await recovery.getPendingRequest(requestId);
-        if (cancelled || !r) return;
-        if (r.status === 'expired') {
-          setWalletStatus((s) => ({ ...s, pendingRequestId: null }));
-          return;
-        }
-        if (r.status === 'approved') {
-          await connect(identity);
-        }
-      } catch {
-        /* transient network errors are fine; the next tick retries */
-      }
-    };
-    const interval = setInterval(tick, 4000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [walletStatus.awaitingApproval, walletStatus.pendingRequestId, identity, connect]);
-
   const submitSocialRecoveryToken = useCallback((idToken: string) => {
     // Throws for a token no provider the enclave trusts could have issued, so
     // the mistake surfaces here instead of as an opaque enclave rejection.
     auth.useExternalSocialRecoveryToken(idToken);
-    setExternalSocialToken((n) => n + 1);
-  }, [auth]);
+    if (identity) void connect(identity, { silent: true });
+  }, [auth, identity, connect]);
 
   const logout = useCallback(() => {
     const vault = vaultSetting(config);
@@ -1885,17 +1312,12 @@ export function CavosProvider({
     handleCallback,
     execute,
     signMessage,
-    addSigner,
-    removeSigner,
-    listDevices,
-    enrollPasskey,
     passkeySupported,
     deviceAuthorization,
     authorizeDevice,
     authorizingDevice,
     enrollPasskeyDefault,
     approveDeviceWithPasskey,
-    resendDeviceApproval,
     setupRecovery,
     recover,
     submitSocialRecoveryToken,
@@ -1933,21 +1355,3 @@ export function useCavos(): CavosContextValue {
   if (!ctx) throw new Error('useCavos must be used within a CavosProvider');
   return ctx;
 }
-
-async function waitUntilWalletReady(wallet: CavosWallet): Promise<void> {
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    try {
-      if (await wallet.isReady()) return;
-    } catch {
-      // RPC/indexer propagation is eventually consistent; retry below.
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        "The recovery transaction was submitted, but the new signer is not visible yet.",
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
-}
-

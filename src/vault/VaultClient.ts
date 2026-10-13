@@ -3,6 +3,7 @@ import { StrKey } from "@stellar/stellar-sdk";
 import {
   CallData,
   SignerInterface,
+  num,
   type Call,
   type DeclareSignerDetails,
   type DeployAccountSignerDetails,
@@ -14,8 +15,8 @@ import type { AuthProvider, Identity } from "../auth/AuthProvider";
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
-import type { DevicePublicKey, DeviceSignature } from "../signer/DeviceSigner";
 import { bytesToBigInt } from "../crypto/encoding";
+import type { NativeChain } from "../secret/derive";
 import { dropLegacyCopies } from "../secret/legacy";
 import {
   VAULT_HELLO,
@@ -109,23 +110,17 @@ export class VaultClient {
   }
 
   async connectStarknet(params: Omit<ConnectParams, "chain">): Promise<{
-    publicKey: DevicePublicKey;
-    accountSigner: SignerInterface;
-    signMessage(message: Uint8Array): Promise<DeviceSignature>;
+    address: string;
+    isNewAccount: boolean;
+    signer: SignerInterface | null;
+    passkey: boolean;
   }> {
     const result = await this.call("connect", { ...params, chain: "starknet" });
-    if (!result.publicKey) throw new Error("kit/vault: the vault returned no Starknet key");
-    const { handle } = result;
     return {
-      publicKey: {
-        x: bytesToBigInt(result.publicKey.subarray(1, 33)),
-        y: bytesToBigInt(result.publicKey.subarray(33, 65)),
-      },
-      accountSigner: new VaultStarknetSigner(
-        (typedData, accountAddress) => this.call("signStarknetTypedData", { handle, typedData, accountAddress }),
-        (calls, details) => this.call("signStarknetInvoke", { handle, calls, details }),
-      ),
-      signMessage: (message) => this.call("signStarknetMessage", { handle, message }),
+      address: result.address,
+      isNewAccount: result.isNewAccount,
+      signer: this.starknetSigner(result),
+      passkey: result.passkey === true,
     };
   }
 
@@ -146,6 +141,15 @@ export class VaultClient {
       signTransaction: (message) => this.call("signSolanaTransaction", { handle, message }),
       signMessage: (message) => this.call("signMessage", { handle, message }),
     };
+  }
+
+  private starknetSigner({ handle, publicKey }: ConnectResult): SignerInterface | null {
+    if (!publicKey) return null;
+    return new VaultStarknetSigner(
+      num.toHex(bytesToBigInt(publicKey)),
+      (typedData, accountAddress) => this.call("signStarknetTypedData", { handle, typedData, accountAddress }),
+      (calls, details) => this.call("signStarknetInvoke", { handle, calls, details }),
+    );
   }
 
   private stellarSigner({ handle, publicKey }: ConnectResult): ControlKey | undefined {
@@ -184,6 +188,7 @@ export class VaultClient {
  */
 class VaultStarknetSigner extends SignerInterface {
   constructor(
+    private readonly publicKey: string,
     private readonly signTypedData: (typedData: TypedData, accountAddress: string) => Promise<string[]>,
     private readonly signInvoke: (calls: Call[], details: InvocationsSignerDetails) => Promise<string[]>,
   ) {
@@ -191,7 +196,7 @@ class VaultStarknetSigner extends SignerInterface {
   }
 
   async getPubKey(): Promise<string> {
-    return "0x0";
+    return this.publicKey;
   }
 
   signMessage(typedData: TypedData, accountAddress: string): Promise<Signature> {
@@ -213,14 +218,14 @@ class VaultStarknetSigner extends SignerInterface {
 }
 
 /** Connect through the vault, then retire any copy of the same keys this page stored before it. */
-export async function connectThroughVault<R extends { address: string; spend?: unknown; control?: unknown }>(
-  chain: "solana" | "stellar",
+export async function connectThroughVault<R extends { address: string; spend?: unknown; control?: unknown; signer?: unknown }>(
+  chain: NativeChain,
   identity: Identity,
   appSalt: string,
   connect: () => Promise<R>,
 ): Promise<R> {
   const result = await connect();
-  if (result.spend || result.control) {
+  if (result.spend || result.control || result.signer) {
     await dropLegacyCopies(chain, identity.userId, appSalt, result.address).catch(() => undefined);
   }
   return result;

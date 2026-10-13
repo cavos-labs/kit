@@ -3,16 +3,18 @@ import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 import { PublicKey } from "@solana/web3.js";
 import { StrKey } from "@stellar/stellar-sdk";
+import { starknetAddressFromSeed } from "../chains/starknet/keys";
 import { utf8ToBytes } from "../crypto/encoding";
 import { parseMasterDEK, parseEd25519Seed, type MasterDEK, type Ed25519Seed } from "./dek";
 
-export type Ed25519Chain = "solana" | "stellar";
+export type NativeChain = "solana" | "stellar" | "starknet";
 
 declare const appSaltBrand: unique symbol;
 export type AppSalt = Uint8Array & { readonly [appSaltBrand]: "AppSalt" };
 
 export const HKDF_SOLANA = "cavos-ed25519-solana-v1";
 export const HKDF_STELLAR = "cavos-ed25519-stellar-v1";
+export const HKDF_STARKNET = "cavos-stark-starknet-v1";
 
 export function parseAppSalt(salt: string | Uint8Array): AppSalt {
   if (typeof salt === "string") {
@@ -23,12 +25,14 @@ export function parseAppSalt(salt: string | Uint8Array): AppSalt {
   return salt.slice() as AppSalt;
 }
 
-function infoFor(chain: Ed25519Chain): string {
-  return chain === "solana" ? HKDF_SOLANA : HKDF_STELLAR;
-}
+const HKDF_INFO: Record<NativeChain, string> = {
+  solana: HKDF_SOLANA,
+  stellar: HKDF_STELLAR,
+  starknet: HKDF_STARKNET,
+};
 
-export function deriveSeed(dek: MasterDEK, chain: Ed25519Chain, appSalt: AppSalt): Ed25519Seed {
-  return parseEd25519Seed(hkdf(sha256, dek, appSalt, infoFor(chain), 32));
+export function deriveSeed(dek: MasterDEK, chain: NativeChain, appSalt: AppSalt): Ed25519Seed {
+  return parseEd25519Seed(hkdf(sha256, dek, appSalt, HKDF_INFO[chain], 32));
 }
 
 /** MasterDEK from a synced passkey PRF. Same credential + app → same DEK, no server wrap. */
@@ -47,10 +51,12 @@ export function stellarAddressFromSeed(seed: Ed25519Seed): string {
   return StrKey.encodeEd25519PublicKey(Buffer.from(ed25519.getPublicKey(seed)));
 }
 
-export function nativeAddress(dek: MasterDEK, chain: Ed25519Chain, appSalt: AppSalt): string {
+export function nativeAddress(dek: MasterDEK, chain: NativeChain, appSalt: AppSalt): string {
   const seed = deriveSeed(dek, chain, appSalt);
   try {
-    return chain === "solana" ? solanaAddressFromSeed(seed) : stellarAddressFromSeed(seed);
+    if (chain === "solana") return solanaAddressFromSeed(seed);
+    if (chain === "stellar") return stellarAddressFromSeed(seed);
+    return starknetAddressFromSeed(seed);
   } finally {
     seed.fill(0);
   }

@@ -1,7 +1,7 @@
 import { LocalDeviceUnwrapKey } from "../chains/stellar/DeviceUnwrapKey";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 import { generateMasterDEK, parseMasterDEK, type MasterDEK } from "./dek";
-import { parseAppSalt, masterDekFromPasskey, type Ed25519Chain } from "./derive";
+import { parseAppSalt, masterDekFromPasskey, type NativeChain } from "./derive";
 import {
   ensureEnclave,
   type AddressIndex,
@@ -40,13 +40,13 @@ class MemoryStore implements WrapStore {
 
 class MemoryIndex implements AddressIndex {
   private rows = new Map<string, string>();
-  private k(userId: string, chain: Ed25519Chain) {
+  private k(userId: string, chain: NativeChain) {
     return `${userId}:${chain}`;
   }
-  async lookup(userId: string, chain: Ed25519Chain) {
+  async lookup(userId: string, chain: NativeChain) {
     return this.rows.get(this.k(userId, chain)) ?? null;
   }
-  async claim(userId: string, chain: Ed25519Chain, address: string) {
+  async claim(userId: string, chain: NativeChain, address: string) {
     const key = this.k(userId, chain);
     const existing = this.rows.get(key);
     if (existing) return { address: existing, existing: true };

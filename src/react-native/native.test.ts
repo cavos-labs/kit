@@ -1,6 +1,5 @@
 import { p256 } from "@noble/curves/p256";
 import { sha256 } from "@noble/hashes/sha256";
-import { NativeDeviceSigner } from "./NativeDeviceSigner";
 import { NativeDeviceUnwrapKey } from "./NativeDeviceUnwrapKey";
 import { NativeCavosAuth } from "./NativeCavosAuth";
 import { eciesWrapDEK } from "../chains/stellar/envelope";
@@ -36,16 +35,6 @@ jest.mock("expo-modules-core", () => ({ requireNativeModule: () => bridge }), { 
 jest.mock("expo-web-browser", () => ({ openAuthSessionAsync: jest.fn() }), { virtual: true });
 
 describe("React Native key adapters", () => {
-  test("native ECDSA output satisfies the DeviceSigner contract", async () => {
-    const signer = await NativeDeviceSigner.loadOrCreate({ keyId: "user:app", minimumKeySecurity: "hardware" });
-    const message = new Uint8Array(32).fill(3);
-    const signature = await signer.sign(message);
-    const publicKey = await signer.getPublicKey();
-    expect(p256.verify({ r: signature.r, s: signature.s }, sha256(message), signingPublic)).toBe(true);
-    expect(publicKey.x).toBeGreaterThan(0n);
-    expect(typeof signature.yParity).toBe("boolean");
-  });
-
   test("native ECDH opens the same Stellar ECIES envelope", async () => {
     const key = await NativeDeviceUnwrapKey.loadOrCreate({ keyId: "user:app:stellar" });
     const dek = new Uint8Array(32).fill(11);
@@ -54,8 +43,8 @@ describe("React Native key adapters", () => {
   });
 
   test("hardware-only policy rejects an OS-protected fallback", async () => {
-    bridge.getOrCreateSigningKey.mockResolvedValueOnce({ publicKey: toBase64(signingPublic), securityLevel: "os-protected" });
-    await expect(NativeDeviceSigner.loadOrCreate({ keyId: "fallback", minimumKeySecurity: "hardware" }))
+    bridge.getOrCreateUnwrapKey.mockResolvedValueOnce({ publicKey: toBase64(unwrapPublic), securityLevel: "os-protected" });
+    await expect(NativeDeviceUnwrapKey.loadOrCreate({ keyId: "fallback", minimumKeySecurity: "hardware" }))
       .rejects.toThrow("hardware-backed key required");
   });
 });

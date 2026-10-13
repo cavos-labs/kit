@@ -1,17 +1,17 @@
 /**
  * @cavos/kit — device-native accounts on Starknet, Solana, and Stellar.
  *
- * Starknet: silent secp256r1 DeviceAccount. Solana/Stellar: native Ed25519
- * whose spend key is HKDF of a MasterDEK (enclave seal or passkey PRF).
+ * Every chain is native: the spend key is HKDF of a MasterDEK (enclave seal or
+ * passkey PRF). Starknet is the standard OpenZeppelin account with a stark key,
+ * Solana and Stellar use Ed25519. Recovery is off-chain; there is no on-chain
+ * device list.
  */
 
 // High-level entry point (Privy-like: log in -> ready, deployed, gasless wallet)
-export { Cavos, approveDeviceEverywhere } from "./Cavos";
-export type { PasskeyApprovable } from "./Cavos";
+export { Cavos } from "./Cavos";
 export type {
   ConnectOptions,
   ConnectStatus,
-  RecoveryOptions,
   Chain,
   NetworkEnv,
   CavosWallet,
@@ -23,28 +23,13 @@ export { StaticIdentity } from "./auth/AuthProvider";
 export { CavosAuth } from "./auth/CavosAuth";
 export type { CavosAuthOptions } from "./auth/CavosAuth";
 
-// App namespacing (the address itself is named by the first device signer).
-export { appNamespace, appNamespaceFelt } from "./identity";
-export type { AppNamespaceInput } from "./identity";
-
 // Off-chain user_id -> wallet map (multi-device recognition; backend-implemented)
 export type { WalletRegistry, RegisteredWallet, RegisterResult } from "./registry/WalletRegistry";
 export { InMemoryWalletRegistry } from "./registry/WalletRegistry";
 export { HttpWalletRegistry } from "./registry/HttpWalletRegistry";
 export type { HttpWalletRegistryOptions } from "./registry/HttpWalletRegistry";
 
-// Multi-device recovery relay (device-approval request → on-chain add_signer)
-export type {
-  RecoveryClient,
-  PendingDeviceRequest,
-  DeviceRemovalRequest,
-} from "./recovery/RecoveryClient";
-export { HttpRecoveryClient } from "./recovery/HttpRecoveryClient";
-export type { HttpRecoveryClientOptions } from "./recovery/HttpRecoveryClient";
-
-// Self-custodial recovery: derive a backup signer from a code (cross-chain,
-// off-chain derivation; registered on-chain as an ordinary signer).
-export { BackupSigner, generateRecoveryCode, deriveBackupKey } from "./recovery/BackupSigner";
+export { generateRecoveryCode } from "./recovery/recoveryCode";
 export {
   SocialRecoveryClient,
 } from "./recovery/SocialRecoveryClient";
@@ -59,26 +44,15 @@ export type {
   SocialRecoveryProvider,
   SocialRecoveryResult,
 } from "./recovery/SocialRecoveryClient";
-export {
-  enrollHardwareIsolatedRecovery,
-  recoverHardwareIsolatedDevice,
-} from "./recovery/SocialRecoveryCoordinator";
-export type {
-  CoordinatedRecoveryResult,
-} from "./recovery/SocialRecoveryCoordinator";
 export { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "./recovery/attestationDefaults";
 
 // Signers
-export type { DeviceSigner, DevicePublicKey, DeviceSignature } from "./signer/DeviceSigner";
+export type { DevicePublicKey } from "./signer/DeviceSigner";
 export type {
-  PasskeyApprover,
   PasskeyPrfProvider,
   PasskeyEnrollParams,
   PasskeyPrfEnrollResult,
-  EnrolledPasskey,
 } from "./signer/PasskeyProvider";
-export { WebCryptoSigner } from "./signer/WebCryptoSigner";
-export type { WebCryptoSignerOptions } from "./signer/WebCryptoSigner";
 
 // Off-chain message signing + sign-without-submit
 export type {
@@ -93,23 +67,22 @@ export { CAVOS_MESSAGE_PREFIX, prefixedMessageBytes } from "./signing";
 
 // Chain adapters
 export type {
-  ChainAdapter,
   ChainCall,
-  ComputeAddressParams,
   ExecuteOptions,
   FeeMode,
   SolanaExecuteOptions,
   SolanaFeeMode,
 } from "./chains/ChainAdapter";
-export { StarknetAdapter } from "./chains/starknet/StarknetAdapter";
-export type { StarknetAdapterOptions } from "./chains/starknet/StarknetAdapter";
-export { StarknetDeviceSigner } from "./chains/starknet/StarknetDeviceSigner";
-export {
-  STARKNET_NETWORKS,
-  UDC_ADDRESS,
-  DEVICE_ACCOUNT_CLASS_HASH,
-} from "./chains/starknet/constants";
+export { CavosStarknet } from "./chains/starknet/CavosStarknet";
+export type { ConnectStarknetOptions } from "./chains/starknet/CavosStarknet";
+export { STARKNET_NETWORKS, CAVOS_PAYMASTER_URL, OZ_ACCOUNT_CLASS_HASH } from "./chains/starknet/constants";
 export type { StarknetNetwork } from "./chains/starknet/constants";
+export {
+  starkKeyFromSeed,
+  starkPublicKey,
+  starknetAddressFromPublicKey,
+  starknetAddressFromSeed,
+} from "./chains/starknet/keys";
 export { SOLANA_NETWORKS } from "./chains/solana/constants";
 export type { SolanaNetwork } from "./chains/solana/constants";
 export { CavosSolana } from "./chains/solana/CavosSolana";
@@ -164,19 +137,6 @@ export {
 } from "./chains/stellar/datamap";
 
 // Low-level crypto / encoding (advanced use)
-export { signatureToFelts, recoverYParity } from "./crypto/signature";
-export { PasskeySigner } from "./signer/PasskeySigner";
-export type {
-  PasskeySignerOptions,
-} from "./signer/PasskeySigner";
-export type { PasskeyAssertion } from "./crypto/webauthn";
-export {
-  base64urlEncode,
-  webauthnDigest,
-  recoverCandidatePublicKeys,
-  batchChallenge,
-  lowS,
-} from "./crypto/webauthn";
 export {
   u256ToFelts,
   bytesToBigInt,

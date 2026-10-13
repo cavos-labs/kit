@@ -1,6 +1,5 @@
 import type { Call, InvocationsSignerDetails, TypedData } from "starknet";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
-import type { DeviceSignature } from "../signer/DeviceSigner";
 
 export const VAULT_READY = "cavos-vault:ready";
 export const VAULT_HELLO = "cavos-vault:hello";
@@ -24,11 +23,10 @@ export interface ConnectParams {
 
 export interface ConnectResult {
   handle: string;
-  /** Empty on Starknet, where the app derives the address from the public key. */
   address: string;
   /**
    * Null when this browser holds no key for the account yet. Ed25519 raw bytes
-   * on Solana and Stellar; the uncompressed P-256 point on Starknet.
+   * on Solana and Stellar; the 32-byte stark public key on Starknet.
    */
   publicKey: Uint8Array | null;
   isNewAccount: boolean;
@@ -44,7 +42,6 @@ export interface VaultMethods {
   signMessage(params: { handle: string; message: Uint8Array }): Uint8Array;
   signStarknetTypedData(params: { handle: string; typedData: TypedData; accountAddress: string }): string[];
   signStarknetInvoke(params: { handle: string; calls: Call[]; details: InvocationsSignerDetails }): string[];
-  signStarknetMessage(params: { handle: string; message: Uint8Array }): DeviceSignature;
   forget(params: { userId: string; appSalt: string }): void;
   /** Create a passkey that can restore the connected account on another device. */
   enrollPasskey(params: {

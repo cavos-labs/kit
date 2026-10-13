@@ -3,7 +3,7 @@ import { WebCryptoDeviceUnwrapKey } from "../chains/stellar/WebCryptoDeviceUnwra
 import { parseMasterDEK, zeroize } from "./dek";
 import { PublicKey } from "@solana/web3.js";
 import { StrKey } from "@stellar/stellar-sdk";
-import { nativeAddress, parseAppSalt, type Ed25519Chain } from "./derive";
+import { nativeAddress, parseAppSalt, type NativeChain } from "./derive";
 import { idbWrapStore } from "./idbWrapStore";
 
 /**
@@ -14,7 +14,7 @@ import { idbWrapStore } from "./idbWrapStore";
  * a copy for any other address may be the only way into funds, so it stays.
  */
 export async function dropLegacyCopies(
-  chain: Ed25519Chain,
+  chain: NativeChain,
   userId: string,
   appSalt: string,
   vaultAddress: string,
@@ -42,6 +42,6 @@ export async function dropLegacyCopies(
   await store.clear(userId);
 }
 
-function addressOf(chain: Ed25519Chain, publicKey: Uint8Array): string {
+function addressOf(chain: NativeChain, publicKey: Uint8Array): string {
   return chain === "solana" ? new PublicKey(publicKey).toBase58() : StrKey.encodeEd25519PublicKey(Buffer.from(publicKey));
 }

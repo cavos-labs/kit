@@ -6,9 +6,7 @@ import { eciesUnwrapDEK } from "./envelope";
 /**
  * The device's P-256 **ECDH** key used only to unwrap the account DEK.
  *
- * Note this is a SEPARATE key from the `DeviceSigner` (which is an ECDSA signing
- * key, non-extractable, and therefore cannot do ECDH). This key is per-device
- * and non-syncable — losing the device loses only this convenience factor, not
+ * This key is per-device and non-syncable — losing the device loses only this convenience factor, not
  * the account (the passkey / recovery factors survive). Its public key goes into
  * the account's `cv:wd:<id>` on-chain envelope slot; the DEK is ECIES-wrapped to
  * it so daily unlock is silent.

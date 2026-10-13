@@ -2,17 +2,16 @@
 
 `@cavos/kit` is an **embedded Stellar wallet SDK**, **embedded Solana wallet**,
 and **embedded Starknet wallet** for React Native and web. Device-native
-self-custodial accounts: **Starknet** authorizes a silent non-extractable
-secp256r1 (P-256) device signer (no passkey popups, no Face ID / Touch ID
-prompts). **Solana and Stellar** spend with native Ed25519 keys derived from a
-MasterDEK. OAuth / email authenticates the user; the registry names the wallet;
-the device key signs. On the web those keys live in the **Cavos vault**, an
+self-custodial accounts: every chain spends with a native key derived from a
+MasterDEK (a stark key on **Starknet**, Ed25519 on **Solana and Stellar**), with
+no passkey popups and no Face ID / Touch ID prompts on signing. OAuth / email
+authenticates the user; the registry names the wallet; the device key signs. On the web those keys live in the **Cavos vault**, an
 iframe on a Cavos origin, so the integrator's page never holds one.
 
 **Chains:** **Starknet, Solana, and Stellar** are implemented today. Starknet
-uses an on-chain Cairo `DeviceAccount` authorized by a silent P-256 device
-signer. Solana and Stellar use **native Ed25519** accounts (a system account
-and a classic `G…`) whose spend key is HKDF of one MasterDEK. A passkey or the
+uses the standard OpenZeppelin `AccountUpgradeable` account whose stark key is
+HKDF of the MasterDEK. Solana and Stellar use **native Ed25519** accounts (a
+system account and a classic `G…`) whose spend key is HKDF of the same MasterDEK. A passkey or the
 attested enclave restores that DEK on a new device. All three are available
 through `Cavos.connect({ chains, defaultChain, network })`.
 
@@ -36,8 +35,7 @@ npm install @cavos/kit
 1. **Authenticate** — OAuth (Google, Apple) or an emailed 9-character code resolves a stable `userId`.
 2. **Registry lookup** — `(userId, appId, chain, network) → address`. If the
    user already has an address for this app + chain, they get that address. If
-   not, this device claims one: Starknet from the fresh P-256 device key;
-   Solana/Stellar from HKDF of the MasterDEK.
+   not, this device claims one: HKDF of the MasterDEK on every chain.
 3. **Registry claim** — Insert-only: the first device to register wins. If
    another device raced ahead, this device's candidate is discarded and the
    winning address is returned.
@@ -254,34 +252,20 @@ if (wallet.status === "undeployed") {
 | `Cavos.connect` | Unified entry: auth → registry lookup/claim → device key → lazy deploy on first execute. |
 | `WalletRegistry` | `(userId, appId, chain) → address`. Source of truth. Cavos holds the map; cannot spend. The device holds the key and can sign without Cavos once it has cached the address. |
 | `appSalt` | Device-key slot **and**, on Solana/Stellar native, HKDF salt for the spend key. Never change it. The registry key is still `(userId, appId, chain, network)`. |
-| `status` | `"undeployed"` (first execute deploys), `"ready"` (deployed + authorized), `"needs-device-approval"` (deployed, device not authorized). |
-| `StarknetAdapter` | Computes the DeviceAccount address a first device claims, and builds deploy/add/remove calls. |
+| `status` | `"undeployed"` (first execute deploys), `"ready"` (this device holds the spend key), `"needs-device-approval"` (this device holds no spend key; restore it with the enclave or a passkey). |
+| `CavosStarknet` | Native OpenZeppelin account. The stark key is HKDF of the MasterDEK; the address derives from the public key and the pinned `OZ_ACCOUNT_CLASS_HASH`. |
 | `CavosSolana` | Native Ed25519 system account. Address is HKDF of the MasterDEK. Relayer is fee payer only. |
 | `CavosStellar` / `StellarAdapter` | Classic `G…` account. With enclave or passkey, the same MasterDEK as Solana. Grandfathered accounts still use extra Horizon signers. |
 | `VaultClient` | The page's side of the Cavos vault: mounts the iframe and hands out signers that forward whole payloads. |
-| `WebCryptoSigner` | Silent device signer: non-extractable P-256 key in IndexedDB (the vault's, on the web), no UI on sign. |
-| `StarknetDeviceSigner` | Drop-in starknet.js `SignerInterface` backed by a device signer (advanced). |
 | `SolanaRelayer` / `StellarRelayer` | Cavos gasless sponsor: co-signs as fee payer so the integrator holds no keypair. |
 | `fee: { token }` | Solana only. The fee is settled in a token the user already holds, in the same transaction, so an account with no SOL still transacts. |
-| `RecoveryClient` | Email-approval multi-device relay (**Starknet**). Native Solana/Stellar restore the MasterDEK instead. |
 | `SocialRecoveryClient` | Verifies hardware attestation, binds a provider token to one session, encrypts directly to the enclave. |
 
-## Enroll factors before deploy
+## Passkeys
 
-On **Starknet**, passkey and recovery enrollment can happen before the first
-deploy. The factors are stored locally and included in the first transaction:
-
-```ts
-const wallet = await Cavos.connect({ chain: "starknet", ... });
-await wallet.enrollPasskey(passkey, params);
-await wallet.setupRecovery(code);
-await wallet.execute(calls);
-```
-
-On **Solana and Stellar**, signing up never asks for a passkey. After connect,
-call `enrollPasskeyDefault()` from `useCavos()` to add one; it can then restore
-the wallet on another device. Native Solana has no on-chain approver and no
-recovery-code `add_signer`.
+Signing up never asks for a passkey. After connect, call `enrollPasskeyDefault()`
+from `useCavos()` to add one; it can then restore the wallet on another device,
+on every chain. There is no on-chain approver and no recovery-code `add_signer`.
 
 ## Quickstart — Starknet
 
@@ -299,7 +283,7 @@ const wallet = await Cavos.connect({
 
 // First execute deploys if needed
 if (wallet.chain === "starknet") {
-  await wallet.execute(calls); // gasless; signed invisibly by the device key
+  await wallet.execute(calls); // gasless; signed invisibly by the account key
 }
 ```
 
@@ -307,7 +291,7 @@ if (wallet.chain === "starknet") {
 
 The address **is** an Ed25519 system account (Phantom-shaped). The spend key is
 HKDF of a MasterDEK (`cavos-ed25519-solana-v1`); it is not a PDA and not a
-P-256 program account.
+program account.
 
 ```ts
 import { Cavos } from "@cavos/kit";
@@ -429,47 +413,30 @@ holds the control key** and cannot authorize payments.
 
 ## Quickstart — low-level (Starknet, advanced)
 
-If you want to drive the pieces yourself (own paymaster, custom deploy), use the
-adapter + signer directly instead of `Cavos.connect`:
+The key and address are pure functions of a seed, so you can drive the account
+with starknet.js directly:
 
 ```ts
-import {
-  StarknetAdapter, WebCryptoSigner,
-  appNamespace, DEVICE_ACCOUNT_CLASS_HASH,
-} from "@cavos/kit";
+import { Account, RpcProvider, Signer } from "starknet";
+import { starkKeyFromSeed, starkPublicKey, starknetAddressFromPublicKey } from "@cavos/kit/starknet";
 
-// 1. Create/load the SILENT device key. No prompt, ever. This key NAMES the
-//    address, so it has to exist before there is an address at all.
-const signer = await WebCryptoSigner.loadOrCreate({ keyId: `${user.id}:my-app` });
-
-// 2. The address a first device claims. A returning user's address comes from
-//    your own registry instead — it cannot be re-derived from their login.
-const classHash = DEVICE_ACCOUNT_CLASS_HASH.sepolia;
-const address = new StarknetAdapter({ classHash }).computeAddress({
-  namespace: appNamespace({ appId: "my-app-id" }),
-  initialSigner: await signer.getPublicKey(),
-});
-
-// 3. Build deploy/add/remove calls, then submit through your own paymaster:
-import { Account, RpcProvider } from "starknet";
-import { StarknetDeviceSigner } from "@cavos/kit";
-
-const provider = new RpcProvider({ nodeUrl: "https://..." });
-const snAccount = new Account(provider, address, new StarknetDeviceSigner(signer), "1");
-await snAccount.execute(someCalls); // signed silently; DeviceAccount validates on-chain
+const privateKey = starkKeyFromSeed(seed); // 32-byte HKDF output of the MasterDEK
+const address = starknetAddressFromPublicKey(starkPublicKey(privateKey));
+const account = new Account({ provider: new RpcProvider({ nodeUrl: "https://..." }), address, signer: new Signer(privateKey) });
 ```
 
-`StarknetDeviceSigner` is a drop-in starknet.js `SignerInterface`, so it plugs
-into paymaster SDKs (AVNU) for gasless flows. The kit does **not** own gas
-sponsorship in the low-level path — route execution through your paymaster.
+The account is the OpenZeppelin `AccountUpgradeable` (`OZ_ACCOUNT_CLASS_HASH`),
+deployed through the UDC with the public key as salt and constructor argument.
 
 ## How signing works
 
-**Starknet:** The device key signs `sha256(tx_hash)` with no user interaction
-(WebCrypto's ECDSA). The signature is serialized as `[r_low, r_high, s_low,
-s_high, y_parity]` — what `DeviceAccount.__validate__` decodes. The contract
-recomputes `sha256(tx_hash)`, normalizes high-s, and recovers the secp256r1
-signer.
+**Starknet:** The stark key signs the transaction hash with no user
+interaction; the signature is the standard two-felt `[r, s]` the OpenZeppelin
+account validates. `signMessage` signs SNIP-12 revision 1 typed data (domain
+`Cavos` / `1`, primary type `Message`) and returns the typed data alongside the
+signature, so a verifier can recompute the hash or call the account's
+`is_valid_signature`. Rotating the account key (`set_public_key`) is refused,
+because the key is derived from the DEK.
 
 **Solana:** The spend key is Ed25519. It signs the Solana transaction message.
 The relayer co-signs only as fee payer.
@@ -485,9 +452,8 @@ key. Protection varies by runtime:
   is used.
 - **Node:** The caller handles the raw key; no WebCrypto isolation.
 
-**Security model:** Starknet device keys are non-extractable P-256. Solana and
-Stellar spend keys are non-extractable Ed25519 (`CryptoKey` in the browser). On
-the web all of them live in the Cavos vault, where signing is silent within the
+**Security model:** On the web every spend key lives in the Cavos vault (the Starknet stark
+key in vault memory, Solana and Stellar Ed25519 keys as non-extractable `CryptoKey`s), where signing is silent within the
 app's limits and needs the user's approval beyond them. A new device restores
 the MasterDEK with the enclave or with a passkey the user added — signing up
 never asks for a passkey.
@@ -504,9 +470,7 @@ the package (`DEFAULT_SOCIAL_RECOVERY_ATTESTATION`). The enclave:
 - Runs inside a Nitro VM with no persistent storage, no SSH, no operator access.
 - Verifies that the provider token (Google/Apple/email) was minted for this user
   within the last 5 minutes.
-- On **Solana and Stellar**, seals or unwraps the MasterDEK. It does not sign
-  spends.
-- On **Starknet**, schedules a restricted on-chain signer-addition.
+- Seals or unwraps the MasterDEK on every chain. It does not sign spends.
 
 With React, provide independently pinned measurements if you run your own
 enclave (otherwise the shipped constants are used):
@@ -532,9 +496,8 @@ enclave (otherwise the shipped constants are used):
 ```
 
 Set `deviceApproval: "enclave"` (or `socialRecovery: true`) for Google/Apple/
-email restore. The enclave **seals the MasterDEK**. Solana and Stellar unwrap it
-on a new device; they do not add an on-chain recovery signer. Starknet still
-registers a restricted recovery authority that can only schedule `add_signer`.
+email restore. The enclave **seals the MasterDEK**. Every chain unwraps it on a
+new device; none adds an on-chain recovery signer.
 
 `deviceApproval: "passkey"` is **one chain**. Signing up never asks for a
 passkey: the MasterDEK is random. `enrollPasskeyDefault()` creates a passkey in
@@ -549,11 +512,7 @@ Cavos keeps the wrap (`/api/passkey-wraps`) and cannot open it: the PRF never
 leaves the user's device. On a new device the vault asks for the passkey only
 if a wrap exists, decrypts locally and checks the DEK derives the registered
 address. A user can add several passkeys; any of them restores the wallet.
-Anyone holding a synced passkey that was added can spend on Solana/Stellar.
-
-On Starknet the passkey is an on-chain approver instead. On a new device the
-auth modal shows "Verify it's you" when the account has one, and
-`approveDeviceWithPasskey()` adds this device.
+Anyone holding a synced passkey that was added can spend on every chain.
 
 `secureStep` defaults to `'off'`. Set `'optional'` / `'required'` only if you
 want the modal's built-in "Secure your account" screen.
@@ -638,17 +597,13 @@ approved.
 
 ### Starknet
 
-- ✅ Silent secp256r1 device signer (`WebCryptoSigner`) + 5-felt signature
-  serialization, cross-checked against the live contract.
-- ✅ Registry-based address resolution; first device names the wallet.
-- ✅ `starknet.js` `Account` integration via `StarknetDeviceSigner`.
-- ✅ **Proven on-chain (Sepolia):** silent device key signs a real STRK `approve`,
-  the deployed DeviceAccount validates it ([tx](https://sepolia.starkscan.co/tx/0x51e0e961ee535bf3c45ea020b9c258aee544ed18aea57dbbc80767f8e86ab9e)).
-- ✅ **Gasless proven on-chain (Sepolia):** relayer-paid `execute_from_outside_v2`,
-  authorized solely by the silent device signature ([tx](https://sepolia.starkscan.co/tx/0x05ade4008f4ccbcfe4a7f016c61eb0eb591c8f696db3f5dad6f0db3ea3b5d2e6)).
-- ✅ Contract SNIP-6 `is_valid_signature` + SNIP-9 `execute_from_outside_v2`.
+- ✅ Native OpenZeppelin `AccountUpgradeable` (`OZ_ACCOUNT_CLASS_HASH`). Stark key
+  and address = HKDF(MasterDEK, appSalt).
+- ✅ `CavosStarknet` — `connect`, `execute(calls)` with lazy sponsored deploy,
+  `signTransaction`, `signMessage` (SNIP-12, `curve: "stark"`), `upgrade`.
+- ✅ New device: enclave unwrap or a passkey wrap; no on-chain device list.
+- ✅ SNIP-6 `is_valid_signature` + SNIP-9 `execute_from_outside_v2` (standard OZ).
 - ✅ `CavosAuth` (hosted Google/Apple/email/OTP login).
-- ✅ Recovery client interface (non-custodial multi-device email-approval flow).
 - ✅ Hardware-isolated social recovery via Nitro enclave.
 
 ### Solana

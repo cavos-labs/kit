@@ -1,7 +1,6 @@
-import { Cavos as CoreCavos, type CavosWallet, type ConnectOptions, type RecoveryOptions } from "../Cavos";
+import { Cavos as CoreCavos, type CavosWallet, type ConnectOptions } from "../Cavos";
 import type { CavosSolana, RecoverSolanaOptions } from "../chains/solana/CavosSolana";
-import { NativeDeviceSigner, type MinimumKeySecurity } from "./NativeDeviceSigner";
-import { NativeDeviceUnwrapKey } from "./NativeDeviceUnwrapKey";
+import { NativeDeviceUnwrapKey, type MinimumKeySecurity } from "./NativeDeviceUnwrapKey";
 import { nativeModule } from "./NativeModule";
 
 export interface NativeConnectOptions extends ConnectOptions {
@@ -10,7 +9,6 @@ export interface NativeConnectOptions extends ConnectOptions {
 
 function nativeFactories(minimumKeySecurity: MinimumKeySecurity = "os-protected") {
   return {
-    createSigner: (keyId: string) => NativeDeviceSigner.loadOrCreate({ keyId, minimumKeySecurity }),
     createStellarDeviceKey: (keyId: string) =>
       NativeDeviceUnwrapKey.loadOrCreate({ keyId: `${keyId}:stellar-unwrap`, minimumKeySecurity }),
   };
@@ -22,14 +20,8 @@ export const Cavos = {
     const factories = nativeFactories(opts.minimumKeySecurity);
     return CoreCavos.connect({
       ...opts,
-      createSigner: opts.createSigner ?? factories.createSigner,
       createStellarDeviceKey: opts.createStellarDeviceKey ?? factories.createStellarDeviceKey,
     });
-  },
-
-  recover(opts: RecoveryOptions & { minimumKeySecurity?: MinimumKeySecurity }) {
-    const factories = nativeFactories(opts.minimumKeySecurity);
-    return CoreCavos.recover({ ...opts, createSigner: opts.createSigner ?? factories.createSigner });
   },
 
   recoverSolana(opts: RecoverSolanaOptions & { minimumKeySecurity?: MinimumKeySecurity }) {

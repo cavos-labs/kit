@@ -1,10 +1,12 @@
 import { Keypair } from "@solana/web3.js";
 import { Keypair as StellarKeypair } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
+import { starknetAddressFromSeed } from "../chains/starknet/keys";
 import { parseMasterDEK } from "./dek";
 import {
   deriveSeed,
   HKDF_SOLANA,
+  HKDF_STARKNET,
   masterDekFromPasskey,
   nativeAddress,
   parseAppSalt,
@@ -24,6 +26,12 @@ describe("deriveSeed", () => {
   it("domain-separates Solana from Stellar", () => {
     expect(deriveSeed(dek, "solana", salt)).not.toEqual(deriveSeed(dek, "stellar", salt));
     expect(HKDF_SOLANA).toBe("cavos-ed25519-solana-v1");
+  });
+
+  it("domain-separates Starknet from Solana and Stellar", () => {
+    expect(deriveSeed(dek, "starknet", salt)).not.toEqual(deriveSeed(dek, "solana", salt));
+    expect(deriveSeed(dek, "starknet", salt)).not.toEqual(deriveSeed(dek, "stellar", salt));
+    expect(HKDF_STARKNET).toBe("cavos-stark-starknet-v1");
   });
 
   it("changes when the app salt changes", () => {
@@ -67,6 +75,15 @@ describe("native addresses", () => {
     const expected = StellarKeypair.fromRawEd25519Seed(Buffer.from(seed)).publicKey();
     expect(stellarAddressFromSeed(seed)).toBe(expected);
     expect(nativeAddress(dek, "stellar", salt)).toBe(expected);
+  });
+
+  it("Starknet address is deterministic, follows the app salt, and is not a Solana or Stellar address", () => {
+    const address = nativeAddress(dek, "starknet", salt);
+    expect(address).toBe(nativeAddress(dek, "starknet", salt));
+    expect(address).toBe(starknetAddressFromSeed(deriveSeed(dek, "starknet", salt)));
+    expect(address).not.toBe(nativeAddress(dek, "starknet", parseAppSalt("other-app")));
+    expect(address).not.toBe(nativeAddress(dek, "solana", salt));
+    expect(address).not.toBe(nativeAddress(dek, "stellar", salt));
   });
 
   it("Solana and Stellar addresses differ for the same DEK", () => {

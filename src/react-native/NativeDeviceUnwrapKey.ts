@@ -2,9 +2,10 @@ import { p256 } from "@noble/curves/p256";
 import type { DeviceUnwrapKey } from "../chains/stellar/DeviceUnwrapKey";
 import { deviceSlotId } from "../chains/stellar/DeviceUnwrapKey";
 import { eciesKEKFromX, unwrapDEK } from "../chains/stellar/envelope";
-import { assertSecurity, type MinimumKeySecurity } from "./NativeDeviceSigner";
 import { fromBase64, toBase64 } from "./encoding";
 import { nativeModule, type NativeSecurityLevel } from "./NativeModule";
+
+export type MinimumKeySecurity = "os-protected" | "hardware";
 
 export interface NativeDeviceUnwrapKeyOptions {
   keyId: string;
@@ -41,5 +42,11 @@ export class NativeDeviceUnwrapKey implements DeviceUnwrapKey {
       await nativeModule().deriveSharedSecret(this.keyId, toBase64(uncompressed)),
     );
     return unwrapDEK(blob.subarray(33), eciesKEKFromX(sharedX, ephemeral));
+  }
+}
+
+function assertSecurity(level: NativeSecurityLevel, minimum: MinimumKeySecurity): void {
+  if (minimum === "hardware" && !["secure-enclave", "strongbox", "tee"].includes(level)) {
+    throw new Error(`kit/native: hardware-backed key required; device provided ${level}`);
   }
 }
