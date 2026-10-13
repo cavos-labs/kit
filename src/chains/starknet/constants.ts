@@ -20,11 +20,11 @@ export const CAVOS_PAYMASTER_URL: Record<StarknetNetwork, string> = {
 };
 
 /**
- * OpenZeppelin `AccountUpgradeable` v4.0.1 class hash, identical on every
- * network. Pinned forever: the account address derives from it, and
- * `ensureEnclave` clears the local wrap when the derived address differs from
- * the registered one. Later implementation changes go through the account's
+ * OpenZeppelin `AccountUpgradeable` v3.0.0 class hash (Scarb 2.13.1,
+ * `--release`), declared on mainnet and Sepolia. Pinned forever: the account
+ * address derives from it, and `ensureEnclave` clears the local wrap when the
+ * derived address differs from the registered one. Later implementation changes go through the account's
  * `upgrade`, which keeps the address.
  */
 export const OZ_ACCOUNT_CLASS_HASH =
-  "0x03013bf2edcf93ac575367eee41cd07bb50e809c78925817b61878db29826144";
+  "0x01d1777db36cdd06dd62cfde77b1b6ae06412af95d57a13dc40ac77b8a702381";
