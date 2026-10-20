@@ -225,6 +225,7 @@ export class PrivacySession implements PrivacyOperations {
     const provingBlockId = await this.provingBlock();
     this.registry ??= (await this.sdk()).createEmptyRegistry();
     this.registry.notes.clear();
+    delete this.registry.cursor;
     const builder = transfers.build({
       autoSelectNotes: "naive",
       autoSetup: true,
