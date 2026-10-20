@@ -32,6 +32,7 @@ import {
 } from "./constants";
 import { resolveNativeStarknet, type StarknetSpend } from "./nativeConnect";
 import { parseStarknetPrivacyConfig, type StarknetPrivacyConfig } from "./privacy/config";
+import type { PrivacySdk } from "./privacy/sdk";
 import { createPrivacySession, unavailablePrivacy, type PrivacyOperations } from "./privacy/session";
 
 export interface ConnectStarknetOptions {
@@ -62,6 +63,8 @@ export interface ConnectStarknetOptions {
    * passing this together with `vault` is refused.
    */
   privacy?: StarknetPrivacyConfig;
+  /** Required with `privacy`: `() => import("@starkware-libs/starknet-privacy-sdk")`, so the app's own bundler resolves it. */
+  privacySdk?: () => Promise<PrivacySdk>;
 }
 
 const MESSAGE_TYPES = {
@@ -197,7 +200,7 @@ export class CavosStarknet {
     if (opts.vault && opts.privacy) {
       throw new Error("kit/starknet: with a vault, private transfer settings come from the app in the Cavos dashboard, not from `privacy`");
     }
-    const privacyConfig = opts.privacy ? parseStarknetPrivacyConfig(opts.privacy) : undefined;
+    const pagePrivacy = opts.privacy ? pagePrivacySettings(opts.privacy, opts.privacySdk) : undefined;
 
     let signer: SignerInterface | null;
     let address: string;
@@ -235,9 +238,9 @@ export class CavosStarknet {
       passkey = Boolean(opts.passkey);
       privacy = !native.spend
         ? unavailablePrivacy(NO_KEY)
-        : privacyConfig
+        : pagePrivacy
           ? createPrivacySession({
-              config: privacyConfig,
+              ...pagePrivacy,
               chainId: STARKNET_NETWORKS[opts.network].chainId,
               rpcUrl: opts.rpcUrl ?? STARKNET_NETWORKS[opts.network].rpcUrl,
               account: { address, spend: native.spend },
@@ -427,6 +430,17 @@ export class CavosStarknet {
 }
 
 const defaultRegistry = new InMemoryWalletRegistry();
+
+function pagePrivacySettings(
+  privacy: StarknetPrivacyConfig,
+  privacySdk: (() => Promise<PrivacySdk>) | undefined,
+): { config: StarknetPrivacyConfig; loadSdk: () => Promise<PrivacySdk> } {
+  const config = parseStarknetPrivacyConfig(privacy);
+  if (!privacySdk) {
+    throw new Error('kit/starknet: `privacy` needs `privacySdk: () => import("@starkware-libs/starknet-privacy-sdk")`');
+  }
+  return { config, loadSdk: privacySdk };
+}
 
 function selectorOf(entrypoint: string): bigint {
   return BigInt(/^0x[0-9a-f]+$/i.test(entrypoint) ? entrypoint : hash.getSelectorFromName(entrypoint));

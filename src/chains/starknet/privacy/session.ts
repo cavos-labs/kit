@@ -16,7 +16,7 @@ import {
 } from "./chain";
 import type { PrivacyFeeMode, StarknetPrivacyConfig } from "./config";
 import { PrivacyRelay, type FeeAction, type RelayCall } from "./relay";
-import { loadPrivacySdk, type PrivacySdk } from "./sdk";
+import type { PrivacySdk } from "./sdk";
 
 export type PrivacyRequirement = "register" | "setup-channel" | "setup-token" | "ready";
 
@@ -65,6 +65,8 @@ export interface PrivacySessionInit {
   rpcUrl: string;
   account: { address: string; spend: { privateKey(): string } };
   paymasterApiKey: () => string;
+  /** Loads the privacy SDK. Injected so that only builds that bundle it name the package. */
+  loadSdk: () => Promise<PrivacySdk>;
   deps?: PrivacySessionDeps;
 }
 
@@ -291,7 +293,7 @@ export class PrivacySession implements PrivacyOperations {
   }
 
   private sdk(): Promise<PrivacySdk> {
-    return this.init.deps?.sdk ? Promise.resolve(this.init.deps.sdk) : loadPrivacySdk();
+    return this.init.deps?.sdk ? Promise.resolve(this.init.deps.sdk) : this.init.loadSdk();
   }
 
   private client(): Promise<TransfersClient> {

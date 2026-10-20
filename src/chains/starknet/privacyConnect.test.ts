@@ -11,6 +11,7 @@ import { STARKNET_NETWORKS } from "./constants";
 import * as session from "./privacy/session";
 import type { PrivacyOperations } from "./privacy/session";
 import type { StarknetPrivacyConfig } from "./privacy/config";
+import type { PrivacySdk } from "./privacy/sdk";
 
 class MemoryStore implements WrapStore {
   private rows = new Map<string, WrappedDEK>();
@@ -64,9 +65,11 @@ describe("CavosStarknet.privacy", () => {
     };
     const create = jest.spyOn(session, "createPrivacySession").mockReturnValue(operations as session.PrivacySession);
 
-    const wallet = await connect({ privacy });
+    const privacySdk = jest.fn(async () => ({}) as PrivacySdk);
+    const wallet = await connect({ privacy, privacySdk });
 
     const init = create.mock.calls[0]![0];
+    expect(init.loadSdk).toBe(privacySdk);
     expect(init.config.pool).toBe("0x123");
     expect(init.chainId).toBe(STARKNET_NETWORKS.sepolia.chainId);
     expect(init.account.address).toBe(wallet.address);
@@ -80,6 +83,11 @@ describe("CavosStarknet.privacy", () => {
     const wallet = await connect();
     await expect(wallet.privacy.status()).rejects.toThrow(/`privacy` in the connect options/);
     await expect(wallet.privacy.transfer("0x1", "0x2", 1n)).rejects.toThrow(/`privacy` in the connect options/);
+  });
+
+  it("asks the page for the SDK loader along with the settings", async () => {
+    jest.spyOn(RpcProvider.prototype, "getClassHashAt").mockRejectedValue(new Error("Contract not found"));
+    await expect(connect({ privacy })).rejects.toThrow(/privacySdk/);
   });
 
   it("validates the settings when connecting", async () => {

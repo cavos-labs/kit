@@ -118,6 +118,7 @@ export function mockPrivacy(options: MockPrivacyOptions = {}) {
     chainId: CHAIN_ID,
     rpcUrl: "https://rpc.test",
     account: { address: alice, spend: { privateKey: () => PRIVATE_KEY } },
+    loadSdk: async () => sdk,
     paymasterApiKey: () => "key-1",
     deps: {
       chain,

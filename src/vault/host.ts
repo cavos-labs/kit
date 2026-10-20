@@ -2,6 +2,7 @@ import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import { STARKNET_NETWORKS, type StarknetNetwork } from "../chains/starknet/constants";
 import { resolveNativeStarknet, type StarknetSpend } from "../chains/starknet/nativeConnect";
 import { parseStarknetPrivacyConfig, type StarknetPrivacyConfig } from "../chains/starknet/privacy/config";
+import type { PrivacySdk } from "../chains/starknet/privacy/sdk";
 import { PrivacySession, type PrivacySessionDeps } from "../chains/starknet/privacy/session";
 import { resolveNativeSolana } from "../chains/solana/nativeConnect";
 import { resolveNativeStellar } from "../chains/stellar/nativeConnect";
@@ -62,6 +63,8 @@ export interface VaultHandlerDeps {
   solanaNetwork?: (recentBlockhash: string) => Promise<string>;
   /** Private transfer settings of the app for a network ("sepolia", "mainnet"), from the Cavos dashboard. Throws on an invalid one. */
   privacy?: (network: string) => StarknetPrivacyConfig | undefined;
+  /** Loads the privacy SDK. Only a vault build that bundles it passes one. */
+  privacySdk?: () => Promise<PrivacySdk>;
   privacyDeps?: PrivacySessionDeps;
 }
 
@@ -227,6 +230,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
         if (!acct.paymasterApiKey) throw new Error("kit/vault: private transfers need the paymaster API key");
         return acct.paymasterApiKey;
       },
+      loadSdk: deps.privacySdk ?? (() => Promise.reject(new Error("kit/vault: this vault build cannot run private transfers"))),
       ...(deps.privacyDeps ? { deps: deps.privacyDeps } : {}),
     });
     return { session: acct.privacy, config, chainId: network.chainId };
@@ -393,6 +397,7 @@ export interface VaultHostOptions {
   confirmUrl?: string;
   /** Defaults to `/api/vault/policy` on this origin. */
   policyUrl?: string;
+  privacySdk?: () => Promise<PrivacySdk>;
 }
 
 /** Runs inside the vault iframe. One embedding app per iframe. */
@@ -427,6 +432,7 @@ export function startVaultHost(opts: VaultHostOptions): void {
       attestation: opts.attestation,
       policy: app.policy,
       privacy: app.privacy,
+      ...(opts.privacySdk ? { privacySdk: opts.privacySdk } : {}),
       ledger: idbLedger(),
       confirm: (lines, context) => modal.review(lines, context.network),
       passkey: (user) => modal.passkey(user),
