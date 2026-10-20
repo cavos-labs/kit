@@ -93,7 +93,7 @@
     "@stellar/stellar-sdk": "^16.0.1",
     "@turnkey/sdk-browser": "^6.1.1",
     "buffer": "^6.0.3",
-    "starknet": "^9.4.2"
+    "starknet": "^10.5.0"
   },
   "peerDependencies": {
     "expo-linking": ">=7",
@@ -102,7 +102,8 @@
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0",
     "react-native": ">=0.76",
-    "react-native-get-random-values": ">=1.11"
+    "react-native-get-random-values": ">=1.11",
+    "@starkware-libs/starknet-privacy-sdk": "^0.14.3-rc.5"
   },
   "peerDependenciesMeta": {
     "react": {
@@ -128,9 +129,13 @@
     },
     "react-native-get-random-values": {
       "optional": true
+    },
+    "@starkware-libs/starknet-privacy-sdk": {
+      "optional": true
     }
   },
   "devDependencies": {
+    "@starkware-libs/starknet-privacy-sdk": "^0.14.3-rc.5",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.9.0",
     "@types/react": "^19.0.0",

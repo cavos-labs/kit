@@ -27,6 +27,7 @@ export default defineConfig([{
     "expo-web-browser",
     "expo-linking",
     "react-native-get-random-values",
+    "@starkware-libs/starknet-privacy-sdk",
   ],
 },
 {

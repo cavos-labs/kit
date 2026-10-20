@@ -15,6 +15,10 @@ const TOKENS = new Map<bigint, { symbol: string; decimals: number }>([
   [BigInt("0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8"), { symbol: "USDC", decimals: 6 }],
 ]);
 
+export function knownStarknetToken(address: string): { symbol: string; decimals: number } | undefined {
+  return TOKENS.get(BigInt(address));
+}
+
 const TRANSFER = BigInt(hash.getSelectorFromName("transfer"));
 const APPROVALS = new Set(["approve", "increase_allowance", "increaseAllowance"].map((name) => BigInt(hash.getSelectorFromName(name))));
 
@@ -48,6 +52,40 @@ export function parseStarknetCalls(calls: StarknetCall[], account: string): Pars
   }
   return tx;
 }
+
+export interface StarknetPrivacyOperation {
+  kind: "deposit" | "transfer" | "withdraw";
+  token: string;
+  amount: bigint;
+  /** The pool for a deposit, the receiver otherwise. */
+  to: string;
+}
+
+/**
+ * What the user reads before a private operation moves their funds. The
+ * spend counts against the daily limit like a public transfer; an unknown
+ * token is never inside a limit.
+ */
+export function parseStarknetPrivacy(op: StarknetPrivacyOperation): ParsedTx {
+  const tx = emptyParsed();
+  const token = knownStarknetToken(op.token);
+  const to = hex(op.to);
+  if (token) {
+    tx.spends.push({ asset: token.symbol, amount: op.amount, decimals: token.decimals });
+    tx.lines.push({ kind: "send", amount: formatUnits(op.amount, token.decimals), asset: token.symbol, to });
+  } else {
+    tx.flagged = true;
+    tx.lines.push({ kind: "send", amount: `${op.amount} (base units)`, asset: `unknown token ${hex(op.token)}`, to });
+  }
+  tx.lines.push({ kind: "action", text: PRIVATE_NOTES[op.kind] });
+  return tx;
+}
+
+const PRIVATE_NOTES = {
+  deposit: "Private: moves the funds into your private balance in the privacy pool",
+  transfer: "Private: the amount and the receiver are hidden on-chain",
+  withdraw: "Private: takes the funds out of your private balance to a public address",
+} as const;
 
 /** Sponsored transactions are signed as a SNIP-9 OutsideExecution, which carries the calls. */
 export function parseStarknetTypedData(typedData: TypedData, account: string): ParsedTx {

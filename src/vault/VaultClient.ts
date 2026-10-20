@@ -12,6 +12,7 @@ import {
   type TypedData,
 } from "starknet";
 import type { AuthProvider, Identity } from "../auth/AuthProvider";
+import type { PrivacyOperations } from "../chains/starknet/privacy/session";
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
@@ -109,11 +110,16 @@ export class VaultClient {
     };
   }
 
-  async connectStarknet(params: Omit<ConnectParams, "chain">): Promise<{
+  /** `paymasterApiKey` is what the vault hands the relay for private transfers. */
+  async connectStarknet(
+    params: Omit<ConnectParams, "chain">,
+    paymasterApiKey?: string,
+  ): Promise<{
     address: string;
     isNewAccount: boolean;
     signer: SignerInterface | null;
     passkey: boolean;
+    privacy: PrivacyOperations | null;
   }> {
     const result = await this.call("connect", { ...params, chain: "starknet" });
     return {
@@ -121,6 +127,7 @@ export class VaultClient {
       isNewAccount: result.isNewAccount,
       signer: this.starknetSigner(result),
       passkey: result.passkey === true,
+      privacy: result.publicKey ? this.starknetPrivacy(result.handle, paymasterApiKey ?? "") : null,
     };
   }
 
@@ -140,6 +147,19 @@ export class VaultClient {
       publicKeyRaw: () => publicKey,
       signTransaction: (message) => this.call("signSolanaTransaction", { handle, message }),
       signMessage: (message) => this.call("signMessage", { handle, message }),
+    };
+  }
+
+  private starknetPrivacy(handle: string, paymasterApiKey: string): PrivacyOperations {
+    return {
+      status: (token) => this.call("privacyStatus", { handle, ...(token === undefined ? {} : { token }) }),
+      balance: async (token) => BigInt(await this.call("privacyBalance", { handle, token })),
+      register: () => this.call("privacyRegister", { handle, paymasterApiKey }),
+      deposit: (token, amount) => this.call("privacyDeposit", { handle, token, amount: amount.toString(), paymasterApiKey }),
+      transfer: (token, recipient, amount) =>
+        this.call("privacyTransfer", { handle, token, recipient, amount: amount.toString(), paymasterApiKey }),
+      withdraw: (token, recipient, amount) =>
+        this.call("privacyWithdraw", { handle, token, recipient, amount: amount.toString(), paymasterApiKey }),
     };
   }
 

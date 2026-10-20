@@ -8,6 +8,8 @@ module.exports = {
   // is ESM and breaks under ts-jest. Map uuid to its CJS build so it resolves.
   moduleNameMapper: {
     "^uuid$": "<rootDir>/node_modules/uuid/dist/index.js",
+    "^@starkware-libs/starknet-privacy-sdk$": "<rootDir>/node_modules/@starkware-libs/starknet-privacy-sdk/dist/index.js",
+    "^@starkware-libs/starknet-privacy-sdk/testing$": "<rootDir>/jest.privacy-testing.js",
   },
   // @stellar/stellar-sdk (even its CJS build) transitively imports @noble/hashes
   // v2, which ships ESM-only. Transform those packages instead of ignoring them.
@@ -15,6 +17,6 @@ module.exports = {
     "^.+\\.[tj]sx?$": ["ts-jest", { isolatedModules: true, tsconfig: { allowJs: true } }],
   },
   transformIgnorePatterns: [
-    "node_modules/(?!(@stellar/stellar-sdk|@noble|uint8array-extras)/)",
+    "node_modules/(?!(@stellar/stellar-sdk|@noble|uint8array-extras|hpke|@starkware-libs/starknet-privacy-sdk)/)",
   ],
 };

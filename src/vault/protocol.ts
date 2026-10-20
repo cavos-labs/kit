@@ -1,4 +1,5 @@
 import type { Call, InvocationsSignerDetails, TypedData } from "starknet";
+import type { PrivacyStatus, PrivacySubmission } from "../chains/starknet/privacy/session";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 
 export const VAULT_READY = "cavos-vault:ready";
@@ -42,6 +43,26 @@ export interface VaultMethods {
   signMessage(params: { handle: string; message: Uint8Array }): Uint8Array;
   signStarknetTypedData(params: { handle: string; typedData: TypedData; accountAddress: string }): string[];
   signStarknetInvoke(params: { handle: string; calls: Call[]; details: InvocationsSignerDetails }): string[];
+  /** The pool, prover, discovery and relay come from the app's Cavos settings. The page names none of them. */
+  privacyStatus(params: { handle: string; token?: string }): PrivacyStatus;
+  /** Decimal string of base units. Only the sum leaves the vault, never a note. */
+  privacyBalance(params: { handle: string; token: string }): string;
+  privacyRegister(params: { handle: string; paymasterApiKey: string }): PrivacySubmission;
+  privacyDeposit(params: { handle: string; token: string; amount: string; paymasterApiKey: string }): PrivacySubmission;
+  privacyTransfer(params: {
+    handle: string;
+    token: string;
+    recipient: string;
+    amount: string;
+    paymasterApiKey: string;
+  }): PrivacySubmission;
+  privacyWithdraw(params: {
+    handle: string;
+    token: string;
+    recipient: string;
+    amount: string;
+    paymasterApiKey: string;
+  }): PrivacySubmission;
   forget(params: { userId: string; appSalt: string }): void;
   /** Create a passkey that can restore the connected account on another device. */
   enrollPasskey(params: {
