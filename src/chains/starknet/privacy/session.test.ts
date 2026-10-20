@@ -1,3 +1,4 @@
+import { ContractDiscoveryProvider } from "@starkware-libs/starknet-privacy-sdk/testing";
 import { mockPrivacy, PRIVATE_KEY, STRK } from "./fixtures";
 import { createPrivacySession } from "./session";
 import { deriveViewingKey, viewingPublicKey } from "../viewingKey";
@@ -39,6 +40,21 @@ describe("private session on the in-memory pool", () => {
       "apply_action",
     ]);
     expect(m.built.every((entry) => entry.headers["x-paymaster-api-key"] === "key-1")).toBe(true);
+  });
+
+  it("rediscovers every note from scratch before each operation", async () => {
+    const m = mockPrivacy();
+    const session = createPrivacySession(m.init);
+    await session.register();
+    await session.deposit(m.ace, 100n);
+    const discover = jest.spyOn(m.init.deps!.discoveryProvider as ContractDiscoveryProvider, "discoverNotes");
+
+    await session.transfer(m.ace, m.alice, 10n);
+    await session.withdraw(m.ace, m.alice, 10n);
+
+    expect(discover).toHaveBeenCalled();
+    expect(discover.mock.calls.every(([, , params]) => params?.cursor === undefined)).toBe(true);
+    expect(await session.balance(m.ace)).toBe(90n);
   });
 
   it("sends the approval as a signed relay call and the registration with the sponsor paying", async () => {
