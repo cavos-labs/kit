@@ -17,6 +17,11 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read    # the privacy SDK is on GitHub Packages, which needs auth even for public packages
+    env:
+      GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +29,8 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+
+      - run: npm config set "//npm.pkg.github.com/:_authToken" '${GH_PACKAGES_TOKEN}'
 
       - run: npm ci
 
@@ -66,6 +73,9 @@ jobs:
     permissions:
       contents: write   # push the release tag
       id-token: write   # npm provenance via OIDC
+      packages: read    # install the privacy SDK from GitHub Packages
+    env:
+      GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +84,8 @@ jobs:
           node-version: "22"
           cache: npm
           registry-url: "https://registry.npmjs.org"
+
+      - run: npm config set "//npm.pkg.github.com/:_authToken" '${GH_PACKAGES_TOKEN}'
 
       - run: npm ci
 
