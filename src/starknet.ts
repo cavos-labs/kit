@@ -8,3 +8,15 @@ export {
   starknetAddressFromPublicKey,
   starknetAddressFromSeed,
 } from "./chains/starknet/keys";
+export { parseStarknetPrivacyConfig } from "./chains/starknet/privacy/config";
+export type {
+  PrivacyFeeMode,
+  PrivacyRelayConfig,
+  StarknetPrivacyConfig,
+} from "./chains/starknet/privacy/config";
+export type {
+  PrivacyOperations,
+  PrivacyRequirement,
+  PrivacyStatus,
+  PrivacySubmission,
+} from "./chains/starknet/privacy/session";

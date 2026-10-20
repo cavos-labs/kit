@@ -31,6 +31,9 @@ import {
   type StarknetNetwork,
 } from "./constants";
 import { resolveNativeStarknet, type StarknetSpend } from "./nativeConnect";
+import { parseStarknetPrivacyConfig, type StarknetPrivacyConfig } from "./privacy/config";
+import type { PrivacySdk } from "./privacy/sdk";
+import { createPrivacySession, unavailablePrivacy, type PrivacyOperations } from "./privacy/session";
 
 export interface ConnectStarknetOptions {
   network: StarknetNetwork;
@@ -54,6 +57,14 @@ export interface ConnectStarknetOptions {
   passkey?: PasskeyPrfProvider;
   /** Keep the key in the Cavos vault instead of this page's storage. */
   vault?: VaultClient;
+  /**
+   * Private transfers (STRK20) for a key held in this page. With a vault the
+   * pool, prover, discovery and relay come from the app's Cavos settings, so
+   * passing this together with `vault` is refused.
+   */
+  privacy?: StarknetPrivacyConfig;
+  /** Required with `privacy`: `() => import("@starkware-libs/starknet-privacy-sdk")`, so the app's own bundler resolves it. */
+  privacySdk?: () => Promise<PrivacySdk>;
 }
 
 const MESSAGE_TYPES = {
@@ -65,6 +76,8 @@ const MESSAGE_TYPES = {
   ],
   Message: [{ name: "content", type: "string" }],
 };
+
+const NO_KEY = "kit/starknet: this device holds no key for the wallet";
 
 const KEY_ROTATIONS = new Set(["set_public_key", "setPublicKey"].map((name) => BigInt(hash.getSelectorFromName(name))));
 
@@ -81,6 +94,8 @@ export class CavosStarknet {
   readonly identity: Identity;
   readonly address: string;
   readonly network: StarknetNetwork;
+  /** Private balance, deposits, transfers and withdrawals in a STRK20 pool. Nothing here returns a key or a note. */
+  readonly privacy: PrivacyOperations;
   isNewAccount = false;
   onAuthorizationNeeded?: () => Promise<void>;
   private statusValue: ConnectStatus;
@@ -106,6 +121,7 @@ export class CavosStarknet {
     account?: Account;
     publicKey?: string;
     restoredWithPasskey?: boolean;
+    privacy: PrivacyOperations;
   }) {
     this.identity = init.identity;
     this.address = init.address;
@@ -116,6 +132,7 @@ export class CavosStarknet {
     this.accountValue = init.account;
     this.starkPublicKey = init.publicKey;
     this.passkeyRestore = init.restoredWithPasskey ?? false;
+    this.privacy = init.privacy;
   }
 
   get status(): ConnectStatus {
@@ -180,16 +197,23 @@ export class CavosStarknet {
           })
         : defaultRegistry);
 
+    if (opts.vault && opts.privacy) {
+      throw new Error("kit/starknet: with a vault, private transfer settings come from the app in the Cavos dashboard, not from `privacy`");
+    }
+    const pagePrivacy = opts.privacy ? pagePrivacySettings(opts.privacy, opts.privacySdk) : undefined;
+
     let signer: SignerInterface | null;
     let address: string;
     let isNewAccount: boolean;
     let passkey: boolean;
+    let privacy: PrivacyOperations;
     if (opts.vault) {
       const native = await connectThroughVault("starknet", identity, opts.appSalt, () =>
-        opts.vault!.connectStarknet(vaultConnectParams({ ...opts, identity })),
+        opts.vault!.connectStarknet(vaultConnectParams({ ...opts, identity }), opts.paymasterApiKey),
       );
       ({ signer, address, isNewAccount } = native);
       passkey = native.passkey;
+      privacy = native.privacy ?? unavailablePrivacy(NO_KEY);
     } else {
       const native = await resolveNativeStarknet({
         identity,
@@ -212,6 +236,17 @@ export class CavosStarknet {
       signer = native.spend ? new Signer(native.spend.privateKey()) : null;
       ({ address, isNewAccount } = native);
       passkey = Boolean(opts.passkey);
+      privacy = !native.spend
+        ? unavailablePrivacy(NO_KEY)
+        : pagePrivacy
+          ? createPrivacySession({
+              ...pagePrivacy,
+              chainId: STARKNET_NETWORKS[opts.network].chainId,
+              rpcUrl: opts.rpcUrl ?? STARKNET_NETWORKS[opts.network].rpcUrl,
+              account: { address, spend: native.spend },
+              paymasterApiKey: () => opts.paymasterApiKey,
+            })
+          : unavailablePrivacy("kit/starknet: private transfers need `privacy` in the connect options when the key is held by this page");
     }
 
     const deployed = await isDeployed(provider, address);
@@ -229,6 +264,7 @@ export class CavosStarknet {
           }
         : {}),
       restoredWithPasskey: passkey,
+      privacy,
     });
     wallet.isNewAccount = isNewAccount;
     return wallet;
@@ -394,6 +430,17 @@ export class CavosStarknet {
 }
 
 const defaultRegistry = new InMemoryWalletRegistry();
+
+function pagePrivacySettings(
+  privacy: StarknetPrivacyConfig,
+  privacySdk: (() => Promise<PrivacySdk>) | undefined,
+): { config: StarknetPrivacyConfig; loadSdk: () => Promise<PrivacySdk> } {
+  const config = parseStarknetPrivacyConfig(privacy);
+  if (!privacySdk) {
+    throw new Error('kit/starknet: `privacy` needs `privacySdk: () => import("@starkware-libs/starknet-privacy-sdk")`');
+  }
+  return { config, loadSdk: privacySdk };
+}
 
 function selectorOf(entrypoint: string): bigint {
   return BigInt(/^0x[0-9a-f]+$/i.test(entrypoint) ? entrypoint : hash.getSelectorFromName(entrypoint));

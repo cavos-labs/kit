@@ -1,5 +1,9 @@
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
+import { STARKNET_NETWORKS, type StarknetNetwork } from "../chains/starknet/constants";
 import { resolveNativeStarknet, type StarknetSpend } from "../chains/starknet/nativeConnect";
+import { parseStarknetPrivacyConfig, type StarknetPrivacyConfig } from "../chains/starknet/privacy/config";
+import type { PrivacySdk } from "../chains/starknet/privacy/sdk";
+import { PrivacySession, type PrivacySessionDeps } from "../chains/starknet/privacy/session";
 import { resolveNativeSolana } from "../chains/solana/nativeConnect";
 import { resolveNativeStellar } from "../chains/stellar/nativeConnect";
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
@@ -17,7 +21,14 @@ import { solanaNetworkName, starknetNetworkName, stellarNetworkName, stellarNetw
 import { VersionedMessage } from "@solana/web3.js";
 import { Signer, stark, type Signature } from "starknet";
 import { xdr } from "@stellar/stellar-sdk";
-import { isQueryVersion, parseStarknetCalls, parseStarknetTypedData, selectorOf } from "./parseStarknet";
+import {
+  isQueryVersion,
+  parseStarknetCalls,
+  parseStarknetPrivacy,
+  parseStarknetTypedData,
+  selectorOf,
+  type StarknetPrivacyOperation,
+} from "./parseStarknet";
 import { idbLedger, type SpendLedger } from "./ledger";
 import { VaultModal } from "./modal";
 import { parseSolanaMessage } from "./parseSolana";
@@ -50,6 +61,11 @@ export interface VaultHandlerDeps {
   resolveStellar?: (input: NativeBase) => Promise<{ address: string; control?: ControlKey; isNewAccount: boolean }>;
   resolveStarknet?: (input: NativeBase) => Promise<{ address: string; spend: StarknetSpend | null; isNewAccount: boolean }>;
   solanaNetwork?: (recentBlockhash: string) => Promise<string>;
+  /** Private transfer settings of the app for a network ("sepolia", "mainnet"), from the Cavos dashboard. Throws on an invalid one. */
+  privacy?: (network: string) => StarknetPrivacyConfig | undefined;
+  /** Loads the privacy SDK. Only a vault build that bundles it passes one. */
+  privacySdk?: () => Promise<PrivacySdk>;
+  privacyDeps?: PrivacySessionDeps;
 }
 
 interface Account {
@@ -59,6 +75,8 @@ interface Account {
   solana?: Ed25519SpendSigner;
   stellar?: ControlKey;
   starknet?: StarknetSpend;
+  privacy?: PrivacySession;
+  paymasterApiKey?: string;
 }
 
 export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultRequest) => Promise<unknown> {
@@ -194,6 +212,44 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
     });
   }
 
+  function privacySession(acct: Account, paymasterApiKey: string | undefined): { session: PrivacySession; config: StarknetPrivacyConfig; chainId: string } {
+    const spend = requireKey(acct.starknet);
+    const network = STARKNET_NETWORKS[acct.network as StarknetNetwork];
+    if (!network) throw new Error("kit/vault: private transfers are only available on Starknet");
+    const config = deps.privacy?.(acct.network);
+    if (!config) {
+      throw new Error(`kit/vault: add private transfer settings for ${acct.network} to this app in the Cavos dashboard`);
+    }
+    if (paymasterApiKey !== undefined) acct.paymasterApiKey = paymasterApiKey;
+    acct.privacy ??= new PrivacySession({
+      config,
+      chainId: network.chainId,
+      rpcUrl: network.rpcUrl,
+      account: { address: acct.address, spend },
+      paymasterApiKey: () => {
+        if (!acct.paymasterApiKey) throw new Error("kit/vault: private transfers need the paymaster API key");
+        return acct.paymasterApiKey;
+      },
+      loadSdk: deps.privacySdk ?? (() => Promise.reject(new Error("kit/vault: this vault build cannot run private transfers"))),
+      ...(deps.privacyDeps ? { deps: deps.privacyDeps } : {}),
+    });
+    return { session: acct.privacy, config, chainId: network.chainId };
+  }
+
+  async function privacyOperation(
+    params: { handle: string; token: string; amount: string; paymasterApiKey: string; recipient?: string },
+    kind: StarknetPrivacyOperation["kind"],
+    run: (session: PrivacySession, amount: bigint) => Promise<unknown>,
+  ): Promise<unknown> {
+    const acct = account(params.handle);
+    const { session, config, chainId } = privacySession(acct, params.paymasterApiKey);
+    const amount = baseUnits(params.amount);
+    const to = kind === "deposit" ? config.pool : params.recipient;
+    const parsed = parseStarknetPrivacy({ kind, token: address(params.token, "token"), amount, to: address(to, "recipient") });
+    const start = await authorizeAndSign(acct, parsed, async () => starknetNetworkName(chainId), async () => () => run(session, amount));
+    return start();
+  }
+
   const methods: { [M in VaultMethod]: (params: VaultParams<M>) => Promise<unknown> } = {
     connect,
     async signSolanaTransaction({ handle, message }) {
@@ -246,6 +302,24 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       );
       return authorizeAndSign(acct, parsed, async () => network, sign);
     },
+    async privacyStatus({ handle, token }) {
+      return privacySession(account(handle), undefined).session.status(token);
+    },
+    async privacyBalance({ handle, token }) {
+      return (await privacySession(account(handle), undefined).session.balance(token)).toString();
+    },
+    async privacyRegister({ handle, paymasterApiKey }) {
+      return privacySession(account(handle), paymasterApiKey).session.register();
+    },
+    async privacyDeposit(params) {
+      return privacyOperation(params, "deposit", (session, amount) => session.deposit(params.token, amount));
+    },
+    async privacyTransfer(params) {
+      return privacyOperation(params, "transfer", (session, amount) => session.transfer(params.token, params.recipient, amount));
+    },
+    async privacyWithdraw(params) {
+      return privacyOperation(params, "withdraw", (session, amount) => session.withdraw(params.token, params.recipient, amount));
+    },
     async forget({ userId, appSalt }) {
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.
@@ -282,6 +356,20 @@ function stellarAuthNetworkId(preimage: Uint8Array): Uint8Array {
   return new Uint8Array(xdr.HashIdPreimage.fromXDR(Buffer.from(preimage)).sorobanAuthorization().networkId());
 }
 
+function baseUnits(value: unknown): bigint {
+  if (typeof value !== "string" || !/^\d+$/.test(value) || BigInt(value) === 0n) {
+    throw new Error("kit/vault: amount must be a positive decimal string of base units");
+  }
+  return BigInt(value);
+}
+
+function address(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(value) || BigInt(value) === 0n) {
+    throw new Error(`kit/vault: ${field} must be a 0x-prefixed Starknet address`);
+  }
+  return value;
+}
+
 function toFelts(signature: Signature): string[] {
   return stark.formatSignature(signature);
 }
@@ -309,6 +397,7 @@ export interface VaultHostOptions {
   confirmUrl?: string;
   /** Defaults to `/api/vault/policy` on this origin. */
   policyUrl?: string;
+  privacySdk?: () => Promise<PrivacySdk>;
 }
 
 /** Runs inside the vault iframe. One embedding app per iframe. */
@@ -342,6 +431,8 @@ export function startVaultHost(opts: VaultHostOptions): void {
       backendUrl: opts.backendUrl,
       attestation: opts.attestation,
       policy: app.policy,
+      privacy: app.privacy,
+      ...(opts.privacySdk ? { privacySdk: opts.privacySdk } : {}),
       ledger: idbLedger(),
       confirm: (lines, context) => modal.review(lines, context.network),
       passkey: (user) => modal.passkey(user),
@@ -357,18 +448,34 @@ interface AppSettings {
   /** Null when the app registered none. */
   origins: string[] | null;
   policy: VaultPolicy;
+  privacy: (network: string) => StarknetPrivacyConfig | undefined;
 }
 
+const NO_PRIVACY = () => undefined;
+
 async function loadApp(policyUrl: string, appId: string): Promise<AppSettings> {
-  if (!appId) return { origins: [], policy: STRICT_POLICY };
+  if (!appId) return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
   try {
     const res = await fetch(`${policyUrl}?app_id=${encodeURIComponent(appId)}`);
-    if (!res.ok) return { origins: [], policy: STRICT_POLICY };
-    const body = (await res.json()) as Partial<AppSettings>;
-    return { origins: body.origins ?? null, policy: body.policy ?? STRICT_POLICY };
+    if (!res.ok) return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
+    const body = (await res.json()) as { origins?: string[] | null; policy?: VaultPolicy; privacy?: unknown };
+    return { origins: body.origins ?? null, policy: body.policy ?? STRICT_POLICY, privacy: privacySettings(body.privacy) };
   } catch {
-    return { origins: [], policy: STRICT_POLICY };
+    return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
   }
+}
+
+/** The dashboard keys private transfer settings by Starknet network name. */
+function privacySettings(raw: unknown): (network: string) => StarknetPrivacyConfig | undefined {
+  const byNetwork = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  return (network) => {
+    if (!Object.prototype.hasOwnProperty.call(byNetwork, network)) return undefined;
+    try {
+      return parseStarknetPrivacyConfig(byNetwork[network]);
+    } catch (error) {
+      throw new Error(`kit/vault: the private transfer settings for ${network} are invalid. ${error instanceof Error ? error.message : ""}`);
+    }
+  };
 }
 
 /** An app with no registered origins cannot embed the vault at all. */
