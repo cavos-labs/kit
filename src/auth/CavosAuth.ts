@@ -8,7 +8,7 @@ import {
 } from "../recovery/SocialRecoveryCredential";
 import type { AttestationPolicy } from "../recovery/SocialRecoveryClient";
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
-import { runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
+import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
 import { secureRandomBytes } from "../crypto/encoding";
 import { normalizeEmailCode } from "./emailCode";
 import {
@@ -306,6 +306,7 @@ export class CavosAuth implements AuthProvider {
       sessionId,
       session.attestation_document_b64,
       this.opts.attestation ?? DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
+      (pcr0Hex) => fetchEnclaveRelease(`${this.backendUrl}/api/enclave/releases/${pcr0Hex}`),
     );
     const result = await runEnclaveJob<{ result?: string; id_token?: unknown }>(
       sessionId,

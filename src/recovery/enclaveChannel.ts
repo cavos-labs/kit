@@ -21,11 +21,16 @@ export async function verifiedChannelKey(
   sessionId: string,
   attestationDocumentB64: string | undefined,
   policy: NitroAttestationPolicy,
+  fetchRelease?: (pcr0Hex: string) => Promise<unknown>,
 ): Promise<Uint8Array> {
   if (!attestationDocumentB64) {
     throw new Error("kit/social-recovery: the session carried no attestation");
   }
-  const attestation = await verifyNitroAttestation(base64UrlToBytes(attestationDocumentB64), policy);
+  const attestation = await verifyNitroAttestation(
+    base64UrlToBytes(attestationDocumentB64),
+    policy,
+    { fetchRelease },
+  );
 
   if (!attestation.publicKey) {
     throw new Error("kit/social-recovery: the attestation carried no channel key");
@@ -37,6 +42,27 @@ export async function verifiedChannelKey(
     throw new Error("kit/social-recovery: the attestation is not bound to this session");
   }
   return attestation.publicKey;
+}
+
+/**
+ * Fetch the signed release bundle the Cavos API serves for an enclave image.
+ *
+ * The host is not trusted: it can only withhold a release, because the bundle
+ * is verified against Sigstore before anything in it is believed.
+ */
+export async function fetchEnclaveRelease(url: string | URL): Promise<unknown> {
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (response.status === 404) {
+    throw new Error("kit/social-recovery: this enclave image has no published release");
+  }
+  if (!response.ok) {
+    throw new Error(`kit/social-recovery: the enclave release lookup failed (${response.status})`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error("kit/social-recovery: the enclave release is not JSON");
+  }
 }
 
 /**

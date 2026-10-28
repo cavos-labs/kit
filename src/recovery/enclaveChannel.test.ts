@@ -1,4 +1,4 @@
-import { encryptForEnclave } from "./enclaveChannel";
+import { encryptForEnclave, fetchEnclaveRelease } from "./enclaveChannel";
 
 /**
  * The enclave's side of the channel, in WebCrypto, to the same construction
@@ -80,5 +80,31 @@ describe("the channel to the enclave", () => {
     await expect(
       openResult(await other.seal(other.keys.response, forged)),
     ).rejects.toThrow("failed authentication");
+  });
+});
+
+describe("fetchEnclaveRelease", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("returns the bundle the API serves", async () => {
+    const bundle = { mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json" };
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify(bundle))) as any;
+    await expect(fetchEnclaveRelease("https://cavos.xyz/api/enclave/releases/ab")).resolves.toEqual(bundle);
+    expect(global.fetch).toHaveBeenCalledWith("https://cavos.xyz/api/enclave/releases/ab", expect.anything());
+  });
+
+  it("fails clearly when no release is published", async () => {
+    global.fetch = jest.fn().mockResolvedValue(new Response("", { status: 404 })) as any;
+    await expect(fetchEnclaveRelease("https://cavos.xyz/x")).rejects.toThrow(/no published release/);
+  });
+
+  it("fails on other errors and on a non-JSON body", async () => {
+    global.fetch = jest.fn().mockResolvedValue(new Response("", { status: 500 })) as any;
+    await expect(fetchEnclaveRelease("https://cavos.xyz/x")).rejects.toThrow(/lookup failed \(500\)/);
+    global.fetch = jest.fn().mockResolvedValue(new Response("<html>")) as any;
+    await expect(fetchEnclaveRelease("https://cavos.xyz/x")).rejects.toThrow(/not JSON/);
   });
 });
