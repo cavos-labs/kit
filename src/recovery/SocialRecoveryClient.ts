@@ -1,9 +1,9 @@
 import { bytesToBase64Url } from "../crypto/encoding";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
 import type { NitroAttestationPolicy } from "./nitro/attestation";
-import { runEnclaveJob, verifiedChannelKey } from "./enclaveChannel";
+import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "./enclaveChannel";
 
-export type SocialRecoveryProvider = "google" | "apple" | "email";
+export type SocialRecoveryProvider = "google" | "apple" | "email" | "github";
 export type SocialRecoveryAction = "enroll" | "recover";
 
 /**
@@ -86,6 +86,9 @@ interface StartedSession {
 export class SocialRecoveryClient {
   constructor(private readonly opts: SocialRecoveryClientOptions) {}
 
+  private readonly fetchRelease = (pcr0Hex: string): Promise<unknown> =>
+    fetchEnclaveRelease(new URL(`/api/enclave/releases/${pcr0Hex}`, this.opts.baseUrl));
+
   async lookupDekEnrollment(params: {
     provider: SocialRecoveryCredential["provider"];
     subject: string;
@@ -131,6 +134,7 @@ export class SocialRecoveryClient {
       session.session_id,
       session.attestation_document_b64,
       this.opts.attestation,
+      this.fetchRelease,
     );
     if (session.sealed_record_b64) {
       // The wallet already has a record. What it holds is the enclave's to say,
@@ -173,6 +177,7 @@ export class SocialRecoveryClient {
       session.session_id,
       session.attestation_document_b64,
       this.opts.attestation,
+      this.fetchRelease,
     );
     const result = await this.runJob(session.session_id, channelKey, {
       action: "recover",

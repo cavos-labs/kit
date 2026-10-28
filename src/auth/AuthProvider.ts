@@ -13,12 +13,12 @@ export interface Identity {
   email?: string;
   /**
    * Display name from the OAuth id_token (standard OIDC `name` claim).
-   * Populated by Google sign-in; absent for email and Apple
+   * Populated by Google and GitHub sign-in; absent for email and Apple
    * (their tokens don't carry it). Optional on purpose —
    * consumers should fall back to `email` / `userId` when unset.
    */
   name?: string;
-  provider?: "google" | "apple" | "email" | "otp" | string;
+  provider?: "google" | "apple" | "email" | "github" | "otp" | string;
 }
 
 /**

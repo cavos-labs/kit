@@ -18,6 +18,7 @@
 
 import { decodeCbor, encodeSigStructure, type CborValue } from "./cbor";
 import { parseCertificate, type ParsedCertificate } from "./der";
+import { verifyEnclaveRelease, type EnclaveReleasePolicy } from "./release";
 
 /**
  * The AWS Nitro Attestation PKI root, DER-encoded.
@@ -57,16 +58,22 @@ const P384_COORDINATE_BYTES = 48;
 const MAX_DOCUMENT_AGE_MS = 5 * 60_000;
 
 /**
- * Which enclave the SDK is willing to talk to.
+ * Which enclave the SDK is willing to talk to. At least one of the two paths
+ * must be set; a policy with neither accepts nothing.
  *
- * `pcr0` accepts a list so an image rollout can overlap: publish the new
- * measurement alongside the one still deployed, ship the release, then
- * redeploy. Apps on either version keep working through the transition.
- * Order is newest first.
+ * `pcr0` is strict pinning, for integrators who audit one image and want
+ * nothing else: an enclave is accepted if its PCR0 is listed. It accepts a
+ * list so an image rollout can overlap. Order is newest first.
+ *
+ * `release` accepts any enclave image properly published as a signed release
+ * (see `release.ts`), so a redeploy needs no new SDK. It is consulted only
+ * when the PCR0 is not pinned.
  */
 export interface NitroAttestationPolicy {
   /** Accepted PCR0 values (hex, no `0x`) — the measurement of the enclave image. */
-  pcr0: string | string[];
+  pcr0?: string | string[];
+  /** The release workflow whose signed images are accepted. */
+  release?: EnclaveReleasePolicy;
 }
 
 export interface NitroAttestationDocument {
@@ -88,13 +95,20 @@ export interface NitroAttestationDocument {
  *
  * `now` is injectable so tests can pin a moment inside a captured document's
  * validity window; production callers should leave it unset.
+ *
+ * `fetchRelease` retrieves the signed release bundle for an attested PCR0. It
+ * is only called when the PCR0 is not pinned and `policy.release` is set, and
+ * whatever it returns is verified, never trusted.
  */
 export async function verifyNitroAttestation(
   document: Uint8Array,
   policy: NitroAttestationPolicy,
-  options: { now?: Date } = {},
+  options: { now?: Date; fetchRelease?: (pcr0Hex: string) => Promise<unknown> } = {},
 ): Promise<NitroAttestationDocument> {
   const now = options.now ?? new Date();
+  if (policy.pcr0 === undefined && !policy.release) {
+    throw new Error("kit/nitro: the attestation policy accepts no enclave");
+  }
 
   const { protectedHeader, payload, signature } = readCoseSign1(document);
   assertEs384(protectedHeader);
@@ -128,11 +142,19 @@ export async function verifyNitroAttestation(
   }
 
   const pcr0 = attestation.pcrs.get(0);
-  if (!pcr0 || !isAcceptedMeasurement(toHex(pcr0), policy.pcr0)) {
+  if (!pcr0) {
     throw new Error("kit/nitro: enclave image measurement is not accepted");
   }
-
-  return attestation;
+  const pcr0Hex = toHex(pcr0);
+  if (policy.pcr0 !== undefined && isAcceptedMeasurement(pcr0Hex, policy.pcr0)) {
+    return attestation;
+  }
+  if (policy.release && options.fetchRelease) {
+    const bundle = await options.fetchRelease(pcr0Hex);
+    await verifyEnclaveRelease(bundle, attestation.pcrs, policy.release, now);
+    return attestation;
+  }
+  throw new Error("kit/nitro: enclave image measurement is not accepted");
 }
 
 /**

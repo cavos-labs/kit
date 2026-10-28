@@ -45,6 +45,7 @@ export type {
   SocialRecoveryResult,
 } from "./recovery/SocialRecoveryClient";
 export { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "./recovery/attestationDefaults";
+export type { EnclaveReleasePolicy } from "./recovery/nitro/release";
 
 // Signers
 export type { DevicePublicKey } from "./signer/DeviceSigner";

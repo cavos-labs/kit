@@ -2,12 +2,13 @@ import type { AuthProvider, Identity } from "./AuthProvider";
 import {
   createSocialRecoveryCredential,
   ENCLAVE_EMAIL_ISSUER,
+  ENCLAVE_GITHUB_ISSUER,
   isSocialRecoveryIssuer,
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
 import type { AttestationPolicy } from "../recovery/SocialRecoveryClient";
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
-import { runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
+import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
 import { secureRandomBytes } from "../crypto/encoding";
 import { normalizeEmailCode } from "./emailCode";
 import {
@@ -39,13 +40,15 @@ export interface CavosAuthOptions {
 /**
  * Hosted login (Privy-like) backed by the Cavos backend — same endpoints
  * `@cavos/react` uses for Google / Apple OAuth, plus an email code the recovery
- * enclave generates and verifies itself. Login only
+ * enclave generates and verifies itself, and GitHub, which has no id_token of
+ * its own: the enclave verifies the GitHub grant and signs one. Login only
  * resolves a stable `userId` (the OAuth `sub` claim); it never touches signing.
  * Feed the returned `Identity` to `Cavos.connect`.
  *
  *   const auth = new CavosAuth({ appId });
  *   // social: open the returned URL; user returns, then:
  *   const identity = await auth.handleCallback(window.location.search);
+ *   // GitHub: the same, from getGitHubOAuthUrl
  *   // or email OTP:
  *   await auth.sendOtp(email); const identity = await auth.verifyOtp(email, code);
  *   const cavos = await Cavos.connect({ network, appSalt, identity, paymasterApiKey });
@@ -65,8 +68,11 @@ export class CavosAuth implements AuthProvider {
   private readonly identityStorageKey: string;
   private readonly authTokenKey: string;
   private readonly loginSecretKey: string;
+  private readonly pkceKey: string;
   /** The login secret, for a callback this same instance handles. */
   private loginSecret: string | null = null;
+  /** The PKCE verifier of the GitHub login in flight, for a callback this same instance handles. */
+  private pkceVerifier: string | null = null;
   private last: Identity | null = null;
   /** Fresh OIDC proof retained only in memory for an immediate TEE recovery.
    * Never persisted to localStorage and never sent to the Cavos control plane
@@ -93,6 +99,7 @@ export class CavosAuth implements AuthProvider {
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
     this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
     this.loginSecretKey = `cavos-kit:login-secret:${opts.appId ?? "default"}`;
+    this.pkceKey = `cavos-kit:pkce:${opts.appId ?? "default"}`;
     if (opts.persistSession === false && typeof window !== "undefined") {
       // An identity saved before the app turned persistence off would
       // otherwise keep this browser signed in for good.
@@ -155,6 +162,32 @@ export class CavosAuth implements AuthProvider {
     return this.oauthUrl("apple", redirectUri);
   }
 
+  /**
+   * Redirect URL for GitHub login.
+   *
+   * GitHub issues no id_token, so the enclave verifies the sign-in and signs
+   * one itself. The URL is built by the backend, and a code issued without our
+   * PKCE challenge could be redeemed without this browser, so a URL that does
+   * not carry the challenge this login made is refused here.
+   */
+  async getGitHubOAuthUrl(redirectUri?: string): Promise<string> {
+    if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
+    const appId = this.requireAppId();
+    this.startLogin();
+    const verifier = this.startPkce();
+    const challenge = loginNonce(verifier);
+    const params = new URLSearchParams({
+      code_challenge: challenge,
+      redirect_uri: redirectUri ?? window.location.href,
+      app_id: appId,
+    });
+    const { url } = await this.get(`/api/oauth/v2/github?${params}`);
+    if (!isGitHubAuthorizeUrl(url, challenge)) {
+      throw new Error("kit/auth: the GitHub sign-in URL is not the one this login asked for");
+    }
+    return url;
+  }
+
   private async oauthUrl(provider: "google" | "apple", redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
     const params = new URLSearchParams({
@@ -181,6 +214,9 @@ export class CavosAuth implements AuthProvider {
         app_id: this.opts.appId,
         redirect_uri: callbackRedirectUri,
       });
+      if (typeof result.github_grant === "string") {
+        return this.githubIdentity(result.github_grant);
+      }
       return this.identityFromAuthData(JSON.stringify(result), "oauth");
     }
     const authData = extractAuthData(authDataOrSearch);
@@ -192,7 +228,7 @@ export class CavosAuth implements AuthProvider {
    * recovery enclave, so the Cavos control plane never sees it.
    */
   async sendOtp(email: string): Promise<void> {
-    await this.emailPost("/api/oauth/email/code", {
+    await this.enclavePost("/api/oauth/email/code", {
       app_id: this.requireAppId(),
       email: normalizeEmail(email),
     });
@@ -204,37 +240,84 @@ export class CavosAuth implements AuthProvider {
    * created here, and that token is used exactly like a Google id_token.
    */
   async verifyOtp(email: string, code: string): Promise<Identity> {
-    const appId = this.requireAppId();
     const address = normalizeEmail(email);
     const secret = loginSecretFrom(secureRandomBytes(32));
-    const session = await this.emailPost("/api/oauth/email/session", { app_id: appId });
-    const sessionId: unknown = session?.session_id;
-    if (typeof sessionId !== "string") {
-      throw new Error("kit/auth: the email session carried no id");
-    }
-    const channelKey = await verifiedChannelKey(
-      sessionId,
-      session.attestation_document_b64,
-      this.opts.attestation ?? DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
-    );
-    const result = await runEnclaveJob<{ result?: string; id_token?: unknown }>(
-      sessionId,
-      channelKey,
+    const idToken = await this.enclaveLogin(
       {
         action: "verify_email",
         email: address,
         code: normalizeEmailCode(code),
         client_nonce: loginNonce(secret),
       },
-      (job) => this.emailPost("/api/oauth/email/verify", { session_id: sessionId, job }),
+      "/api/oauth/email/verify",
+      {},
+      "email_verified",
+      "kit/auth: the enclave did not verify this email",
     );
-    if (result.result !== "email_verified" || typeof result.id_token !== "string") {
-      throw new Error("kit/auth: the enclave did not verify this email");
-    }
-    if (parseJwt(result.id_token).iss !== ENCLAVE_EMAIL_ISSUER) {
+    if (parseJwt(idToken).iss !== ENCLAVE_EMAIL_ISSUER) {
       throw new Error("kit/auth: the email token was not issued by the enclave");
     }
-    return this.identityFromAuthData(result.id_token, "email", address, secret);
+    return this.identityFromAuthData(idToken, "email", address, secret);
+  }
+
+  /**
+   * Redeem a GitHub grant inside the attested enclave. The grant is only
+   * useful with the PKCE verifier and login secret this browser kept, and the
+   * token the enclave signs is bound to that secret exactly like a Google one.
+   */
+  private async githubIdentity(githubGrant: string): Promise<Identity> {
+    const secret = this.takeLoginSecret();
+    const verifier = this.takePkceVerifier();
+    if (!secret || !verifier) {
+      throw new Error(
+        "kit/auth: this sign-in did not start here, or the browser could not keep its state. Sign in again.",
+      );
+    }
+    const idToken = await this.enclaveLogin(
+      { action: "verify_github", code_verifier: verifier, client_nonce: loginNonce(secret) },
+      "/api/oauth/github/verify",
+      { github_grant: githubGrant },
+      "github_verified",
+      "kit/auth: the enclave did not verify this GitHub sign-in",
+    );
+    if (parseJwt(idToken).iss !== ENCLAVE_GITHUB_ISSUER) {
+      throw new Error("kit/auth: the GitHub token was not issued by the enclave");
+    }
+    return this.identityFromAuthData(idToken, "github", undefined, secret);
+  }
+
+  /**
+   * Open an attested enclave session, run one encrypted login job through it
+   * and return the id_token the enclave signed.
+   */
+  private async enclaveLogin(
+    job: Record<string, unknown>,
+    verifyPath: string,
+    extraBody: Record<string, unknown>,
+    expectedResult: string,
+    failure: string,
+  ): Promise<string> {
+    const session = await this.enclavePost("/api/oauth/email/session", { app_id: this.requireAppId() });
+    const sessionId: unknown = session?.session_id;
+    if (typeof sessionId !== "string") {
+      throw new Error("kit/auth: the enclave session carried no id");
+    }
+    const channelKey = await verifiedChannelKey(
+      sessionId,
+      session.attestation_document_b64,
+      this.opts.attestation ?? DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
+      (pcr0Hex) => fetchEnclaveRelease(`${this.backendUrl}/api/enclave/releases/${pcr0Hex}`),
+    );
+    const result = await runEnclaveJob<{ result?: string; id_token?: unknown }>(
+      sessionId,
+      channelKey,
+      job,
+      (sealed) => this.enclavePost(verifyPath, { session_id: sessionId, job: sealed, ...extraBody }),
+    );
+    if (result.result !== expectedResult || typeof result.id_token !== "string") {
+      throw new Error(failure);
+    }
+    return result.id_token;
   }
 
   /** AuthProvider: returns the identity resolved by the last login step. */
@@ -395,6 +478,30 @@ export class CavosAuth implements AuthProvider {
     return loginNonce(secret);
   }
 
+  /** Begin the PKCE half of a GitHub login: keep a fresh verifier and return it. */
+  private startPkce(): string {
+    const verifier = loginSecretFrom(secureRandomBytes(32));
+    try {
+      window.sessionStorage.setItem(this.pkceKey, verifier);
+    } catch {
+      this.pkceVerifier = verifier;
+    }
+    return verifier;
+  }
+
+  /** The PKCE verifier of the login in flight, taken exactly once. */
+  private takePkceVerifier(): string | null {
+    const kept = this.pkceVerifier;
+    this.pkceVerifier = null;
+    try {
+      const stored = window.sessionStorage.getItem(this.pkceKey);
+      window.sessionStorage.removeItem(this.pkceKey);
+      return stored ?? kept;
+    } catch {
+      return kept;
+    }
+  }
+
   /** The secret of the login in flight, taken exactly once. */
   private takeLoginSecret(): string | null {
     let secret = this.loginSecret;
@@ -429,11 +536,11 @@ export class CavosAuth implements AuthProvider {
   }
 
   private requireAppId(): string {
-    if (!this.opts.appId) throw new Error("kit/auth: email sign-in needs an appId");
+    if (!this.opts.appId) throw new Error("kit/auth: this sign-in needs an appId");
     return this.opts.appId;
   }
 
-  private async emailPost(path: string, body: unknown): Promise<any> {
+  private async enclavePost(path: string, body: unknown): Promise<any> {
     const r = await fetch(`${this.backendUrl}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -447,7 +554,7 @@ export class CavosAuth implements AuthProvider {
     } catch {
       code = undefined;
     }
-    const known = typeof code === "string" ? EMAIL_ERRORS[code] : undefined;
+    const known = typeof code === "string" ? ENCLAVE_LOGIN_ERRORS[code] : undefined;
     throw new Error(known ?? `kit/auth: ${path} -> ${r.status} ${text}`);
   }
 
@@ -462,16 +569,35 @@ export class CavosAuth implements AuthProvider {
   }
 }
 
-const EMAIL_ERRORS: Record<string, string> = {
+const ENCLAVE_LOGIN_ERRORS: Record<string, string> = {
   invalid_request: "Enter a valid email address.",
   app_not_found: "kit/auth: this app is not registered with Cavos.",
   email_undeliverable: "This email provider is not supported yet.",
   code_cooldown: "A code was just sent to this address. Wait a minute before requesting another.",
   rate_limited: "Too many attempts. Try again in a few minutes.",
   email_unavailable: "Email sign-in is unavailable right now. Try again later.",
-  enclave_unavailable: "Email sign-in is unavailable right now. Try again later.",
+  enclave_unavailable: "Sign-in is unavailable right now. Try again later.",
   code_rejected: "That code is wrong or has expired. Request a new one.",
+  github_rejected: "GitHub did not accept this sign-in. Try again.",
+  invalid_grant: "This GitHub sign-in expired. Sign in again.",
 };
+
+/** Whether `url` is GitHub's authorize page, asked for with exactly this PKCE challenge. */
+function isGitHubAuthorizeUrl(url: unknown, challenge: string): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.host === "github.com" &&
+      parsed.pathname === "/login/oauth/authorize" &&
+      parsed.searchParams.get("code_challenge") === challenge &&
+      parsed.searchParams.get("code_challenge_method") === "S256"
+    );
+  } catch {
+    return false;
+  }
+}
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -524,6 +650,8 @@ function providerFromClaims(claims: any, fallback: string): string {
       return "apple";
     case ENCLAVE_EMAIL_ISSUER:
       return "email";
+    case ENCLAVE_GITHUB_ISSUER:
+      return "github";
     default:
       return claims?.provider ?? fallback;
   }

@@ -17,6 +17,6 @@ module.exports = {
     "^.+\\.[tj]sx?$": ["ts-jest", { isolatedModules: true, tsconfig: { allowJs: true } }],
   },
   transformIgnorePatterns: [
-    "node_modules/(?!(@stellar/stellar-sdk|@noble|uint8array-extras|hpke|@starkware-libs/starknet-privacy-sdk)/)",
+    "node_modules/(?!(@stellar/stellar-sdk|@noble|@freedomofpress|uint8array-extras|hpke|@starkware-libs/starknet-privacy-sdk)/)",
   ],
 };
