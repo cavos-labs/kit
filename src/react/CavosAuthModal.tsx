@@ -24,7 +24,7 @@ export interface CavosAuthModalProps {
   /** Logo height in px. Applies to both a custom `appLogo` (img) and the
    *  default Cavos star. Defaults to 40 (img) / 34 (star). */
   appLogoSize?: number;
-  providers?: ('google' | 'apple' | 'email')[];
+  providers?: ('google' | 'apple' | 'email' | 'github')[];
   primaryColor?: string;
   /** 'light' (default) or 'dark' */
   theme?: 'light' | 'dark';
@@ -271,6 +271,12 @@ const GoogleIcon = ({ size = 18 }: { size?: number } = {}) => (
 const AppleIcon = ({ size = 16 }: { size?: number } = {}) => (
   <svg width={size} height={size * (1000 / 814)} viewBox="0 0 814 1000" fill="currentColor">
     <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-194.3 126.4-297.5 250.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z"/>
+  </svg>
+);
+
+const GitHubIcon = ({ size = 16 }: { size?: number } = {}) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor">
+    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
   </svg>
 );
 
@@ -888,7 +894,7 @@ export function CavosAuthModal({
     }
   };
 
-  const handleOAuth = async (provider: 'google' | 'apple') => {
+  const handleOAuth = async (provider: 'google' | 'apple' | 'github') => {
     setError(''); setBusy(true);
     try {
       await login(provider);
@@ -1159,6 +1165,8 @@ export function CavosAuthModal({
           return { name: 'Google', icon: <GoogleIcon size={40} /> };
         case 'apple':
           return { name: 'Apple', icon: <AppleIcon size={38} /> };
+        case 'github':
+          return { name: 'GitHub', icon: <GitHubIcon size={40} /> };
         case 'email':
           return { name: 'email', icon: null };
         default:
@@ -1368,7 +1376,8 @@ export function CavosAuthModal({
   const showEmail = providers.includes('email');
   const showGoogle = providers.includes('google');
   const showApple = providers.includes('apple');
-  const hasSocial = showGoogle || showApple;
+  const showGitHub = providers.includes('github');
+  const hasSocial = showGoogle || showApple || showGitHub;
   // Absolute-positioned icon so the label stays optically centered (matches the
   // Privy/Clerk full-width button look) instead of shifting when text changes.
   // No background box — the brand logos render clean, like native sign-in buttons.
@@ -1420,6 +1429,14 @@ export function CavosAuthModal({
                 {btnIcon(<AppleIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
                 <span>Continue with Apple</span>
                 {recentTag('apple')}
+              </button>
+            )}
+
+            {showGitHub && (
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('github'); handleOAuth('github'); }} disabled={busy}>
+                {btnIcon(<GitHubIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
+                <span>Continue with GitHub</span>
+                {recentTag('github')}
               </button>
             )}
 

@@ -38,6 +38,11 @@ describe("provider from the credential", () => {
     expect(id.provider).toBe("email");
   });
 
+  it("names the enclave's GitHub token github", async () => {
+    const id = await identityFrom({ iss: "https://enclave.cavos.xyz/github", sub: "u1", name: "Ada" });
+    expect(id.provider).toBe("github");
+  });
+
   it("falls back rather than inventing a provider it cannot know", async () => {
     const id = await identityFrom({ iss: "https://example.test", sub: "u1" });
     expect(id.provider).toBe("oauth");

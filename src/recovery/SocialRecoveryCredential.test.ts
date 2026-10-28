@@ -33,6 +33,13 @@ describe("socialRecoveryProvider", () => {
     expect(socialRecoveryProvider(token({ iss: "accounts.google.com" }))).toBe("google");
     expect(socialRecoveryProvider(token({ iss: "https://appleid.apple.com" }))).toBe("apple");
     expect(socialRecoveryProvider(token({ iss: "https://enclave.cavos.xyz" }))).toBe("email");
+    expect(socialRecoveryProvider(token({ iss: "https://enclave.cavos.xyz/github" }))).toBe("github");
+  });
+
+  it("accepts the enclave's GitHub issuer and nothing near it", () => {
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/github")).toBe(true);
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/github/")).toBe(false);
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/githubx")).toBe(false);
   });
 
   it("accepts the enclave's issuer and refuses Firebase's", () => {
