@@ -1,3 +1,4 @@
+import type { ConsentAction } from "../account/consent";
 import { PasskeyPrf } from "../chains/stellar/PasskeyPrf";
 import type { PasskeyPrfProvider } from "../signer/PasskeyProvider";
 import { POPUP_READY, POPUP_RESULT, type PopupIntent, type PopupResult } from "./protocol";
@@ -7,6 +8,24 @@ import { armableButton, button, el, setEnabled, sheet, type Armable, type Sheet 
 
 /** Approve fills in over this long once the modal is seen, so a click aimed at something else cannot land on it. */
 const ARM_MS = 700;
+
+const CONSENT_COPY: Record<ConsentAction, { title: string; body: string; confirm: string }> = {
+  delete_account: {
+    title: "Delete your account",
+    body: "This removes your account from this app: your wallet registration, devices, passkey backup and recovery. Your wallet stays on the blockchain with its funds. If no other device holds its key, you will lose access to those funds for good.",
+    confirm: "Delete account",
+  },
+  disable_recovery: {
+    title: "Turn off recovery by sign-in",
+    body: "Cavos will stop holding a recovery copy of your key. If you lose this device and have no passkey, you lose this wallet.",
+    confirm: "Turn off",
+  },
+  enable_recovery: {
+    title: "Turn on recovery by sign-in",
+    body: "Cavos will keep a recovery copy of your key, sealed in its recovery enclave, the next time you sign in.",
+    confirm: "Turn on",
+  },
+};
 
 type Secret = { secret: Uint8Array; credentialId?: Uint8Array };
 
@@ -22,6 +41,10 @@ export class VaultModal {
 
   review(lines: Line[], network: string): Promise<boolean> {
     return this.serial(() => this.showReview(lines, network));
+  }
+
+  consent(action: ConsentAction): Promise<boolean> {
+    return this.serial(() => this.showConsent(action));
   }
 
   passkey(user: { userId: string; userName: string }): PasskeyPrfProvider {
@@ -83,6 +106,86 @@ export class VaultModal {
       // at something else.
       if (canTrackVisibility()) unguard = guard(view.card, approve);
       else approve.arm(ARM_MS);
+    });
+  }
+
+  private async showConsent(action: ConsentAction): Promise<boolean> {
+    const copy = CONSENT_COPY[action];
+    const view = await this.open();
+    view.title.textContent = copy.title;
+    view.body.append(el("span", {}, copy.body));
+    let typed: HTMLInputElement | undefined;
+    if (action === "delete_account") {
+      typed = el("input", {
+        display: "block",
+        width: "100%",
+        boxSizing: "border-box",
+        marginTop: "16px",
+        padding: "11px 14px",
+        borderRadius: "10px",
+        border: "1px solid rgba(255,255,255,0.32)",
+        background: "rgba(255,255,255,0.08)",
+        color: "#FFFFFF",
+        fontFamily: "inherit",
+        fontSize: "15px",
+        outline: "none",
+      });
+      typed.id = "cavos-consent-confirm";
+      typed.type = "text";
+      typed.autocomplete = "off";
+      typed.placeholder = "Type delete to confirm";
+      typed.setAttribute("aria-label", "Type delete to confirm");
+      view.body.append(typed);
+    }
+    return new Promise((resolve) => {
+      const cancel = button("Cancel", "secondary");
+      let settled = false;
+      let unguard = () => {};
+      const finish = async (approved: boolean) => {
+        if (settled) return;
+        settled = true;
+        unguard();
+        document.removeEventListener("keydown", onKey);
+        await this.dismiss(view);
+        resolve(approved);
+      };
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === "Escape") void finish(false);
+      };
+      document.addEventListener("keydown", onKey);
+      cancel.onclick = () => void finish(false);
+
+      const confirm = armableButton(copy.confirm);
+      view.actions.append(confirm.node, cancel);
+      confirm.node.onclick = () => void finish(true);
+
+      let armed = false;
+      let visible = !canTrackVisibility();
+      const sync = () => {
+        const ready = visible && (!typed || typed.value.trim().toLowerCase() === "delete");
+        if (ready === armed) return;
+        armed = ready;
+        if (ready) confirm.arm(ARM_MS);
+        else confirm.disarm();
+      };
+      if (typed) typed.oninput = sync;
+      if (canTrackVisibility()) {
+        unguard = guard(view.card, {
+          node: confirm.node,
+          arm: () => {
+            visible = true;
+            armed = false;
+            sync();
+          },
+          disarm: () => {
+            visible = false;
+            armed = false;
+            confirm.disarm();
+          },
+        });
+      } else {
+        sync();
+      }
     });
   }
 

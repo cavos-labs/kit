@@ -1,5 +1,6 @@
 import type { Call, InvocationsSignerDetails, TypedData } from "starknet";
 import type { PrivacyStatus, PrivacySubmission } from "../chains/starknet/privacy/session";
+import type { ConsentProof } from "../account/consent";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 
 export const VAULT_READY = "cavos-vault:ready";
@@ -64,6 +65,13 @@ export interface VaultMethods {
     paymasterApiKey: string;
   }): PrivacySubmission;
   forget(params: { userId: string; appSalt: string }): void;
+  /**
+   * Ask the user to confirm the action a server challenge names, then sign it
+   * with the wallet's spend key. Null when this browser holds no key.
+   */
+  consent(params: { userId: string; appSalt: string; challenge: string }): ConsentProof | null;
+  /** Remove this browser's copy of the account: its keys and wraps. */
+  erase(params: { userId: string; appSalt: string }): void;
   /** Create a passkey that can restore the connected account on another device. */
   enrollPasskey(params: {
     userId: string;

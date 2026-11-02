@@ -23,6 +23,24 @@ describe("toEnclaveDekPort", () => {
     expect(enroll).toHaveBeenCalledWith({ walletAddress: "Addr1", credential, dek });
   });
 
+  it("treats a revoked recovery as an opt-out, not a failure", async () => {
+    const dek = generateMasterDEK();
+    const enroll = jest.fn(async () => {
+      throw new Error('kit/social-recovery: /enroll -> 403 {"error":"recovery_revoked"}');
+    });
+    const port = toEnclaveDekPort({ enroll, recover: jest.fn() } as unknown as SocialRecoveryClient);
+    await expect(port.enrollDek({ address: "Addr1", credential, dek })).resolves.toEqual({ kind: "opted-out" });
+  });
+
+  it("still raises other enroll failures", async () => {
+    const dek = generateMasterDEK();
+    const enroll = jest.fn(async () => {
+      throw new Error("enclave down");
+    });
+    const port = toEnclaveDekPort({ enroll, recover: jest.fn() } as unknown as SocialRecoveryClient);
+    await expect(port.enrollDek({ address: "Addr1", credential, dek })).rejects.toThrow("enclave down");
+  });
+
   it("asks the enclave about a wallet that already has a record", async () => {
     const dek = generateMasterDEK();
     const enroll = jest.fn(async () => ({

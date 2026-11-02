@@ -24,11 +24,17 @@ export function toEnclaveDekPort(
       }
     },
     async enrollDek(params) {
-      const { result } = await client.enroll({
-        walletAddress: params.address,
-        credential: params.credential,
-        dek: params.dek,
-      });
+      let result;
+      try {
+        ({ result } = await client.enroll({
+          walletAddress: params.address,
+          credential: params.credential,
+          dek: params.dek,
+        }));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("recovery_revoked")) return { kind: "opted-out" };
+        throw error;
+      }
       if (result.result !== "confirmed") return { kind: "enrolled" };
       // The wallet already had a record, and the enclave has now said whether
       // it seals this DEK. A mismatch must not lock the user out of a wallet

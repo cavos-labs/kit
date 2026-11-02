@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.1
+
+Needs the current Cavos backend.
+
+- **Account deletion.** `deleteAccount()` from `useCavos()` removes the user's
+  Cavos account data for the environment (registration, devices, passkey backup,
+  recovery) and this browser's keys, then signs them out. The wallet stays
+  on-chain.
+- **Recovery opt-out and opt-in.** `disableEnclaveRecovery()` and
+  `enableEnclaveRecovery()` stop and resume Cavos holding a recovery copy of the
+  key. A user who opted out is never re-enrolled silently, and a new device gets
+  a clear error instead of a failed recovery.
+- **The consent sheet.** Each of these is confirmed in a sheet the vault draws,
+  which signs the server's challenge with the wallet's spend key. Deleting asks
+  the user to type `delete`. The app cannot answer for the user.
+- **The vault refuses to sign a consent message as a Solana transaction.**
+
 ## 0.4.1
 
 - **The code screen fits its card.** The nine code boxes share the card's width

@@ -135,6 +135,16 @@ export class VaultClient {
     return this.call("forget", { userId, appSalt });
   }
 
+  /** The user confirms in the vault, which signs the challenge with the wallet's key. Null when this browser holds no key. */
+  consent(params: VaultParams<"consent">): Promise<VaultResult<"consent">> {
+    return this.call("consent", params);
+  }
+
+  /** Remove this browser's keys and wraps for the account. */
+  erase(userId: string, appSalt: string): Promise<void> {
+    return this.call("erase", { userId, appSalt });
+  }
+
   /** Create a passkey, in the vault's own origin, that can restore the connected account on another device. */
   enrollPasskey(params: VaultParams<"enrollPasskey">): Promise<void> {
     return this.call("enrollPasskey", params);
