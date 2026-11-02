@@ -296,4 +296,63 @@ describe("ensureEnclave", () => {
     });
     expect(second.addresses).toEqual(first.addresses);
   });
+
+  it("finishes a login for a user who opted out of recovery", async () => {
+    const key = LocalDeviceUnwrapKey.generate();
+    const recovery: EnclaveDekPort = {
+      lookupDek: async () => null,
+      enrollDek: async () => ({ kind: "opted-out" }),
+      wrapDekToFactor: async () => {
+        throw new Error("nothing to recover");
+      },
+    };
+    const input = {
+      userId: "user-out",
+      appSalt: salt,
+      chains,
+      factor: factor(key),
+      recovery,
+      registry: new MemoryIndex(),
+      store: new MemoryStore(),
+      credential,
+    };
+    const first = await ensureEnclave(input);
+    expect(first.kind).toBe("ready");
+    const again = await ensureEnclave(input);
+    expect(again.addresses).toEqual(first.addresses);
+  });
+
+  it("says recovery is off when a new device finds it revoked", async () => {
+    const registry = new MemoryIndex();
+    const first = await ensureEnclave({
+      userId: "user-rev",
+      appSalt: salt,
+      chains,
+      factor: factor(LocalDeviceUnwrapKey.generate()),
+      recovery: new MemoryEnclave(),
+      registry,
+      store: new MemoryStore(),
+      credential,
+    });
+    expect(first.kind).toBe("ready");
+    const revoked: EnclaveDekPort = {
+      lookupDek: async () => null,
+      enrollDek: async () => ({ kind: "opted-out" }),
+      wrapDekToFactor: async () => {
+        throw new Error('kit/social-recovery: /recover -> 403 {"error":"recovery_revoked"}');
+      },
+    };
+    await expect(
+      ensureEnclave({
+        userId: "user-rev",
+        appSalt: salt,
+        chains,
+        factor: factor(LocalDeviceUnwrapKey.generate()),
+        recovery: revoked,
+        registry,
+        store: new MemoryStore(),
+        credential,
+      }),
+    ).rejects.toThrow("recovery by sign-in is turned off for this wallet");
+  });
 });

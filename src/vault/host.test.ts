@@ -9,6 +9,8 @@ import { unwrapDek } from "../secret/passkeyWrap";
 import type { StoredPasskeyWrap } from "../registry/PasskeyWrapStore";
 import { solanaSpendFromSeed } from "../signer/Ed25519SpendSigner";
 import { prefixedMessageBytes } from "../signing";
+import { consentAction, consentMessage, type ConsentAction } from "../account/consent";
+import { bytesToBase64Url, utf8ToBytes } from "../crypto/encoding";
 import { createVaultHandler, serveVault } from "./host";
 import { memoryLedger } from "./ledger";
 import type { OverLimit } from "./limits";
@@ -22,6 +24,8 @@ const BLOCKHASH = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
 const params = { network: "solana-devnet", appSalt: "salt", userId: "u1", recovery: "none" as const };
 
 function setup(confirm: () => Promise<boolean> = async () => true, overLimit: OverLimit = "ask") {
+  const consents: ConsentAction[] = [];
+  const consent = { answer: true, keyOnDevice: true };
   const seed = parseEd25519Seed(randomBytes(32));
   const spend = solanaSpendFromSeed(seed);
   const stellarKey = Keypair.random();
@@ -60,8 +64,13 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
         wraps.push(entry);
       },
     }),
+    consent: async (action) => {
+      consents.push(action);
+      return consent.answer;
+    },
     readDek: async (input) => {
       dekReads.push(input);
+      if (!consent.keyOnDevice) throw new Error("kit/secret: this device does not hold the wallet key.");
       return parseMasterDEK(dek);
     },
     resolveSolana: async (input) => {
@@ -86,7 +95,7 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
     channel.port1.close();
     channel.port2.close();
   };
-  return { client, asked, networks, scopes, stellarKey, starknetSpend, close, dek, prf, dekReads, wraps, spend };
+  return { consents, consent, client, asked, networks, scopes, stellarKey, starknetSpend, close, dek, prf, dekReads, wraps, spend };
 }
 
 function solTransfer(from: string, lamports: number): Uint8Array {
@@ -295,6 +304,73 @@ describe("vault passkeys", () => {
     expect((await client.connectSolana(passkeyParams)).passkey).toBe(false);
     await client.enrollPasskey({ userId: "u1", appSalt: "salt" });
     expect((await client.connectSolana(passkeyParams)).passkey).toBe(true);
+    close();
+  });
+});
+
+function challengeFor(action: string, kind = "end_user_consent"): string {
+  const payload = { kind, app_id: "app", environment_id: "env", sub: "u1", action, state: "s", issued_at: 1 };
+  return `v1.${bytesToBase64Url(utf8ToBytes(JSON.stringify(payload)))}.sig`;
+}
+
+describe("vault consent", () => {
+  it("refuses before a wallet is connected", async () => {
+    const { client, consents, close } = setup();
+    await expect(client.consent({ userId: "u1", appSalt: "salt", challenge: challengeFor("delete_account") })).rejects.toThrow(
+      "connect a wallet first",
+    );
+    expect(consents).toHaveLength(0);
+    close();
+  });
+
+  it("refuses a challenge that is not a consent request", async () => {
+    const { client, close } = setup();
+    await client.connectSolana(params);
+    await expect(client.consent({ userId: "u1", appSalt: "salt", challenge: challengeFor("delete_account", "other") })).rejects.toThrow(
+      "not a consent challenge",
+    );
+    close();
+  });
+
+  it("throws when the user cancels", async () => {
+    const { client, consent, close } = setup();
+    await client.connectSolana(params);
+    consent.answer = false;
+    await expect(client.consent({ userId: "u1", appSalt: "salt", challenge: challengeFor("delete_account") })).rejects.toThrow(
+      "the user cancelled",
+    );
+    close();
+  });
+
+  it("answers null when this browser holds no key", async () => {
+    const { client, consent, consents, close } = setup();
+    await client.connectSolana(params);
+    consent.keyOnDevice = false;
+    await expect(
+      client.consent({ userId: "u1", appSalt: "salt", challenge: challengeFor("disable_recovery") }),
+    ).resolves.toBeNull();
+    expect(consents).toEqual(["disable_recovery"]);
+    close();
+  });
+
+  it("signs the challenge with the spend key of the connected chain", async () => {
+    const { client, consents, close } = setup();
+    await client.connectSolana(params);
+    const challenge = challengeFor("enable_recovery");
+    const proof = await client.consent({ userId: "u1", appSalt: "salt", challenge });
+    expect(consents).toEqual([consentAction(challenge)]);
+    expect(proof?.chain).toBe("solana");
+    const publicKey = Buffer.from(proof!.public_key, "hex");
+    const signature = Buffer.from(proof!.signature[0], "hex");
+    expect(ed25519.verify(signature, utf8ToBytes(consentMessage(challenge)), publicKey)).toBe(true);
+    close();
+  });
+
+  it("will not sign a consent message as a Solana transaction", async () => {
+    const { client, close } = setup();
+    const { spend } = await client.connectSolana(params);
+    const message = utf8ToBytes(consentMessage(challengeFor("delete_account")));
+    await expect(spend!.signTransaction(message)).rejects.toThrow("refusing to sign a consent message as a transaction");
     close();
   });
 });

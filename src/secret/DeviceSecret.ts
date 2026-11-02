@@ -39,7 +39,7 @@ export interface EnclaveDekPort {
     address: string;
     credential: SocialRecoveryCredential;
     dek: MasterDEK;
-  }): Promise<{ kind: "enrolled" } | { kind: "already-enrolled"; address: string }>;
+  }): Promise<{ kind: "enrolled" } | { kind: "already-enrolled"; address: string } | { kind: "opted-out" }>;
   wrapDekToFactor(params: {
     address: string;
     credential: SocialRecoveryCredential;
@@ -87,6 +87,13 @@ function isMissingEnrollment(error: unknown): boolean {
     message.includes("nothing to recover")
   );
 }
+
+function isRecoveryRevoked(error: unknown): boolean {
+  return (error instanceof Error ? error.message : String(error)).includes("recovery_revoked");
+}
+
+const RECOVERY_OFF =
+  "kit/secret: recovery by sign-in is turned off for this wallet. Restore it with a passkey or from a device that already has it.";
 
 export async function ensureEnclave(input: EnclaveEnsureInput): Promise<ReadySecret> {
   if (input.chains.length === 0) throw new Error("kit/secret: ensure needs a chain");
@@ -149,6 +156,7 @@ async function runEnsure(input: EnclaveEnsureInput): Promise<ReadySecret> {
     try {
       return await recoverAt(registered.address, false);
     } catch (error) {
+      if (isRecoveryRevoked(error)) throw new Error(RECOVERY_OFF);
       if (isMissingEnrollment(error)) {
         throw new Error(
           "kit/secret: this wallet has no sealed recovery. Open it once on the device that created it.",

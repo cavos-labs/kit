@@ -267,6 +267,28 @@ Signing up never asks for a passkey. After connect, call `enrollPasskeyDefault()
 from `useCavos()` to add one; it can then restore the wallet on another device,
 on every chain. There is no on-chain approver and no recovery-code `add_signer`.
 
+## Account deletion and recovery opt-out
+
+From `useCavos()`, with the Cavos vault and an `appId`:
+
+```tsx
+const { deleteAccount, disableEnclaveRecovery, enableEnclaveRecovery } = useCavos();
+
+await disableEnclaveRecovery();
+await enableEnclaveRecovery();
+await deleteAccount();
+```
+
+Each call opens a confirmation sheet in the vault, which signs the request with
+the wallet's key, so the app cannot act for the user. `disableEnclaveRecovery`
+stops Cavos holding a recovery copy of the key; `enableEnclaveRecovery` allows it
+again at the next sign-in. `deleteAccount` removes the user's Cavos data for the
+environment and this browser's keys, then signs them out; the wallet stays
+on-chain. Turning recovery on or off needs this device to hold the wallet key.
+Deleting from a device without it fails with `consent_proof_required` while
+Cavos still holds recovery for the account: restore the wallet on that device
+first.
+
 ## Quickstart — Starknet
 
 ```ts

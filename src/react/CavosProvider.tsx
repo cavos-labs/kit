@@ -33,6 +33,7 @@ import {
   type SocialRecoveryProvider,
 } from '../recovery/SocialRecoveryClient';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
+import { AccountClient } from '../account/AccountClient';
 import { VaultClient } from '../vault/VaultClient';
 import { zeroize } from '../secret/dek';
 import { readLocalDek } from '../secret/localDek';
@@ -321,6 +322,23 @@ export interface CavosContextValue {
    * in the dashboard, so the enclave accepts tokens minted for your client.
    */
   submitSocialRecoveryToken: (idToken: string) => void;
+  /**
+   * Delete the signed-in user's Cavos account data for this environment: wallet
+   * registration, devices, passkey backup and recovery. The user confirms in the
+   * Cavos vault, which signs the request with the wallet's key. The wallet stays
+   * on-chain. Signs the user out when done. Needs the vault and an `appId`.
+   */
+  deleteAccount: () => Promise<void>;
+  /**
+   * Stop Cavos holding a recovery copy of the key for sign-in recovery. The user
+   * confirms in the Cavos vault. Needs this device to hold the wallet key.
+   */
+  disableEnclaveRecovery: () => Promise<void>;
+  /**
+   * Allow recovery by sign-in again. The recovery copy is sealed the next time
+   * the user signs in. Needs this device to hold the wallet key.
+   */
+  enableEnclaveRecovery: () => Promise<void>;
   logout: () => void;
 }
 
@@ -1292,6 +1310,58 @@ export function CavosProvider({
     }
   }, [auth, config, identity, isExternalAuth]);
 
+  const consentSession = useCallback(
+    (what: string) => {
+      const cfg = configRef.current;
+      const vault = vaultSetting(cfg);
+      if (!session || !identity) throw new Error('Not logged in');
+      if (!vault || !cfg.appId) throw new Error(`kit: ${what} needs the Cavos vault and an appId`);
+      return {
+        userId: identity.userId,
+        appSalt: cfg.appSalt,
+        vault: VaultClient.attach({ appId: cfg.appId, ...(typeof vault === 'object' ? vault : {}) }),
+        client: new AccountClient({
+          baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
+          appId: cfg.appId,
+          ...(cfg.environment ? { environment: cfg.environment } : {}),
+          authToken: () => auth.getAuthToken(),
+        }),
+      };
+    },
+    [session, identity, auth],
+  );
+
+  const deleteAccount = useCallback(async () => {
+    const { userId, appSalt, vault, client } = consentSession('deleteAccount');
+    const challenge = await client.challenge('delete_account');
+    const proof = await vault.consent({ userId, appSalt, challenge });
+    await client.deleteAccount(challenge, proof);
+    await vault.erase(userId, appSalt);
+    logout();
+  }, [consentSession, logout]);
+
+  const setEnclaveRecovery = useCallback(
+    async (enabled: boolean) => {
+      const { userId, appSalt, vault, client } = consentSession(
+        enabled ? 'enableEnclaveRecovery' : 'disableEnclaveRecovery',
+      );
+      const challenge = await client.challenge(enabled ? 'enable_recovery' : 'disable_recovery');
+      const proof = await vault.consent({ userId, appSalt, challenge });
+      if (!proof) throw new Error('kit: this device does not hold the wallet key');
+      await client.setRecovery(enabled, challenge, proof);
+      if (!enabled) {
+        setWalletStatus((status) => {
+          const methods = status.recovery.methods.filter((method) => method !== 'social');
+          return { ...status, recovery: { protected: methods.length > 0, methods } };
+        });
+      }
+    },
+    [consentSession],
+  );
+
+  const disableEnclaveRecovery = useCallback(() => setEnclaveRecovery(false), [setEnclaveRecovery]);
+  const enableEnclaveRecovery = useCallback(() => setEnclaveRecovery(true), [setEnclaveRecovery]);
+
   const value: CavosContextValue = {
     openModal,
     closeModal,
@@ -1324,6 +1394,9 @@ export function CavosProvider({
     setupRecovery,
     recover,
     submitSocialRecoveryToken,
+    deleteAccount,
+    disableEnclaveRecovery,
+    enableEnclaveRecovery,
     logout,
   };
 

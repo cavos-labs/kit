@@ -1,3 +1,4 @@
+import { consentAction, CONSENT_PREFIX, signConsent, type ConsentAction } from "../account/consent";
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import { STARKNET_NETWORKS, type StarknetNetwork } from "../chains/starknet/constants";
 import { resolveNativeStarknet, type StarknetSpend } from "../chains/starknet/nativeConnect";
@@ -11,12 +12,13 @@ import { SocialRecoveryClient, type AttestationPolicy } from "../recovery/Social
 import { HttpWalletRegistry } from "../registry/HttpWalletRegistry";
 import type { ResolveNativeInput } from "../secret/nativeAccount";
 import { zeroize, type MasterDEK } from "../secret/dek";
+import { eraseLocalAccount } from "../secret/erase";
 import { readLocalDek, type LocalDekInput } from "../secret/localDek";
 import { addPasskey } from "../secret/PasskeyDekPort";
 import { HttpPasskeyWrapStore, type PasskeyWrapStore } from "../registry/PasskeyWrapStore";
 import type { Ed25519SpendSigner } from "../signer/Ed25519SpendSigner";
 import type { PasskeyPrfProvider } from "../signer/PasskeyProvider";
-import { bigIntTo32Bytes } from "../crypto/encoding";
+import { bigIntTo32Bytes, utf8ToBytes } from "../crypto/encoding";
 import { solanaNetworkName, starknetNetworkName, stellarNetworkName, stellarNetworkNameFromId } from "./network";
 import { VersionedMessage } from "@solana/web3.js";
 import { Signer, stark, type Signature } from "starknet";
@@ -45,6 +47,8 @@ import {
   type VaultRequest,
 } from "./protocol";
 
+const CHAINS = ["solana", "stellar", "starknet"] as const;
+
 type NativeBase = Omit<ResolveNativeInput, "chain" | "importSpend" | "loadPersisted">;
 
 export interface VaultHandlerDeps {
@@ -54,6 +58,7 @@ export interface VaultHandlerDeps {
   policy: VaultPolicy;
   ledger: SpendLedger;
   confirm(lines: Line[], context: { network: string }): Promise<boolean>;
+  consent(action: ConsentAction): Promise<boolean>;
   passkey(user: { userId: string; userName: string }): PasskeyPrfProvider;
   passkeyWraps?: (auth: { environment?: "development" | "production"; authToken?: string | null }) => PasskeyWrapStore;
   readDek?: (input: LocalDekInput) => Promise<MasterDEK>;
@@ -81,6 +86,7 @@ interface Account {
 
 export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultRequest) => Promise<unknown> {
   const accounts = new Map<string, Account>();
+  const consentPrefix = utf8ToBytes(CONSENT_PREFIX);
   const resolveSolana = deps.resolveSolana ?? resolveNativeSolana;
   const resolveStellar = deps.resolveStellar ?? resolveNativeStellar;
   const resolveStarknet = deps.resolveStarknet ?? resolveNativeStarknet;
@@ -99,6 +105,10 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   // so a second app on the same site cannot reach them with its own policy.
   const scope = deps.appId;
   const queues = new Map<string, Promise<unknown>>();
+
+  function connectedChain(userId: string, appSalt: string) {
+    return CHAINS.find((c) => accounts.get(`${c}:${userId}:${appSalt}`)?.address);
+  }
 
   async function connect(params: ConnectParams): Promise<ConnectResult> {
     const handle = `${params.chain}:${params.userId}:${params.appSalt}`;
@@ -253,6 +263,9 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   const methods: { [M in VaultMethod]: (params: VaultParams<M>) => Promise<unknown> } = {
     connect,
     async signSolanaTransaction({ handle, message }) {
+      if (consentPrefix.every((byte, i) => message[i] === byte)) {
+        throw new Error("kit/vault: refusing to sign a consent message as a transaction");
+      }
       const acct = account(handle);
       const signer = requireKey(acct.solana);
       const parsed = parseSolanaMessage(message, acct.address);
@@ -323,10 +336,28 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
     async forget({ userId, appSalt }) {
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.
-      for (const chain of ["solana", "stellar", "starknet"]) accounts.delete(`${chain}:${userId}:${appSalt}`);
+      for (const chain of CHAINS) accounts.delete(`${chain}:${userId}:${appSalt}`);
+    },
+    async consent({ userId, appSalt, challenge }) {
+      const action = consentAction(challenge);
+      const chain = connectedChain(userId, appSalt);
+      if (!chain) throw new Error("kit/vault: connect a wallet first");
+      if (!(await deps.consent(action))) throw new Error("kit/vault: the user cancelled");
+      const { address } = accounts.get(`${chain}:${userId}:${appSalt}`)!;
+      let dek: MasterDEK;
+      try {
+        dek = await readDek({ chain, userId, appSalt, address, keyScope: scope });
+      } catch {
+        return null;
+      }
+      return signConsent(dek, chain, appSalt, challenge);
+    },
+    async erase({ userId, appSalt }) {
+      for (const chain of CHAINS) accounts.delete(`${chain}:${userId}:${appSalt}`);
+      await eraseLocalAccount({ userId, appSalt, keyScope: scope });
     },
     async enrollPasskey({ userId, appSalt, userName, environment, authToken }) {
-      const chain = (["solana", "stellar", "starknet"] as const).find((c) => accounts.get(`${c}:${userId}:${appSalt}`)?.address);
+      const chain = connectedChain(userId, appSalt);
       if (!chain) throw new Error("kit/vault: connect a wallet before adding a passkey");
       const { address } = accounts.get(`${chain}:${userId}:${appSalt}`)!;
       const dek = await readDek({ chain, userId, appSalt, address, keyScope: scope });
@@ -435,6 +466,7 @@ export function startVaultHost(opts: VaultHostOptions): void {
       ...(opts.privacySdk ? { privacySdk: opts.privacySdk } : {}),
       ledger: idbLedger(),
       confirm: (lines, context) => modal.review(lines, context.network),
+      consent: (action) => modal.consent(action),
       passkey: (user) => modal.passkey(user),
     });
     serveVault(port, handle);
