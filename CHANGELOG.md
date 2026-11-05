@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.2
+
+Needs the current Cavos backend and recovery enclave (release v2).
+
+- **Sign in with Telegram.** `login('telegram')` and the modal's "Continue with
+  Telegram" button (add `'telegram'` to `providers`). The recovery enclave
+  redeems the code and signs the login token, as it does for GitHub. Each bot
+  has its own identities, so switching an environment to another bot gives
+  every Telegram user a new, empty wallet.
+- **The authorize URL is checked before the redirect.** The kit refuses a
+  Telegram URL that does not carry exactly this login's PKCE challenge, nonce
+  and `openid profile` scope.
+
 ## 0.5.1
 
 Needs the current Cavos backend.
