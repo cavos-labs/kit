@@ -24,7 +24,7 @@ export interface CavosAuthModalProps {
   /** Logo height in px. Applies to both a custom `appLogo` (img) and the
    *  default Cavos star. Defaults to 40 (img) / 34 (star). */
   appLogoSize?: number;
-  providers?: ('google' | 'apple' | 'email' | 'github')[];
+  providers?: ('google' | 'apple' | 'email' | 'github' | 'telegram')[];
   primaryColor?: string;
   /** 'light' (default) or 'dark' */
   theme?: 'light' | 'dark';
@@ -277,6 +277,12 @@ const AppleIcon = ({ size = 16 }: { size?: number } = {}) => (
 const GitHubIcon = ({ size = 16 }: { size?: number } = {}) => (
   <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor">
     <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+  </svg>
+);
+
+const TelegramIcon = ({ size = 16 }: { size?: number } = {}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
   </svg>
 );
 
@@ -894,7 +900,7 @@ export function CavosAuthModal({
     }
   };
 
-  const handleOAuth = async (provider: 'google' | 'apple' | 'github') => {
+  const handleOAuth = async (provider: 'google' | 'apple' | 'github' | 'telegram') => {
     setError(''); setBusy(true);
     try {
       await login(provider);
@@ -1167,6 +1173,8 @@ export function CavosAuthModal({
           return { name: 'Apple', icon: <AppleIcon size={38} /> };
         case 'github':
           return { name: 'GitHub', icon: <GitHubIcon size={40} /> };
+        case 'telegram':
+          return { name: 'Telegram', icon: <TelegramIcon size={40} /> };
         case 'email':
           return { name: 'email', icon: null };
         default:
@@ -1377,7 +1385,8 @@ export function CavosAuthModal({
   const showGoogle = providers.includes('google');
   const showApple = providers.includes('apple');
   const showGitHub = providers.includes('github');
-  const hasSocial = showGoogle || showApple || showGitHub;
+  const showTelegram = providers.includes('telegram');
+  const hasSocial = showGoogle || showApple || showGitHub || showTelegram;
   // Absolute-positioned icon so the label stays optically centered (matches the
   // Privy/Clerk full-width button look) instead of shifting when text changes.
   // No background box — the brand logos render clean, like native sign-in buttons.
@@ -1437,6 +1446,14 @@ export function CavosAuthModal({
                 {btnIcon(<GitHubIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
                 <span>Continue with GitHub</span>
                 {recentTag('github')}
+              </button>
+            )}
+
+            {showTelegram && (
+              <button className="cavos-provider" style={{ ...pBtn, ...(busy ? { opacity: 0.55, cursor: 'not-allowed' } : {}) }} onClick={() => { rememberProvider('telegram'); handleOAuth('telegram'); }} disabled={busy}>
+                {btnIcon(<TelegramIcon />, <Spinner size={14} color={isLight ? '#111' : '#fff'} />, isLight ? '#111' : '#fff')}
+                <span>Continue with Telegram</span>
+                {recentTag('telegram')}
               </button>
             )}
 

@@ -7,13 +7,16 @@ import { utf8ToBytes } from "../crypto/encoding";
  * sent to the control plane to reserve a single recovery session; the token
  * itself is sent only through the attested encrypted channel.
  */
-export type SocialRecoveryProvider = "google" | "apple" | "email" | "github";
+export type SocialRecoveryProvider = "google" | "apple" | "email" | "github" | "telegram";
 
 /** The `iss` of the tokens the recovery enclave itself issues for email login. */
 export const ENCLAVE_EMAIL_ISSUER = "https://enclave.cavos.xyz";
 
 /** The `iss` of the tokens the recovery enclave issues after verifying a GitHub sign-in. */
 export const ENCLAVE_GITHUB_ISSUER = "https://enclave.cavos.xyz/github";
+
+/** The `iss` of the tokens the recovery enclave issues after verifying a Telegram sign-in. */
+export const ENCLAVE_TELEGRAM_ISSUER = "https://enclave.cavos.xyz/telegram";
 
 export interface SocialRecoveryCredential {
   idToken: string;
@@ -65,6 +68,7 @@ export function socialRecoveryProvider(
   if (issuer === "https://appleid.apple.com") return "apple";
   if (issuer === ENCLAVE_EMAIL_ISSUER) return "email";
   if (issuer === ENCLAVE_GITHUB_ISSUER) return "github";
+  if (issuer === ENCLAVE_TELEGRAM_ISSUER) return "telegram";
   return "google";
 }
 
@@ -105,7 +109,8 @@ export function isSocialRecoveryIssuer(issuer: unknown): issuer is string {
     issuer === "accounts.google.com" ||
     issuer === "https://appleid.apple.com" ||
     issuer === ENCLAVE_EMAIL_ISSUER ||
-    issuer === ENCLAVE_GITHUB_ISSUER
+    issuer === ENCLAVE_GITHUB_ISSUER ||
+    issuer === ENCLAVE_TELEGRAM_ISSUER
   );
 }
 

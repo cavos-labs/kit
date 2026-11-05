@@ -36,6 +36,13 @@ describe("socialRecoveryProvider", () => {
     expect(socialRecoveryProvider(token({ iss: "https://enclave.cavos.xyz/github" }))).toBe("github");
   });
 
+  it("accepts the enclave's Telegram issuer and nothing near it", () => {
+    expect(socialRecoveryProvider(token({ iss: "https://enclave.cavos.xyz/telegram" }))).toBe("telegram");
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/telegram")).toBe(true);
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/telegram/")).toBe(false);
+    expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/telegramx")).toBe(false);
+  });
+
   it("accepts the enclave's GitHub issuer and nothing near it", () => {
     expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/github")).toBe(true);
     expect(isSocialRecoveryIssuer("https://enclave.cavos.xyz/github/")).toBe(false);

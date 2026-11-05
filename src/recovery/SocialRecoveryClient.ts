@@ -3,7 +3,7 @@ import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
 import type { NitroAttestationPolicy } from "./nitro/attestation";
 import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "./enclaveChannel";
 
-export type SocialRecoveryProvider = "google" | "apple" | "email" | "github";
+export type SocialRecoveryProvider = "google" | "apple" | "email" | "github" | "telegram";
 export type SocialRecoveryAction = "enroll" | "recover";
 
 /**

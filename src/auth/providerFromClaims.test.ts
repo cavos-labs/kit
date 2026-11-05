@@ -43,6 +43,11 @@ describe("provider from the credential", () => {
     expect(id.provider).toBe("github");
   });
 
+  it("names the enclave's Telegram token telegram", async () => {
+    const id = await identityFrom({ iss: "https://enclave.cavos.xyz/telegram", sub: "u1", name: "Ada" });
+    expect(id.provider).toBe("telegram");
+  });
+
   it("falls back rather than inventing a provider it cannot know", async () => {
     const id = await identityFrom({ iss: "https://example.test", sub: "u1" });
     expect(id.provider).toBe("oauth");
