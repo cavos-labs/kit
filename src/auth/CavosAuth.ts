@@ -3,6 +3,7 @@ import {
   createSocialRecoveryCredential,
   ENCLAVE_EMAIL_ISSUER,
   ENCLAVE_GITHUB_ISSUER,
+  ENCLAVE_TELEGRAM_ISSUER,
   isSocialRecoveryIssuer,
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
@@ -41,14 +42,15 @@ export interface CavosAuthOptions {
  * Hosted login (Privy-like) backed by the Cavos backend — same endpoints
  * `@cavos/react` uses for Google / Apple OAuth, plus an email code the recovery
  * enclave generates and verifies itself, and GitHub, which has no id_token of
- * its own: the enclave verifies the GitHub grant and signs one. Login only
- * resolves a stable `userId` (the OAuth `sub` claim); it never touches signing.
+ * its own: the enclave verifies the GitHub grant and signs one, as it does
+ * for Telegram. Login only resolves a stable `userId` (the OAuth `sub` claim);
+ * it never touches signing.
  * Feed the returned `Identity` to `Cavos.connect`.
  *
  *   const auth = new CavosAuth({ appId });
  *   // social: open the returned URL; user returns, then:
  *   const identity = await auth.handleCallback(window.location.search);
- *   // GitHub: the same, from getGitHubOAuthUrl
+ *   // GitHub: the same, from getGitHubOAuthUrl; Telegram: from getTelegramOAuthUrl
  *   // or email OTP:
  *   await auth.sendOtp(email); const identity = await auth.verifyOtp(email, code);
  *   const cavos = await Cavos.connect({ network, appSalt, identity, paymasterApiKey });
@@ -71,7 +73,7 @@ export class CavosAuth implements AuthProvider {
   private readonly pkceKey: string;
   /** The login secret, for a callback this same instance handles. */
   private loginSecret: string | null = null;
-  /** The PKCE verifier of the GitHub login in flight, for a callback this same instance handles. */
+  /** The PKCE verifier of the GitHub or Telegram login in flight, for a callback this same instance handles. */
   private pkceVerifier: string | null = null;
   private last: Identity | null = null;
   /** Fresh OIDC proof retained only in memory for an immediate TEE recovery.
@@ -188,6 +190,33 @@ export class CavosAuth implements AuthProvider {
     return url;
   }
 
+  /**
+   * Redirect URL for Telegram login.
+   *
+   * Telegram issues an id_token the enclave re-signs after verifying the
+   * sign-in. The backend builds the URL, and the challenge, nonce and scope are
+   * what bind the code to this browser and app, so a URL that does not carry
+   * exactly what this login asked for is refused here.
+   */
+  async getTelegramOAuthUrl(redirectUri?: string): Promise<string> {
+    if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
+    const appId = this.requireAppId();
+    const clientNonce = this.startLogin();
+    const verifier = this.startPkce();
+    const challenge = loginNonce(verifier);
+    const params = new URLSearchParams({
+      code_challenge: challenge,
+      redirect_uri: redirectUri ?? window.location.href,
+      app_id: appId,
+      nonce: clientNonce,
+    });
+    const { url } = await this.get(`/api/oauth/v2/telegram?${params}`);
+    if (!isTelegramAuthorizeUrl(url, challenge, `${appId}.${clientNonce}`)) {
+      throw new Error("kit/auth: the Telegram sign-in URL is not the one this login asked for");
+    }
+    return url;
+  }
+
   private async oauthUrl(provider: "google" | "apple", redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
     const params = new URLSearchParams({
@@ -216,6 +245,9 @@ export class CavosAuth implements AuthProvider {
       });
       if (typeof result.github_grant === "string") {
         return this.githubIdentity(result.github_grant);
+      }
+      if (typeof result.telegram_grant === "string") {
+        return this.telegramIdentity(result.telegram_grant);
       }
       return this.identityFromAuthData(JSON.stringify(result), "oauth");
     }
@@ -284,6 +316,32 @@ export class CavosAuth implements AuthProvider {
       throw new Error("kit/auth: the GitHub token was not issued by the enclave");
     }
     return this.identityFromAuthData(idToken, "github", undefined, secret);
+  }
+
+  /**
+   * Redeem a Telegram grant inside the attested enclave. Unlike GitHub, the
+   * enclave is given the login secret itself and derives the nonce from it, so
+   * a stolen code is useless without the secret this browser kept.
+   */
+  private async telegramIdentity(telegramGrant: string): Promise<Identity> {
+    const secret = this.takeLoginSecret();
+    const verifier = this.takePkceVerifier();
+    if (!secret || !verifier) {
+      throw new Error(
+        "kit/auth: this sign-in did not start here, or the browser could not keep its state. Sign in again.",
+      );
+    }
+    const idToken = await this.enclaveLogin(
+      { action: "verify_telegram", code_verifier: verifier, login_secret: secret },
+      "/api/oauth/telegram/verify",
+      { telegram_grant: telegramGrant },
+      "telegram_verified",
+      "kit/auth: the enclave did not verify this Telegram sign-in",
+    );
+    if (parseJwt(idToken).iss !== ENCLAVE_TELEGRAM_ISSUER) {
+      throw new Error("kit/auth: the Telegram token was not issued by the enclave");
+    }
+    return this.identityFromAuthData(idToken, "telegram", undefined, secret);
   }
 
   /**
@@ -478,7 +536,7 @@ export class CavosAuth implements AuthProvider {
     return loginNonce(secret);
   }
 
-  /** Begin the PKCE half of a GitHub login: keep a fresh verifier and return it. */
+  /** Begin the PKCE half of a GitHub or Telegram login: keep a fresh verifier and return it. */
   private startPkce(): string {
     const verifier = loginSecretFrom(secureRandomBytes(32));
     try {
@@ -579,7 +637,8 @@ const ENCLAVE_LOGIN_ERRORS: Record<string, string> = {
   enclave_unavailable: "Sign-in is unavailable right now. Try again later.",
   code_rejected: "That code is wrong or has expired. Request a new one.",
   github_rejected: "GitHub did not accept this sign-in. Try again.",
-  invalid_grant: "This GitHub sign-in expired. Sign in again.",
+  telegram_rejected: "Telegram did not accept this sign-in. Try again.",
+  invalid_grant: "This sign-in expired. Sign in again.",
 };
 
 /** Whether `url` is GitHub's authorize page, asked for with exactly this PKCE challenge. */
@@ -593,6 +652,26 @@ function isGitHubAuthorizeUrl(url: unknown, challenge: string): boolean {
       parsed.pathname === "/login/oauth/authorize" &&
       parsed.searchParams.get("code_challenge") === challenge &&
       parsed.searchParams.get("code_challenge_method") === "S256"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `url` is Telegram's authorize page, asked for with exactly this challenge, nonce and scope. */
+function isTelegramAuthorizeUrl(url: unknown, challenge: string, expectedNonce: string): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.host === "oauth.telegram.org" &&
+      parsed.pathname === "/auth" &&
+      parsed.searchParams.get("response_type") === "code" &&
+      parsed.searchParams.get("code_challenge") === challenge &&
+      parsed.searchParams.get("code_challenge_method") === "S256" &&
+      parsed.searchParams.get("nonce") === expectedNonce &&
+      parsed.searchParams.get("scope") === "openid profile"
     );
   } catch {
     return false;
@@ -652,6 +731,8 @@ function providerFromClaims(claims: any, fallback: string): string {
       return "email";
     case ENCLAVE_GITHUB_ISSUER:
       return "github";
+    case ENCLAVE_TELEGRAM_ISSUER:
+      return "telegram";
     default:
       return claims?.provider ?? fallback;
   }
