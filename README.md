@@ -8,6 +8,8 @@ no passkey popups and no Face ID / Touch ID prompts on signing. OAuth / email
 authenticates the user; the registry names the wallet; the device key signs. On the web those keys live in the **Cavos vault**, an
 iframe on a Cavos origin, so the integrator's page never holds one.
 
+Website: [cavos.xyz/embedded-wallet](https://cavos.xyz/embedded-wallet) · Docs: [docs.cavos.xyz](https://docs.cavos.xyz) · Pricing: [cavos.xyz/pricing](https://cavos.xyz/pricing)
+
 **Chains:** **Starknet, Solana, and Stellar** are implemented today. Starknet
 uses the standard OpenZeppelin `AccountUpgradeable` account whose stark key is
 HKDF of the MasterDEK. Solana and Stellar use **native Ed25519** accounts (a
