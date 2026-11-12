@@ -1,7 +1,7 @@
 # @cavos/kit
 
 `@cavos/kit` is an **embedded Stellar wallet SDK**, **embedded Solana wallet**,
-and **embedded Starknet wallet** for React Native and web. Device-native
+and **embedded Starknet wallet** for web (React Native is a work in progress). Device-native
 self-custodial accounts: every chain spends with a native key derived from a
 MasterDEK (a stark key on **Starknet**, Ed25519 on **Solana and Stellar**), with
 no passkey popups and no Face ID / Touch ID prompts on signing. OAuth / email
@@ -545,9 +545,12 @@ This is **hardware-isolated, non-custodial recovery**, not trustless recovery.
 The approved workload digest, AWS Nitro/KMS, and image-upgrade policy remain in
 the trust model.
 
-## React Native / Expo
+## React Native / Expo (work in progress)
 
-React Native is supported through the native entrypoint on **iOS 16+** and
+> **Work in progress.** React Native is not production-ready: APIs and key
+> handling can change, and Stellar does not use the MasterDEK path there yet.
+
+React Native runs through the native entrypoint on **iOS 16+** and
 **Android 9+**. It uses Secure Enclave / Android Keystore keys and therefore
 requires a bare React Native app or an Expo development build (Expo Go cannot
 load custom native modules).
