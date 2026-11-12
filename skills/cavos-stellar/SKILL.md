@@ -1,6 +1,6 @@
 ---
 name: cavos-stellar
-description: Add a Cavos embedded wallet to a Stellar web or React Native app with @cavos/kit. Users sign in with Google, Apple, GitHub, Telegram, or an email code and get a classic G account with no seed phrase and no browser extension. Covers the React provider and hooks, lazy account creation, sponsored XLM reserves and fees, XLM payments, USDC-style trustlines, Soroban contract calls, signing an unsigned XDR from your backend, message signing, and device restore. Use when a Stellar app needs wallets for users who do not have one.
+description: Add a Cavos embedded wallet to a Stellar web app with @cavos/kit. Users sign in with Google, Apple, GitHub, Telegram, or an email code and get a classic G account with no seed phrase and no browser extension. Covers the React provider and hooks, lazy account creation, sponsored XLM reserves and fees, XLM payments, USDC-style trustlines, Soroban contract calls, signing an unsigned XDR from your backend, message signing, and device restore. Use when a Stellar app needs wallets for users who do not have one.
 user-invocable: true
 argument-hint: '[cavos task]'
 ---
@@ -47,16 +47,14 @@ slash). Fund Stellar gas under **Dashboard → Gas → Stellar** before using ma
 | --- | --- | --- |
 | MasterDEK | Per-user secret. The `G…` key is HKDF of it (`cavos-ed25519-stellar-v1`). | |
 | Device | Holds the Ed25519 account key and signs. | |
-| Cavos vault (web, on by default with `appId`) | An iframe on a Cavos origin, running in the user's browser, that keeps the key in its IndexedDB as a non-extractable WebCrypto key. Your page asks it for signatures, within the limits set in the dashboard. | Your page never reads the key. |
+| Cavos vault (web; on by default in the React provider with `appId`, opt-in with `Cavos.connect`) | An iframe on a Cavos origin, running in the user's browser, that keeps the key in its IndexedDB as a non-extractable WebCrypto key. Your page asks it for signatures, within the limits set in the dashboard. | Your page never reads the key. |
 | Relayer (`appId`) | Fee payer and reserve sponsor: it signs only as the sponsor or the fee-bump source. | It cannot authorize the account's own operations or move its funds. |
 | Enclave (optional) | AWS Nitro enclave that holds a sealed copy of the MasterDEK, opens it only inside the enclave, and re-encrypts it to a new device of the same signed-in identity. | The enclave does not sign transactions. Because it opens the MasterDEK during restore, it is part of the trust model. |
 | Passkey (optional) | Stores an encrypted copy of the MasterDEK. | It is not 2FA. Anyone holding the synced passkey can open the wallet. |
 
-Key storage depends on the runtime:
-
-- Browser: inside the Cavos vault, as a non-extractable WebCrypto key.
-- React Native: in the OS keystore (Secure Enclave / Keychain, Android Keystore) through the native module.
-- Node: there is no default. You supply the key and persist it yourself.
+In the browser the key is a non-extractable WebCrypto key, inside the Cavos vault by default. This
+skill covers the browser only: on React Native and Node, the Stellar adapter does not yet use the
+MasterDEK path described here.
 
 ## Setup (React / Next.js)
 
