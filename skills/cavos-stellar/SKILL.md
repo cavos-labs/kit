@@ -116,12 +116,21 @@ wallet.status; // 'undeployed' | 'ready' | 'needs-device-approval'
 | `ready` | The account exists and this device can sign. |
 | `needs-device-approval` | The user has a wallet, but this device holds no key yet. Restore with an enclave sign-in or `approveDeviceWithPasskey()`. |
 
-Connecting never creates the account. The first `execute` creates it (sponsored), then runs the payment.
+Connecting never creates the account. On a new account:
+
+- `create()` creates it and sends nothing. The creation is sponsored, so the account starts with 0 XLM.
+  Call it first in an app that starts with a trustline or a Soroban call.
+- `execute(amount, to)` creates it, then sends `amount` XLM from it. With 0 XLM the payment fails with
+  `op_underfunded`, but the account is created.
+- `addTrustline` and `invokeContract` throw until the account exists.
 
 ## Actions
 
 ```ts
-// Native XLM payment, amount in stroops (1 XLM = 10_000_000n). Sponsored by default.
+// Create the account. Does nothing if it is already ready.
+await wallet.create();
+
+// Native XLM payment, amount in stroops (1 XLM = 10_000_000n). Fee sponsored by default.
 const hash = await wallet.execute(10_000_000n, 'GDEST…');
 
 // Pay the fee from the account's own XLM instead of the relayer.
@@ -153,9 +162,9 @@ with `wallet.signXdr`. See https://docs.cavos.xyz/docs/reserve.
 
 - **`appSalt`, `appId`, and `userId` are permanent.** Changing any of them silently moves every user
   to a new, empty wallet. Nothing errors.
-- **A sponsored account holds 0 XLM.** The relayer sponsors reserves, so the account starts with no
-  lumens. An XLM payment needs XLM in the account first. Trustlines and Soroban calls do not.
-- **`addTrustline` and `invokeContract` need `status === 'ready'`.** Only `execute` creates the account.
+- **A sponsored account holds 0 XLM.** An XLM payment needs XLM in the account first. Trustlines and
+  Soroban calls do not, because the sponsor pays their reserves and fees.
+- **Trustline-first apps call `create()` first.** `addTrustline` and `invokeContract` need `status === 'ready'`.
 - **Do not gate execution on `isReady`.** `undeployed` can execute; only `needs-device-approval` blocks.
 - **Second browser or device:** the user lands on `needs-device-approval` until the device restores the
   MasterDEK (enclave sign-in, or `approveDeviceWithPasskey()` if a passkey was added).
@@ -167,7 +176,7 @@ with `wallet.signXdr`. See https://docs.cavos.xyz/docs/reserve.
 
 ## Version note
 
-Written for `@cavos/kit` 0.5.2. Verified on Stellar mainnet on 2026-11-12: account
+Written for `@cavos/kit` 0.5.3 (`create()` is new in 0.5.3). Verified on Stellar mainnet on 2026-11-12: account
 [GCTAQX…P5LG4Q](https://stellar.expert/explorer/public/account/GCTAQXKRGWROJ5UZBLUQ472PNNFOPQQOJBPCVSVCM5SKPKDOAVP5LG4Q),
 created by the Cavos relayer, with a sponsored Circle USDC trustline.
 

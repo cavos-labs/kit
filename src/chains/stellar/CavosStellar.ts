@@ -398,10 +398,11 @@ export class CavosStellar {
    * Move `amount` stroops of native XLM to `destination`, signed by the control
    * key.
    *
-   * **Lazy deploy**: If the account is undeployed, the first execute creates the
-   * account first (sponsored, 0 XLM cost), then performs the payment in a follow-up
-   * transaction. Native XLM cannot ride the create tx (the account needs to exist
-   * to send FROM it).
+   * **Lazy deploy**: on an undeployed account, execute first creates it, then
+   * sends the payment in a second transaction. A sponsored account starts with
+   * 0 XLM, so the payment fails with `op_underfunded` unless XLM reached it
+   * first; the account is created either way. Use {@link create} to create the
+   * account without sending anything.
    *
    * Sponsored by default (the relayer fee-bumps and pays the fee); pass
    * `{ sponsored: false }` to submit directly — the account pays its own (tiny)
@@ -424,6 +425,17 @@ export class CavosStellar {
     const control = this.requireControl();
     const inner = await this.adapter.buildPaymentTx({ from: this.address, to: destination, amount });
     return this.submitInner(inner, control, opts);
+  }
+
+  /**
+   * Create the account on-chain without sending anything. Sponsored when an
+   * `appId` is set, so the account starts with 0 XLM. Resolves immediately when
+   * the account is already `ready`. Needed before `addTrustline` and
+   * `invokeContract` on a new account.
+   */
+  async create(): Promise<void> {
+    if (this.statusValue === "ready") return;
+    await this._createAccount();
   }
 
   /**
@@ -558,7 +570,7 @@ export class CavosStellar {
     opts?: ExecuteOptions;
   }): Promise<string> {
     if (this.statusValue === "undeployed") {
-      throw new Error("kit/stellar: invokeContract requires a deployed account. Call execute() first to create the account.");
+      throw new Error("kit/stellar: invokeContract requires a deployed account. Call create() first.");
     }
     const control = this.requireReadyControl();
     const scArgs = (params.args ?? []).map((a) =>
@@ -586,7 +598,7 @@ export class CavosStellar {
     opts?: ExecuteOptions & { limit?: string },
   ): Promise<string> {
     if (this.statusValue === "undeployed") {
-      throw new Error("kit/stellar: addTrustline requires a deployed account. Call execute() first to create the account.");
+      throw new Error("kit/stellar: addTrustline requires a deployed account. Call create() first.");
     }
     const control = this.requireReadyControl();
     const sponsored = resolveFeeMode(opts, 'sponsored') === 'sponsored';

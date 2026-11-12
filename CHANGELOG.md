@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.3
+
+- **`create()` on Stellar.** `wallet.create()` creates the account without sending
+  anything, sponsored when an `appId` is set. Use it before `addTrustline` or
+  `invokeContract` on a new account. A sponsored account starts with 0 XLM, so
+  a first `execute` of XLM fails with `op_underfunded` unless XLM reaches the
+  account first; the account is still created.
+- `addTrustline` and `invokeContract` on an undeployed account now say to call
+  `create()` first.
+
 ## 0.5.2
 
 Needs the current Cavos backend and recovery enclave (release v2).
