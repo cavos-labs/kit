@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4
+
+No code changes. Refreshes what npm shows for the package.
+
+- React Native is marked as a work in progress in the README and the package
+  description.
+- The Stellar quickstart uses `create()` and documents sponsored trustlines.
+  It no longer says the first `execute` creates the account and pays.
+
 ## 0.5.3
 
 - **`create()` on Stellar.** `wallet.create()` creates the account without sending
