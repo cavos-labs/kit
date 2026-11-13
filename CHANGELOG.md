@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: after an OAuth sign-in in React Strict Mode (the Next.js dev default),
+  `isLoading` stayed `true` even though sign-in finished.
 - React Native is marked as a work in progress in the README and the package
   description.
 
