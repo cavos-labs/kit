@@ -443,6 +443,10 @@ The relayer sponsors account creation, reserves (including trustlines), and
 fee-bump transactions, but **never holds the control key** and cannot
 authorize payments.
 
+A working Next.js app with this flow on testnet (sign-in, `create()`, balances,
+a sponsored USDC trustline, payments) is the
+[Stellar wallet starter](https://github.com/cavos-labs/cavos-stellar-by-example/tree/main/stellar-wallet-starter).
+
 ## Quickstart — low-level (Starknet, advanced)
 
 The key and address are pure functions of a seed, so you can drive the account
@@ -677,8 +681,9 @@ approved.
 
 ## Demo
 
-See the [Cavos docs](https://docs.cavos.xyz) for live examples and integration
-guides.
+- [Stellar wallet starter](https://github.com/cavos-labs/cavos-stellar-by-example/tree/main/stellar-wallet-starter): a Next.js app on Stellar testnet you can
+  clone and run.
+- [Cavos docs](https://docs.cavos.xyz) for integration guides.
 
 ## Develop
 

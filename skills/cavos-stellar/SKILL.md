@@ -178,8 +178,15 @@ Written for `@cavos/kit` 0.5.3 (`create()` is new in 0.5.3). Verified on Stellar
 [GCTAQX…P5LG4Q](https://stellar.expert/explorer/public/account/GCTAQXKRGWROJ5UZBLUQ472PNNFOPQQOJBPCVSVCM5SKPKDOAVP5LG4Q),
 created by the Cavos relayer, with a sponsored Circle USDC trustline.
 
+## Example app
+
+[stellar-wallet-starter](https://github.com/cavos-labs/cavos-stellar-by-example/tree/main/stellar-wallet-starter) is a Next.js app on Stellar testnet with this
+skill's flow: sign-in through the modal, `create()`, XLM and USDC balances, a sponsored
+USDC trustline, testnet XLM, `execute()`, and recent payments from Horizon.
+
 ## Sources
 
+- https://github.com/cavos-labs/cavos-stellar-by-example/tree/main/stellar-wallet-starter
 - https://docs.cavos.xyz/docs/stellar
 - https://docs.cavos.xyz/docs/react
 - https://docs.cavos.xyz/docs/signing
