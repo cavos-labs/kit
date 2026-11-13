@@ -863,25 +863,21 @@ export function CavosProvider({
     window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
     setModalOpen(true);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
-    let cancelled = false;
+    // Not cancelled on cleanup: the code is single-use, so a Strict Mode re-run
+    // finds nothing and this run must finish the sign-in.
     (async () => {
       setIsLoading(true);
       try {
         await handleCallback(authData, cleanUrl.toString());
       } catch (e) {
         console.error('[CavosProvider] OAuth callback error:', e);
-        if (!cancelled) {
-          const msg = e instanceof Error ? e.message : 'Sign-in failed. Please try again.';
-          setAuthError(msg);
-          setWalletStatus(INITIAL_STATUS);
-        }
+        const msg = e instanceof Error ? e.message : 'Sign-in failed. Please try again.';
+        setAuthError(msg);
+        setWalletStatus(INITIAL_STATUS);
       } finally {
-        if (!cancelled) setIsLoading(false);
+        setIsLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
