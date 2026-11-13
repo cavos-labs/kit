@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.5
 
 - Fixed: after an OAuth sign-in in React Strict Mode (the Next.js dev default),
   `isLoading` stayed `true` even though sign-in finished.
 - React Native is marked as a work in progress in the README and the package
   description.
+- The README and the Stellar skill link the
+  [Stellar wallet starter](https://github.com/cavos-labs/cavos-stellar-by-example/tree/main/stellar-wallet-starter).
 
 ## 0.5.4
 
