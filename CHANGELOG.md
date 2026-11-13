@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.5.5
+## Unreleased
 
-No code changes. Marks React Native as a work in progress in the README and
-the package description.
+- React Native is marked as a work in progress in the README and the package
+  description.
 
 ## 0.5.4
 
