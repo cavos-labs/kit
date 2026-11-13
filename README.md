@@ -209,8 +209,9 @@ on the device, so signing in again reconnects the same wallet silently.
 
 ## Lazy deploy
 
-**Connect never deploys.** Deployment happens lazily on the first `execute()`
-call, combined atomically with the user's operation.
+**Connect never deploys.** On Starknet, deployment happens lazily on the first
+`execute()` call, combined atomically with the user's operation. On Stellar,
+call `create()` (see [Quickstart — Stellar](#quickstart--stellar)).
 
 ```ts
 const wallet = await Cavos.connect({ chain: "starknet", ... });
@@ -407,11 +408,17 @@ const wallet = await Cavos.connect({
   appId: process.env.NEXT_PUBLIC_CAVOS_APP_ID, // optional sponsored relayer
 });
 
-// First execute creates the account + performs the payment
 if (wallet.chain === "stellar") {
-  await wallet.execute(1_000_000n, recipient); // 0.1 XLM in stroops
+  await wallet.create(); // sponsored account creation with 0 XLM; no-op once ready
+  await wallet.addTrustline({ code: "USDC", issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }); // sponsored reserve
+  await wallet.execute(1_000_000n, recipient); // 0.1 XLM in stroops; the account must hold it
 }
 ```
+
+A sponsored account starts with 0 XLM. `create()` creates it without sending
+anything. `execute()` on an undeployed account also creates it, then the XLM
+payment fails with `op_underfunded` until the account holds XLM.
+`addTrustline` and `invokeContract` need the account to exist.
 
 **Soroban contract calls:**
 
@@ -432,8 +439,9 @@ if (wallet.chain === "stellar" && wallet.status === "ready") {
 const signedXdr = await wallet.signXdr(unsignedXdr);
 ```
 
-The relayer can sponsor account creation and fee-bump transactions but **never
-holds the control key** and cannot authorize payments.
+The relayer sponsors account creation, reserves (including trustlines), and
+fee-bump transactions, but **never holds the control key** and cannot
+authorize payments.
 
 ## Quickstart — low-level (Starknet, advanced)
 
@@ -646,6 +654,8 @@ approved.
 - ✅ Grandfathered per-device Horizon signers still load for older wallets.
 - ✅ **Non-extractable control key in the vault:** On the web the Ed25519
   control key lives in the Cavos vault, outside the integrator's page.
+- ✅ `create()`: sponsored account creation without a payment.
+- ✅ Sponsored trustlines (`addTrustline`) and `tokenBalance` for assets such as USDC.
 - ✅ Native XLM payments and Soroban contract invocation with auth-entry signing.
 - ✅ `StellarRelayer` — optional fee-bump sponsorship and sponsored account
   reserves; the relayer is never a custodian.
