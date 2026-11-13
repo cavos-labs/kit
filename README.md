@@ -1,7 +1,7 @@
 # @cavos/kit
 
 `@cavos/kit` is an **embedded Stellar wallet SDK**, **embedded Solana wallet**,
-and **embedded Starknet wallet** for React Native and web. Device-native
+and **embedded Starknet wallet** for web (React Native is a work in progress). Device-native
 self-custodial accounts: every chain spends with a native key derived from a
 MasterDEK (a stark key on **Starknet**, Ed25519 on **Solana and Stellar**), with
 no passkey popups and no Face ID / Touch ID prompts on signing. OAuth / email
@@ -76,7 +76,7 @@ the app's limits without the user seeing it.
 - **What the vault signs, it reads.** Signers hand it whole transactions,
   Soroban auth entries and Starknet typed data or invokes, never bare hashes,
   and the vault computes the hash itself.
-- **React Native** has no iframe; keys stay in the platform's secure storage as
+- **React Native** (work in progress) has no iframe; keys stay in the platform's secure storage as
   before.
 
 `@cavos/kit/vault` exports `startVaultHost` and `startVaultConfirm`, the two
@@ -553,10 +553,11 @@ This is **hardware-isolated, non-custodial recovery**, not trustless recovery.
 The approved workload digest, AWS Nitro/KMS, and image-upgrade policy remain in
 the trust model.
 
-## React Native / Expo
+## React Native / Expo (work in progress)
 
-React Native is supported through the native entrypoint on **iOS 16+** and
-**Android 9+**. It uses Secure Enclave / Android Keystore keys and therefore
+React Native support is a work in progress and not production-ready. On
+Stellar it does not yet use the device-key path. It runs through the native
+entrypoint on **iOS 16+** and **Android 9+**. It uses Secure Enclave / Android Keystore keys and therefore
 requires a bare React Native app or an Expo development build (Expo Go cannot
 load custom native modules).
 
