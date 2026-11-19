@@ -34,7 +34,7 @@ import {
 } from '../recovery/SocialRecoveryClient';
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
 import { AccountClient } from '../account/AccountClient';
-import { VaultClient } from '../vault/VaultClient';
+import { VaultClient, vaultLoginHost } from '../vault/VaultClient';
 import { zeroize } from '../secret/dek';
 import { readLocalDek } from '../secret/localDek';
 import { addPasskey } from '../secret/PasskeyDekPort';
@@ -454,6 +454,14 @@ export function CavosProvider({
         backendUrl: config.authBackendUrl,
         persistSession: config.persistSession,
         attestation: socialRecoveryPolicy,
+        ...(config.appId && vaultSetting(config)
+          ? {
+              login: vaultLoginHost({
+                appId: config.appId,
+                ...(typeof config.vault === 'object' ? config.vault : {}),
+              }),
+            }
+          : {}),
       }),
   );
   const [session, setSession] = useState<(CavosWallet & CavosSession) | null>(null);

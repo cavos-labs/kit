@@ -12,6 +12,8 @@ import {
   type TypedData,
 } from "starknet";
 import type { AuthProvider, Identity } from "../auth/AuthProvider";
+import type { LoginVerifyRequest } from "../auth/enclaveLogin";
+import type { LoginHost, LoginStart } from "../auth/LoginHost";
 import type { PrivacyOperations } from "../chains/starknet/privacy/session";
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
@@ -131,6 +133,18 @@ export class VaultClient {
     };
   }
 
+  loginStart(): Promise<LoginStart> {
+    return this.call("loginStart", null);
+  }
+
+  loginVerify(request: LoginVerifyRequest): Promise<string> {
+    return this.call("loginVerify", request);
+  }
+
+  loginEnd(): Promise<void> {
+    return this.call("loginEnd", null);
+  }
+
   forget(userId: string, appSalt: string): Promise<void> {
     return this.call("forget", { userId, appSalt });
   }
@@ -245,6 +259,18 @@ class VaultStarknetSigner extends SignerInterface {
   async signDeclareTransaction(_details: DeclareSignerDetails): Promise<Signature> {
     throw new Error("kit/vault: declaring classes is not supported");
   }
+}
+
+/**
+ * A `LoginHost` whose key and enclave jobs live in the vault. The vault is
+ * attached on first use, so building this during server rendering is safe.
+ */
+export function vaultLoginHost(opts: VaultClientOptions): LoginHost {
+  return {
+    start: () => VaultClient.attach(opts).loginStart(),
+    verify: (request) => VaultClient.attach(opts).loginVerify(request),
+    end: () => VaultClient.attach(opts).loginEnd(),
+  };
 }
 
 /** Connect through the vault, then retire any copy of the same keys this page stored before it. */

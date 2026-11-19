@@ -8,16 +8,9 @@ import {
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
 import type { AttestationPolicy } from "../recovery/SocialRecoveryClient";
-import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from "../recovery/attestationDefaults";
-import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "../recovery/enclaveChannel";
-import { secureRandomBytes } from "../crypto/encoding";
-import { normalizeEmailCode } from "./emailCode";
-import {
-  assertLoginBinding,
-  loginNonce,
-  loginSecretFrom,
-  requiresLoginBinding,
-} from "./loginBinding";
+import { enclavePost } from "./enclaveLogin";
+import { createLoginHost, type LoginHost, type LoginStart } from "./LoginHost";
+import { assertLoginBinding, LOGIN_NOT_STARTED, requiresLoginBinding } from "./loginBinding";
 
 export interface CavosAuthOptions {
   /** Cavos backend base URL. Defaults to the hosted service (same as @cavos/react). */
@@ -36,6 +29,12 @@ export interface CavosAuthOptions {
    * the enclave. Defaults to the enclave shipped with this package.
    */
   attestation?: AttestationPolicy;
+  /**
+   * Where the login key lives and where the enclave login jobs run. Defaults to
+   * this page's IndexedDB. `CavosProvider` passes the vault's, so that no
+   * script on the page can hold the key or the PKCE verifier.
+   */
+  login?: LoginHost;
 }
 
 /**
@@ -69,12 +68,10 @@ export class CavosAuth implements AuthProvider {
   private readonly backendUrl: string;
   private readonly identityStorageKey: string;
   private readonly authTokenKey: string;
-  private readonly loginSecretKey: string;
-  private readonly pkceKey: string;
-  /** The login secret, for a callback this same instance handles. */
-  private loginSecret: string | null = null;
-  /** The PKCE verifier of the GitHub or Telegram login in flight, for a callback this same instance handles. */
-  private pkceVerifier: string | null = null;
+  private readonly loginNonceKey: string;
+  private readonly login: LoginHost;
+  /** The public nonce of the login in flight, for a callback this same instance handles. */
+  private loginNonce: string | null = null;
   private last: Identity | null = null;
   /** Fresh OIDC proof retained only in memory for an immediate TEE recovery.
    * Never persisted to localStorage and never sent to the Cavos control plane
@@ -100,8 +97,14 @@ export class CavosAuth implements AuthProvider {
     this.backendUrl = opts.backendUrl ?? "https://cavos.xyz";
     this.identityStorageKey = `cavos-kit:identity:${opts.appId ?? "default"}`;
     this.authTokenKey = `cavos-kit:token:${opts.appId ?? "default"}`;
-    this.loginSecretKey = `cavos-kit:login-secret:${opts.appId ?? "default"}`;
-    this.pkceKey = `cavos-kit:pkce:${opts.appId ?? "default"}`;
+    this.loginNonceKey = `cavos-kit:login-nonce:${opts.appId ?? "default"}`;
+    this.login =
+      opts.login ??
+      createLoginHost({
+        appId: opts.appId ?? "default",
+        backendUrl: this.backendUrl,
+        attestation: opts.attestation,
+      });
     if (opts.persistSession === false && typeof window !== "undefined") {
       // An identity saved before the app turned persistence off would
       // otherwise keep this browser signed in for good.
@@ -145,8 +148,11 @@ export class CavosAuth implements AuthProvider {
     this.last = null;
     this.recoveryCredential = null;
     this.setAuthToken(null);
+    this.loginNonce = null;
+    this.login.end().catch(() => undefined);
     if (typeof window !== "undefined") {
       try {
+        window.sessionStorage.removeItem(this.loginNonceKey);
         this.identityStorage().removeItem(this.identityStorageKey);
       } catch {
         /* nothing was stored if storage is unavailable */
@@ -175,16 +181,14 @@ export class CavosAuth implements AuthProvider {
   async getGitHubOAuthUrl(redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
     const appId = this.requireAppId();
-    this.startLogin();
-    const verifier = this.startPkce();
-    const challenge = loginNonce(verifier);
+    const { codeChallenge } = await this.startLogin();
     const params = new URLSearchParams({
-      code_challenge: challenge,
+      code_challenge: codeChallenge,
       redirect_uri: redirectUri ?? window.location.href,
       app_id: appId,
     });
     const { url } = await this.get(`/api/oauth/v2/github?${params}`);
-    if (!isGitHubAuthorizeUrl(url, challenge)) {
+    if (!isGitHubAuthorizeUrl(url, codeChallenge)) {
       throw new Error("kit/auth: the GitHub sign-in URL is not the one this login asked for");
     }
     return url;
@@ -201,17 +205,15 @@ export class CavosAuth implements AuthProvider {
   async getTelegramOAuthUrl(redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
     const appId = this.requireAppId();
-    const clientNonce = this.startLogin();
-    const verifier = this.startPkce();
-    const challenge = loginNonce(verifier);
+    const { nonce, codeChallenge } = await this.startLogin();
     const params = new URLSearchParams({
-      code_challenge: challenge,
+      code_challenge: codeChallenge,
       redirect_uri: redirectUri ?? window.location.href,
       app_id: appId,
-      nonce: clientNonce,
+      nonce,
     });
     const { url } = await this.get(`/api/oauth/v2/telegram?${params}`);
-    if (!isTelegramAuthorizeUrl(url, challenge, `${appId}.${clientNonce}`)) {
+    if (!isTelegramAuthorizeUrl(url, codeChallenge, `${appId}.${nonce}`)) {
       throw new Error("kit/auth: the Telegram sign-in URL is not the one this login asked for");
     }
     return url;
@@ -219,8 +221,9 @@ export class CavosAuth implements AuthProvider {
 
   private async oauthUrl(provider: "google" | "apple", redirectUri?: string): Promise<string> {
     if (typeof window === "undefined") throw new Error("kit/auth: OAuth requires a browser");
+    const { nonce } = await this.startLogin();
     const params = new URLSearchParams({
-      nonce: this.startLogin(),
+      nonce,
       redirect_uri: redirectUri ?? window.location.href,
       ...(this.opts.appId ? { app_id: this.opts.appId } : {}),
     });
@@ -257,125 +260,51 @@ export class CavosAuth implements AuthProvider {
 
   /**
    * Email a 9-character sign-in code. The code is generated and mailed by the
-   * recovery enclave, so the Cavos control plane never sees it.
+   * recovery enclave, so the Cavos control plane never sees it. It is bound to
+   * a new login key: asking for another code starts another login, and only
+   * the latest code can be verified.
    */
   async sendOtp(email: string): Promise<void> {
-    await this.enclavePost("/api/oauth/email/code", {
-      app_id: this.requireAppId(),
+    const appId = this.requireAppId();
+    const { nonce } = await this.startLogin();
+    await enclavePost(this.backendUrl, "/api/oauth/email/code", {
+      app_id: appId,
       email: normalizeEmail(email),
+      login_binding: nonce,
     });
   }
 
   /**
    * Verify the emailed code inside the attested enclave and resolve the
-   * identity. The enclave answers with its own signed token, bound to a secret
-   * created here, and that token is used exactly like a Google id_token.
+   * identity. The enclave answers with its own signed token, bound to the login
+   * key `sendOtp` started, and that token is used exactly like a Google id_token.
    */
   async verifyOtp(email: string, code: string): Promise<Identity> {
     const address = normalizeEmail(email);
-    const secret = loginSecretFrom(secureRandomBytes(32));
-    const idToken = await this.enclaveLogin(
-      {
-        action: "verify_email",
-        email: address,
-        code: normalizeEmailCode(code),
-        client_nonce: loginNonce(secret),
-      },
-      "/api/oauth/email/verify",
-      {},
-      "email_verified",
-      "kit/auth: the enclave did not verify this email",
-    );
-    if (parseJwt(idToken).iss !== ENCLAVE_EMAIL_ISSUER) {
-      throw new Error("kit/auth: the email token was not issued by the enclave");
-    }
-    return this.identityFromAuthData(idToken, "email", address, secret);
+    this.requirePendingLogin();
+    const idToken = await this.login.verify({ provider: "email", email: address, code });
+    return this.identityFromAuthData(idToken, "email", address);
   }
 
   /**
    * Redeem a GitHub grant inside the attested enclave. The grant is only
-   * useful with the PKCE verifier and login secret this browser kept, and the
-   * token the enclave signs is bound to that secret exactly like a Google one.
+   * useful with the PKCE verifier and login key kept by this login's host, and
+   * the token the enclave signs is bound to that key like a Google one.
    */
   private async githubIdentity(githubGrant: string): Promise<Identity> {
-    const secret = this.takeLoginSecret();
-    const verifier = this.takePkceVerifier();
-    if (!secret || !verifier) {
-      throw new Error(
-        "kit/auth: this sign-in did not start here, or the browser could not keep its state. Sign in again.",
-      );
-    }
-    const idToken = await this.enclaveLogin(
-      { action: "verify_github", code_verifier: verifier, client_nonce: loginNonce(secret) },
-      "/api/oauth/github/verify",
-      { github_grant: githubGrant },
-      "github_verified",
-      "kit/auth: the enclave did not verify this GitHub sign-in",
-    );
-    if (parseJwt(idToken).iss !== ENCLAVE_GITHUB_ISSUER) {
-      throw new Error("kit/auth: the GitHub token was not issued by the enclave");
-    }
-    return this.identityFromAuthData(idToken, "github", undefined, secret);
+    this.requirePendingLogin();
+    const idToken = await this.login.verify({ provider: "github", grant: githubGrant });
+    return this.identityFromAuthData(idToken, "github");
   }
 
   /**
-   * Redeem a Telegram grant inside the attested enclave. Unlike GitHub, the
-   * enclave is given the login secret itself and derives the nonce from it, so
-   * a stolen code is useless without the secret this browser kept.
+   * Redeem a Telegram grant inside the attested enclave, with the same PKCE
+   * verifier and login key as GitHub, so a stolen code is useless without them.
    */
   private async telegramIdentity(telegramGrant: string): Promise<Identity> {
-    const secret = this.takeLoginSecret();
-    const verifier = this.takePkceVerifier();
-    if (!secret || !verifier) {
-      throw new Error(
-        "kit/auth: this sign-in did not start here, or the browser could not keep its state. Sign in again.",
-      );
-    }
-    const idToken = await this.enclaveLogin(
-      { action: "verify_telegram", code_verifier: verifier, login_secret: secret },
-      "/api/oauth/telegram/verify",
-      { telegram_grant: telegramGrant },
-      "telegram_verified",
-      "kit/auth: the enclave did not verify this Telegram sign-in",
-    );
-    if (parseJwt(idToken).iss !== ENCLAVE_TELEGRAM_ISSUER) {
-      throw new Error("kit/auth: the Telegram token was not issued by the enclave");
-    }
-    return this.identityFromAuthData(idToken, "telegram", undefined, secret);
-  }
-
-  /**
-   * Open an attested enclave session, run one encrypted login job through it
-   * and return the id_token the enclave signed.
-   */
-  private async enclaveLogin(
-    job: Record<string, unknown>,
-    verifyPath: string,
-    extraBody: Record<string, unknown>,
-    expectedResult: string,
-    failure: string,
-  ): Promise<string> {
-    const session = await this.enclavePost("/api/oauth/email/session", { app_id: this.requireAppId() });
-    const sessionId: unknown = session?.session_id;
-    if (typeof sessionId !== "string") {
-      throw new Error("kit/auth: the enclave session carried no id");
-    }
-    const channelKey = await verifiedChannelKey(
-      sessionId,
-      session.attestation_document_b64,
-      this.opts.attestation ?? DEFAULT_SOCIAL_RECOVERY_ATTESTATION,
-      (pcr0Hex) => fetchEnclaveRelease(`${this.backendUrl}/api/enclave/releases/${pcr0Hex}`),
-    );
-    const result = await runEnclaveJob<{ result?: string; id_token?: unknown }>(
-      sessionId,
-      channelKey,
-      job,
-      (sealed) => this.enclavePost(verifyPath, { session_id: sessionId, job: sealed, ...extraBody }),
-    );
-    if (result.result !== expectedResult || typeof result.id_token !== "string") {
-      throw new Error(failure);
-    }
-    return result.id_token;
+    this.requirePendingLogin();
+    const idToken = await this.login.verify({ provider: "telegram", grant: telegramGrant });
+    return this.identityFromAuthData(idToken, "telegram");
   }
 
   /** AuthProvider: returns the identity resolved by the last login step. */
@@ -461,7 +390,6 @@ export class CavosAuth implements AuthProvider {
     authData: string,
     provider: string,
     emailOverride?: string,
-    presentedSecret?: string,
   ): Promise<Identity> {
     let token = authData;
     try {
@@ -471,16 +399,9 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
-    let loginSecret: string | undefined;
-    if (requiresLoginBinding(claims.iss)) {
-      const kept = presentedSecret ?? this.takeLoginSecret();
-      assertLoginBinding(claims.nonce, kept);
-      loginSecret = kept;
-    }
+    if (requiresLoginBinding(claims.iss)) assertLoginBinding(claims.nonce, this.takeLoginNonce());
     this.setAuthToken(token);
-    this.recoveryCredential = isSocialRecoveryIssuer(claims.iss)
-      ? createSocialRecoveryCredential(token, loginSecret)
-      : null;
+    this.recoveryCredential = isSocialRecoveryIssuer(claims.iss) ? createSocialRecoveryCredential(token) : null;
     return this.remember({
       userId: String(claims.sub ?? claims.user_id ?? claims.uid),
       email: claims.email ?? emailOverride,
@@ -517,60 +438,49 @@ export class CavosAuth implements AuthProvider {
   }
 
   /**
-   * Begin a Google or Apple login: keep a fresh secret for the trip to the
-   * provider and back, and return the nonce that commits to it.
+   * Begin a login: ask the login host for a new key and keep its public nonce
+   * for the trip to the provider and back.
    *
-   * `sessionStorage` because the login navigates away and the secret has to be
+   * `sessionStorage` because the login navigates away and the nonce has to be
    * here when the callback lands; it is removed as soon as it is read. Where
    * storage is unavailable only this instance remembers it, so a login that
-   * reloads the page is refused at the callback — the safe outcome.
+   * reloads the page is refused at the callback, the safe outcome. The key
+   * itself stays with the host.
    */
-  private startLogin(): string {
-    const secret = loginSecretFrom(secureRandomBytes(32));
-    this.loginSecret = secret;
+  private async startLogin(): Promise<LoginStart> {
+    const started = await this.login.start();
+    this.loginNonce = started.nonce;
     try {
-      window.sessionStorage.setItem(this.loginSecretKey, secret);
+      window.sessionStorage.setItem(this.loginNonceKey, started.nonce);
     } catch {
-      /* memory only */
+      return started;
     }
-    return loginNonce(secret);
+    return started;
   }
 
-  /** Begin the PKCE half of a GitHub or Telegram login: keep a fresh verifier and return it. */
-  private startPkce(): string {
-    const verifier = loginSecretFrom(secureRandomBytes(32));
+  private pendingLoginNonce(): string | null {
     try {
-      window.sessionStorage.setItem(this.pkceKey, verifier);
+      return window.sessionStorage.getItem(this.loginNonceKey) ?? this.loginNonce;
     } catch {
-      this.pkceVerifier = verifier;
-    }
-    return verifier;
-  }
-
-  /** The PKCE verifier of the login in flight, taken exactly once. */
-  private takePkceVerifier(): string | null {
-    const kept = this.pkceVerifier;
-    this.pkceVerifier = null;
-    try {
-      const stored = window.sessionStorage.getItem(this.pkceKey);
-      window.sessionStorage.removeItem(this.pkceKey);
-      return stored ?? kept;
-    } catch {
-      return kept;
+      return this.loginNonce;
     }
   }
 
-  /** The secret of the login in flight, taken exactly once. */
-  private takeLoginSecret(): string | null {
-    let secret = this.loginSecret;
-    this.loginSecret = null;
+  /** Refuse to spend an enclave call on a sign-in this page did not start. */
+  private requirePendingLogin(): void {
+    if (!this.pendingLoginNonce()) throw new Error(LOGIN_NOT_STARTED);
+  }
+
+  /** The nonce of the login in flight, taken exactly once. */
+  private takeLoginNonce(): string | null {
+    const nonce = this.pendingLoginNonce();
+    this.loginNonce = null;
     try {
-      secret = window.sessionStorage.getItem(this.loginSecretKey) ?? secret;
-      window.sessionStorage.removeItem(this.loginSecretKey);
+      window.sessionStorage.removeItem(this.loginNonceKey);
     } catch {
-      /* memory only */
+      return nonce;
     }
-    return secret;
+    return nonce;
   }
 
   private remember(id: Identity): Identity {
@@ -598,24 +508,6 @@ export class CavosAuth implements AuthProvider {
     return this.opts.appId;
   }
 
-  private async enclavePost(path: string, body: unknown): Promise<any> {
-    const r = await fetch(`${this.backendUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (r.ok) return r.json();
-    const text = await r.text().catch(() => "");
-    let code: unknown;
-    try {
-      code = JSON.parse(text)?.error;
-    } catch {
-      code = undefined;
-    }
-    const known = typeof code === "string" ? ENCLAVE_LOGIN_ERRORS[code] : undefined;
-    throw new Error(known ?? `kit/auth: ${path} -> ${r.status} ${text}`);
-  }
-
   private async post(path: string, body: unknown): Promise<any> {
     const r = await fetch(`${this.backendUrl}${path}`, {
       method: "POST",
@@ -626,20 +518,6 @@ export class CavosAuth implements AuthProvider {
     return r.json();
   }
 }
-
-const ENCLAVE_LOGIN_ERRORS: Record<string, string> = {
-  invalid_request: "Enter a valid email address.",
-  app_not_found: "kit/auth: this app is not registered with Cavos.",
-  email_undeliverable: "This email provider is not supported yet.",
-  code_cooldown: "A code was just sent to this address. Wait a minute before requesting another.",
-  rate_limited: "Too many attempts. Try again in a few minutes.",
-  email_unavailable: "Email sign-in is unavailable right now. Try again later.",
-  enclave_unavailable: "Sign-in is unavailable right now. Try again later.",
-  code_rejected: "That code is wrong or has expired. Request a new one.",
-  github_rejected: "GitHub did not accept this sign-in. Try again.",
-  telegram_rejected: "Telegram did not accept this sign-in. Try again.",
-  invalid_grant: "This sign-in expired. Sign in again.",
-};
 
 /** Whether `url` is GitHub's authorize page, asked for with exactly this PKCE challenge. */
 function isGitHubAuthorizeUrl(url: unknown, challenge: string): boolean {

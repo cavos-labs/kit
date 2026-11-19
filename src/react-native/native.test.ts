@@ -4,7 +4,7 @@ import { NativeDeviceUnwrapKey } from "./NativeDeviceUnwrapKey";
 import { NativeCavosAuth } from "./NativeCavosAuth";
 import { eciesWrapDEK } from "../chains/stellar/envelope";
 import { fromBase64, toBase64 } from "./encoding";
-import { loginNonce, loginSecretFrom } from "../auth/loginBinding";
+import { loginNonceOf } from "../auth/loginBinding";
 import * as WebBrowser from "expo-web-browser";
 
 const signingPrivate = new Uint8Array(32).fill(7);
@@ -54,14 +54,12 @@ describe("NativeCavosAuth", () => {
 
   test("persists callback identity, restores it, and logout keeps device keys", async () => {
     const auth = new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" });
-    // The bridge's randomness is fixed above, so the secret this login keeps
-    // is known, and with it the nonce the provider would sign.
-    const secret = loginSecretFrom(new Uint8Array(32).fill(13));
+    const nonce = loginNonceOf(unwrapPublic);
     const payload = toBase64(new TextEncoder().encode(JSON.stringify({
       iss: "https://accounts.google.com",
       sub: "user-1",
       email: "a@b.test",
-      nonce: `0f9d5a1c-3b2e-4c5a-8d7f-1a2b3c4d5e6f.${loginNonce(secret)}`,
+      nonce: `0f9d5a1c-3b2e-4c5a-8d7f-1a2b3c4d5e6f.${nonce}`,
       iat: 1_700_000_000,
     })))
       .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -77,22 +75,23 @@ describe("NativeCavosAuth", () => {
     } as Response);
     (WebBrowser.openAuthSessionAsync as jest.Mock).mockResolvedValue({ type: "success", url: callback });
     const identity = await auth.login("google");
-    expect(String(fetchMock.mock.calls[0][0])).toContain(`nonce=${loginNonce(secret)}`);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`nonce=${nonce}`);
     fetchMock.mockRestore();
 
     expect(identity).toMatchObject({ userId: "user-1", email: "a@b.test" });
     expect(auth.getSocialRecoveryCredential()).toMatchObject({
       idToken: `x.${payload}.x`,
       tokenFingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
-      noncePreimage: secret,
     });
+    expect(auth.getLoginKey()?.publicKeyRaw()).toEqual(unwrapPublic);
 
     const restored = await new NativeCavosAuth({ appId: "app", redirectUri: "cavos://auth" }).restoreIdentity();
     expect(restored).toEqual(identity);
     await auth.clearStoredIdentity();
     expect(await auth.restoreIdentity()).toBeNull();
     expect(() => auth.getSocialRecoveryCredential()).toThrow("fresh social login");
-    expect(bridge.deleteKeys).not.toHaveBeenCalled();
+    expect(auth.getLoginKey()).toBeNull();
+    expect(bridge.deleteKeys.mock.calls).toEqual([["cavos-login:app"], ["cavos-login:app"]]);
   });
 
   test("email sign-in refuses rather than skip enclave attestation", async () => {
