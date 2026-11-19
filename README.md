@@ -500,8 +500,10 @@ Social recovery is **opt-in** per Cavos environment. The developer selects
 exactly one provider in the dashboard (`google`, `apple`, or email code),
 so the user is never shown a three-provider recovery selector.
 
-The kit verifies **AWS Nitro Enclave** attestation, with measurements pinned in
-the package (`DEFAULT_SOCIAL_RECOVERY_ATTESTATION`). The enclave:
+The kit verifies **AWS Nitro Enclave** attestation. By default it accepts only
+enclave images vouched for by a signed release of the public
+`cavos-labs/cavos-recovery` repository, version 3 or later
+(`DEFAULT_SOCIAL_RECOVERY_ATTESTATION`). The enclave:
 
 - Runs inside a Nitro VM with no persistent storage, no SSH, no operator access.
 - Verifies that the provider token (Google/Apple/email) was minted for this user

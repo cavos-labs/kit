@@ -28,6 +28,7 @@ const uvIdentity: ReleaseSignerIdentity = {
   repositoryId: "699532645",
   ownerId: "115962839",
   workflow: ".github/workflows/release.yml",
+  environment: "release",
   trigger: "workflow_dispatch",
   ref: /^refs\/heads\/main$/,
 };
@@ -76,6 +77,7 @@ describe("verifyReleaseSignature", () => {
       { trigger: "push" },
       { ref: /^refs\/tags\/v([1-9][0-9]*)$/ },
       { workflow: ".github/workflows/other.yml" },
+      { environment: "staging" },
     ];
     for (const variant of variants) {
       await expect(
@@ -126,6 +128,50 @@ describe("verifyEnclaveRelease", () => {
       verifyEnclaveRelease(uvBundle(), pcrs, DEFAULT_SOCIAL_RECOVERY_ATTESTATION.release!, new Date()),
     ).rejects.toThrow(/OIDCSourceRepositoryURI does not match/);
     expect(tufRefresh).not.toHaveBeenCalled();
+  });
+});
+
+const cavosBundle = () =>
+  JSON.parse(readFileSync(join(__dirname, "fixtures/cavosReleaseV3Bundle.json"), "utf8"));
+const cavosPolicy = DEFAULT_SOCIAL_RECOVERY_ATTESTATION.release!;
+const cavosNow = new Date("2026-11-20T00:00:00Z");
+const hexBytes = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
+const cavosPcrs = new Map([
+  [0, hexBytes("ffd75c7ff201cbc75f0ba3c44bdc14341f0878512606cf7ae470d733eadf968766e46279f638efc804b7f1c3376f093e")],
+  [1, hexBytes("3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03")],
+  [2, hexBytes("f7560239f44454a81ea3b89643953eb3152d498de372a8835cb2e569cdf78965608103b4a3f426c851ddc65cd530a66f")],
+]);
+
+describe("the real Cavos release v3 bundle", () => {
+  it("is accepted by the default policy for its own measurements", async () => {
+    await expect(
+      verifyEnclaveRelease(cavosBundle(), cavosPcrs, cavosPolicy, cavosNow),
+    ).resolves.toBe(3);
+    expect(tufRefresh).not.toHaveBeenCalled();
+  });
+
+  it("is refused when the policy names another environment", async () => {
+    await expect(
+      verifyEnclaveRelease(
+        cavosBundle(),
+        cavosPcrs,
+        { ...cavosPolicy, environment: "staging" },
+        cavosNow,
+      ),
+    ).rejects.toThrow(/not the release environment/);
+  });
+
+  it("is refused under a minimum version of 4", async () => {
+    await expect(
+      verifyEnclaveRelease(cavosBundle(), cavosPcrs, { ...cavosPolicy, minVersion: 4 }, cavosNow),
+    ).rejects.toThrow(/older than this build accepts/);
+  });
+
+  it("is refused for a different PCR0", async () => {
+    const other = new Map(cavosPcrs).set(0, pcr(0xaa));
+    await expect(
+      verifyEnclaveRelease(cavosBundle(), other, cavosPolicy, cavosNow),
+    ).rejects.toThrow(/do not match the release/);
   });
 });
 
