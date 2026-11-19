@@ -1,7 +1,8 @@
 import { CavosAuth } from "./CavosAuth";
 import { createSocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
 import { beginLogin, FIXTURE_APP_ID } from "./loginFixture";
-import { loginNonce } from "./loginBinding";
+import { loginNonceOf } from "./loginBinding";
+import { WebCryptoLoginKey } from "./loginKey";
 
 /**
  * `handleCallback(authData)` is the pure, network-free seam into
@@ -113,9 +114,8 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
     const credential = auth.consumeSocialRecoveryCredential();
     expect(credential).toMatchObject(createSocialRecoveryCredential(token));
-    // The credential carries the secret the nonce commits to, so the enclave
-    // can tell this login's token from the same token in anyone else's hands.
-    expect(nonce).toBe(`${FIXTURE_APP_ID}.${loginNonce(credential.noncePreimage!)}`);
+    const key = await WebCryptoLoginKey.load("default");
+    expect(nonce).toBe(`${FIXTURE_APP_ID}.${loginNonceOf(key!.publicKeyRaw())}`);
     // Still available after use, because a session holds a wallet on every
     // configured chain and each needs its own enrolment. Dropping it after the
     // first left the rest unprotected with nothing to try again with.
@@ -131,7 +131,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     const stranger = jwt({
       iss: "https://accounts.google.com",
       sub: "attacker",
-      nonce: `${FIXTURE_APP_ID}.${loginNonce("a-secret-this-client-never-made")}`,
+      nonce: `${FIXTURE_APP_ID}.${"x".repeat(43)}`,
     });
 
     // No login in flight: a callback carrying someone else's code.
@@ -145,7 +145,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     await expect(waiting.handleCallback(stranger)).rejects.toThrow("does not match this sign-in");
     expect(() => waiting.getSocialRecoveryCredential()).toThrow();
 
-    // The secret is spent either way: the same answer cannot be retried.
+    
     const nonce = await beginLogin(waiting);
     const mine = jwt({ iss: "https://appleid.apple.com", sub: "me", nonce });
     await expect(waiting.handleCallback(mine)).resolves.toMatchObject({ userId: "me" });

@@ -12,9 +12,11 @@
  * What is trusted is fixed here, not by the host that serves the bundle: the
  * Sigstore public-good root, and the workflow identity in the certificate —
  * repository, its numeric id and owner id (which survive renames and cannot be
- * re-registered), GitHub-hosted runner, a push of a `v<N>` tag, and the release
- * workflow at that tag. The bundle arrives from an untrusted host and verifies
- * itself; a host can withhold a release but cannot forge one.
+ * re-registered), GitHub-hosted runner, a push of a `v<N>` tag, the release
+ * workflow at that tag as both build config and build signer, and the GitHub
+ * deployment environment whose required reviewers gate the release. The bundle
+ * arrives from an untrusted host and verifies itself; a host can withhold a
+ * release but cannot forge one.
  */
 
 import type { SigstoreBundle, TrustedRoot } from "@freedomofpress/sigstore-browser";
@@ -32,6 +34,8 @@ export interface EnclaveReleasePolicy {
   ownerId: string;
   /** Path of the release workflow inside the repository. */
   workflow: string;
+  /** GitHub deployment environment the release job must run in. */
+  environment: string;
   /** Lowest release version accepted; raising it revokes every older release. */
   minVersion: number;
 }
@@ -47,6 +51,7 @@ export interface ReleaseSignerIdentity {
   repositoryId: string;
   ownerId: string;
   workflow: string;
+  environment: string;
   trigger: string;
   ref: RegExp;
 }
@@ -66,6 +71,7 @@ const IN_TOTO_PAYLOAD_TYPE = "application/vnd.in-toto+json";
 const STATEMENT_TYPE = "https://in-toto.io/Statement/v1";
 const RELEASE_PREDICATE_TYPE = "https://cavos.xyz/attestation/enclave-release/v1";
 const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const DEPLOYMENT_ENVIRONMENT_OID = "1.3.6.1.4.1.57264.1.23";
 const RELEASE_TAG = /^refs\/tags\/v([1-9][0-9]*)$/;
 const PCR_HEX = /^[0-9a-f]{96}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -93,6 +99,7 @@ export async function verifyEnclaveRelease(
     repositoryId: policy.repositoryId,
     ownerId: policy.ownerId,
     workflow: policy.workflow,
+    environment: policy.environment,
     trigger: "push",
     ref: RELEASE_TAG,
   });
@@ -146,9 +153,18 @@ export async function verifyReleaseSignature(
         if (ref === undefined || !identity.ref.test(ref)) {
           throw new sigstore.PolicyError("the signing ref is not a release tag");
         }
-        const buildConfig = cert.extBuildConfigURI?.buildConfigURI;
-        if (buildConfig !== `${repositoryUrl}/${identity.workflow}@${ref}`) {
+        const releaseWorkflow = `${repositoryUrl}/${identity.workflow}@${ref}`;
+        if (
+          cert.extBuildConfigURI?.buildConfigURI !== releaseWorkflow ||
+          cert.extBuildSignerURI?.buildSignerURI !== releaseWorkflow
+        ) {
           throw new sigstore.PolicyError("the signing workflow is not the release workflow");
+        }
+        const environmentValue = cert.extension(DEPLOYMENT_ENVIRONMENT_OID)?.valueObj.subs[0]?.value;
+        const environment =
+          environmentValue === undefined ? undefined : new TextDecoder().decode(environmentValue);
+        if (environment !== identity.environment) {
+          throw new sigstore.PolicyError("the signing environment is not the release environment");
         }
         signedRef = ref;
       },

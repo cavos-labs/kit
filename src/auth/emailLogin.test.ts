@@ -1,5 +1,7 @@
+import "fake-indexeddb/auto";
 import { CavosAuth } from "./CavosAuth";
-import { loginNonce } from "./loginBinding";
+import { WebCryptoLoginKey } from "./loginKey";
+import { loginNonceOf } from "./loginBinding";
 import { EMAIL_CODE_LENGTH, normalizeEmailCode } from "./emailCode";
 import { verifyNitroAttestation } from "../recovery/nitro/attestation";
 
@@ -25,7 +27,7 @@ interface FakeEnclave {
   sentJob: () => Record<string, unknown>;
 }
 
-async function startEnclave(options: { nonceFor?: (clientNonce: string) => string } = {}): Promise<FakeEnclave> {
+async function startEnclave(options: { nonceFor?: (bindingOfJobKey: string) => string } = {}): Promise<FakeEnclave> {
   const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
   const publicRaw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
   const binding = new Uint8Array(await crypto.subtle.digest("SHA-256", text(SESSION_ID)));
@@ -71,14 +73,14 @@ async function startEnclave(options: { nonceFor?: (clientNonce: string) => strin
       unb64(body.job.ciphertext_b64) as unknown as BufferSource,
     );
     job = JSON.parse(new TextDecoder().decode(opened));
-    const clientNonce = job.client_nonce as string;
+    const binding = loginNonceOf(unb64(body.job.client_public_key_b64));
     const token = unsignedJwt({
       iss: "https://enclave.cavos.xyz",
       aud: "cavos-email",
       sub: "a".repeat(64),
       email: job.email,
       email_verified: true,
-      nonce: options.nonceFor ? options.nonceFor(clientNonce) : `${APP_ID}.${clientNonce}`,
+      nonce: options.nonceFor ? options.nonceFor(binding) : `${APP_ID}.${binding}`,
     });
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const sealed = await crypto.subtle.encrypt(
@@ -106,32 +108,57 @@ describe("enclave email login", () => {
     return new CavosAuth({ backendUrl: "https://cavos.test", appId: APP_ID });
   }
 
-  it("sends the normalised address to the code route", async () => {
+  function sentCode(enclave: FakeEnclave) {
+    const call = enclave.fetch.mock.calls.find(([url]) => String(url).endsWith("/api/oauth/email/code"));
+    return JSON.parse(call![1].body);
+  }
+
+  it("sends the normalised address and the login binding to the code route", async () => {
     const enclave = await startEnclave();
     await authWith(enclave).sendOtp("  Ada@Example.COM ");
-    expect(enclave.fetch).toHaveBeenCalledWith(
-      "https://cavos.test/api/oauth/email/code",
-      expect.objectContaining({ body: JSON.stringify({ app_id: APP_ID, email: "ada@example.com" }) }),
-    );
+    expect(sentCode(enclave)).toEqual({
+      app_id: APP_ID,
+      email: "ada@example.com",
+      login_binding: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
   });
 
-  it("verifies through the attested channel and keeps the login secret for recovery", async () => {
+  it("verifies under the key the code was bound to, with no secret on the wire", async () => {
     const enclave = await startEnclave();
     const auth = authWith(enclave);
+    await auth.sendOtp("ada@example.com");
     const identity = await auth.verifyOtp(" Ada@Example.com", " QPZ-RY9 X8G ");
 
     expect(identity).toMatchObject({ email: "ada@example.com", provider: "email", userId: "a".repeat(64) });
-    expect(enclave.sentJob()).toMatchObject({ action: "verify_email", email: "ada@example.com", code: CODE });
+    expect(enclave.sentJob()).toEqual({ action: "verify_email", email: "ada@example.com", code: CODE });
+    const key = await WebCryptoLoginKey.load(APP_ID);
+    expect(loginNonceOf(key!.publicKeyRaw())).toBe(sentCode(enclave).login_binding);
     const credential = auth.getSocialRecoveryCredential();
     expect(credential.provider).toBe("email");
-    expect(credential.noncePreimage).toEqual(expect.any(String));
-    expect(loginNonce(credential.noncePreimage!)).toBe(enclave.sentJob().client_nonce);
+    expect(Object.keys(credential).sort()).toEqual(["idToken", "provider", "tokenFingerprint"]);
     expect(auth.getAuthToken()).toBe(credential.idToken);
+  });
+
+  it("refuses to verify when no code was requested", async () => {
+    const enclave = await startEnclave();
+    await expect(authWith(enclave).verifyOtp("ada@example.com", CODE)).rejects.toThrow(/did not start here/);
+    expect(enclave.fetch).not.toHaveBeenCalled();
+  });
+
+  it("binds only the latest code: asking again starts a new key", async () => {
+    const enclave = await startEnclave();
+    const auth = authWith(enclave);
+    await auth.sendOtp("ada@example.com");
+    const first = sentCode(enclave).login_binding;
+    await auth.sendOtp("ada@example.com");
+    const key = await WebCryptoLoginKey.load(APP_ID);
+    expect(loginNonceOf(key!.publicKeyRaw())).not.toBe(first);
   });
 
   it("refuses a token whose nonce is not this login's", async () => {
     const enclave = await startEnclave({ nonceFor: () => `${APP_ID}.${"x".repeat(43)}` });
     const auth = authWith(enclave);
+    await auth.sendOtp("ada@example.com");
     await expect(auth.verifyOtp("ada@example.com", CODE)).rejects.toThrow(/does not match this sign-in/);
     expect(auth.hasSocialRecoveryCredential()).toBe(false);
   });
@@ -139,8 +166,10 @@ describe("enclave email login", () => {
   it("does not talk to an enclave whose attestation fails", async () => {
     const enclave = await startEnclave();
     (verifyNitroAttestation as jest.Mock).mockRejectedValue(new Error("kit/nitro: enclave image measurement is not accepted"));
-    await expect(authWith(enclave).verifyOtp("ada@example.com", CODE)).rejects.toThrow(/not accepted/);
-    expect(enclave.fetch).toHaveBeenCalledTimes(1);
+    const auth = authWith(enclave);
+    await auth.sendOtp("ada@example.com");
+    await expect(auth.verifyOtp("ada@example.com", CODE)).rejects.toThrow(/not accepted/);
+    expect(enclave.fetch).toHaveBeenCalledTimes(2);
   });
 
   it.each([

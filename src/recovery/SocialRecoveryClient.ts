@@ -1,7 +1,8 @@
 import { bytesToBase64Url } from "../crypto/encoding";
 import type { SocialRecoveryCredential } from "./SocialRecoveryCredential";
 import type { NitroAttestationPolicy } from "./nitro/attestation";
-import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey } from "./enclaveChannel";
+import { WebCryptoLoginKey } from "../auth/loginKey";
+import { fetchEnclaveRelease, runEnclaveJob, verifiedChannelKey, type ChannelClientKey } from "./enclaveChannel";
 
 export type SocialRecoveryProvider = "google" | "apple" | "email" | "github" | "telegram";
 export type SocialRecoveryAction = "enroll" | "recover";
@@ -20,6 +21,12 @@ export interface SocialRecoveryClientOptions {
    * They must not be learned from the same control plane being attested.
    */
   attestation: AttestationPolicy;
+  /**
+   * The login key every job is encrypted with. Defaults to the one this
+   * context's IndexedDB holds for `appId`, which is the vault's own inside the
+   * vault.
+   */
+  loginKey?: () => Promise<ChannelClientKey | null>;
 }
 
 export interface ProviderPolicy {
@@ -226,7 +233,9 @@ export class SocialRecoveryClient {
     channelKey: Uint8Array,
     job: unknown,
   ): Promise<SocialRecoveryResult> {
-    return runEnclaveJob<SocialRecoveryResult>(sessionId, channelKey, job, (encrypted) =>
+    const client = await (this.opts.loginKey?.() ?? WebCryptoLoginKey.load(this.opts.appId));
+    if (!client) throw new Error("kit/social-recovery: no sign-in in progress. Sign in again.");
+    return runEnclaveJob<SocialRecoveryResult>(sessionId, channelKey, client, job, (encrypted) =>
       this.fetchJson(`/api/recovery/social/sessions/${sessionId}/job`, {
         method: "POST",
         body: JSON.stringify(encrypted),
@@ -259,6 +268,5 @@ function jobCredential(credential: SocialRecoveryCredential) {
     provider: credential.provider,
     id_token: credential.idToken,
     token_fingerprint: credential.tokenFingerprint,
-    ...(credential.noncePreimage ? { nonce_preimage: credential.noncePreimage } : {}),
   };
 }

@@ -1,5 +1,7 @@
+import "fake-indexeddb/auto";
 import { CavosAuth } from "./CavosAuth";
-import { loginNonce, requiresLoginBinding } from "./loginBinding";
+import { WebCryptoLoginKey } from "./loginKey";
+import { loginNonceOf, pkceChallenge, requiresLoginBinding } from "./loginBinding";
 import { ENCLAVE_TELEGRAM_ISSUER } from "../recovery/SocialRecoveryCredential";
 import { verifyNitroAttestation } from "../recovery/nitro/attestation";
 
@@ -111,7 +113,7 @@ async function startTelegram(options: FakeOptions = {}): Promise<FakeTelegram> {
       sub: "b".repeat(64),
       name: "Ada Lovelace",
       preferred_username: "ada",
-      nonce: `${APP_ID}.${loginNonce(job.login_secret as string)}`,
+      nonce: `${APP_ID}.${loginNonceOf(unb64(body.job.client_public_key_b64))}`,
     });
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const sealed = await crypto.subtle.encrypt(
@@ -152,7 +154,7 @@ describe("Telegram login", () => {
     return new CavosAuth({ backendUrl: "https://cavos.test", appId: APP_ID });
   }
 
-  it("sends a PKCE challenge and a nonce derived from the login secret it keeps", async () => {
+  it("sends a PKCE challenge and the nonce of the login key it keeps", async () => {
     const fake = await startTelegram();
     const auth = authWith(fake);
     const url = await auth.getTelegramOAuthUrl(REDIRECT);
@@ -167,8 +169,9 @@ describe("Telegram login", () => {
 
     await auth.handleCallback(CALLBACK_CODE, REDIRECT);
     const job = fake.sentJob();
-    expect(loginNonce(job.code_verifier as string)).toBe(challenge);
-    expect(loginNonce(job.login_secret as string)).toBe(requested.searchParams.get("nonce"));
+    expect(pkceChallenge(job.code_verifier as string)).toBe(challenge);
+    const key = await WebCryptoLoginKey.load(APP_ID);
+    expect(loginNonceOf(key!.publicKeyRaw())).toBe(requested.searchParams.get("nonce"));
   });
 
   it("needs an appId", async () => {
@@ -199,7 +202,7 @@ describe("Telegram login", () => {
     );
   });
 
-  it("verifies the grant through the attested channel and keeps the login secret for recovery", async () => {
+  it("verifies the grant through the attested channel and keeps no secret on the wire", async () => {
     const fake = await startTelegram();
     const auth = authWith(fake);
     await auth.getTelegramOAuthUrl(REDIRECT);
@@ -207,13 +210,12 @@ describe("Telegram login", () => {
 
     expect(identity).toMatchObject({ provider: "telegram", name: "Ada Lovelace", userId: "b".repeat(64) });
     const job = fake.sentJob();
-    expect(Object.keys(job).sort()).toEqual(["action", "code_verifier", "login_secret"]);
+    expect(Object.keys(job).sort()).toEqual(["action", "code_verifier"]);
     expect(job.action).toBe("verify_telegram");
-    expect(job).not.toHaveProperty("client_nonce");
     expect(fake.verifyBody()).toMatchObject({ session_id: SESSION_ID, telegram_grant: "grant-1" });
     const credential = auth.getSocialRecoveryCredential();
     expect(credential.provider).toBe("telegram");
-    expect(credential.noncePreimage).toBe(job.login_secret);
+    expect(Object.keys(credential).sort()).toEqual(["idToken", "provider", "tokenFingerprint"]);
     expect(auth.getAuthToken()).toBe(credential.idToken);
   });
 
@@ -223,23 +225,15 @@ describe("Telegram login", () => {
     expect(auth.hasSocialRecoveryCredential()).toBe(false);
   });
 
-  it("refuses a callback whose verifier is missing", async () => {
+  it("refuses a callback whose login nonce is missing", async () => {
     const fake = await startTelegram();
     const auth = authWith(fake);
     await auth.getTelegramOAuthUrl(REDIRECT);
-    (auth as unknown as { pkceVerifier: string | null }).pkceVerifier = null;
+    (auth as unknown as { loginNonce: string | null }).loginNonce = null;
     await expect(auth.handleCallback(CALLBACK_CODE, REDIRECT)).rejects.toThrow(/did not start here/);
   });
 
-  it("refuses a callback whose login secret is missing", async () => {
-    const fake = await startTelegram();
-    const auth = authWith(fake);
-    await auth.getTelegramOAuthUrl(REDIRECT);
-    (auth as unknown as { loginSecret: string | null }).loginSecret = null;
-    await expect(auth.handleCallback(CALLBACK_CODE, REDIRECT)).rejects.toThrow(/did not start here/);
-  });
-
-  it("spends the verifier and secret on the first callback", async () => {
+  it("spends the login on the first callback", async () => {
     const fake = await startTelegram();
     const auth = authWith(fake);
     await auth.getTelegramOAuthUrl(REDIRECT);

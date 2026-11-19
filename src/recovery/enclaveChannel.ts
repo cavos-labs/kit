@@ -7,6 +7,18 @@ import {
 import { verifyNitroAttestation, type NitroAttestationPolicy } from "./nitro/attestation";
 
 /**
+ * The client's end of the channel: the login key. Its public half is sent with
+ * every job and the enclave accepts a login token only when the token's nonce
+ * is the hash of that public key.
+ */
+export interface ChannelClientKey {
+  /** The 65-byte uncompressed SEC1 public key. */
+  publicKeyRaw(): Uint8Array;
+  /** ECDH with the enclave's public key; the 32-byte x coordinate. */
+  deriveSharedSecret(peerPublicRaw: Uint8Array): Promise<Uint8Array>;
+}
+
+/**
  * Verify the enclave's attestation and return the channel key **from inside
  * it**.
  *
@@ -77,6 +89,7 @@ export async function fetchEnclaveRelease(url: string | URL): Promise<unknown> {
 export async function runEnclaveJob<T>(
   sessionId: string,
   channelKey: Uint8Array,
+  client: ChannelClientKey,
   job: unknown,
   send: (encrypted: {
     client_public_key_b64: string;
@@ -87,6 +100,7 @@ export async function runEnclaveJob<T>(
   const { encrypted, openResult } = await encryptForEnclave<T>(
     sessionId,
     channelKey,
+    client,
     utf8ToBytes(JSON.stringify(job)),
   );
   const response = await send(encrypted);
@@ -100,30 +114,21 @@ export async function runEnclaveJob<T>(
 export async function encryptForEnclave<T = unknown>(
   sessionId: string,
   enclavePublicRaw: Uint8Array,
+  client: ChannelClientKey,
   plaintext: Uint8Array,
 ): Promise<{
   encrypted: { client_public_key_b64: string; nonce_b64: string; ciphertext_b64: string };
   /** Open the enclave's sealed answer to this job. */
   openResult(sealed: { nonce_b64: string; ciphertext_b64: string }): Promise<T>;
 }> {
-  const enclavePublic = await crypto.subtle.importKey(
+  const shared = await client.deriveSharedSecret(enclavePublicRaw);
+  const hkdfKey = await crypto.subtle.importKey(
     "raw",
-    enclavePublicRaw as unknown as BufferSource,
-    { name: "ECDH", namedCurve: "P-256" },
+    shared as unknown as BufferSource,
+    "HKDF",
     false,
-    [],
+    ["deriveKey"],
   );
-  const client = await crypto.subtle.generateKey(
-    { name: "ECDH", namedCurve: "P-256" },
-    false,
-    ["deriveBits"],
-  );
-  const shared = await crypto.subtle.deriveBits(
-    { name: "ECDH", public: enclavePublic },
-    client.privateKey,
-    256,
-  );
-  const hkdfKey = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
   // One exchange, two keys: the request and the answer are sealed under
   // different `info` so neither direction can be replayed as the other
   // (RFC 9180 §9.8).
@@ -152,12 +157,9 @@ export async function encryptForEnclave<T = unknown>(
     aes,
     plaintext as unknown as BufferSource,
   );
-  const clientPublic = new Uint8Array(
-    await crypto.subtle.exportKey("raw", client.publicKey),
-  );
   return {
     encrypted: {
-      client_public_key_b64: bytesToBase64Url(clientPublic),
+      client_public_key_b64: bytesToBase64Url(client.publicKeyRaw()),
       nonce_b64: bytesToBase64Url(nonce),
       ciphertext_b64: bytesToBase64Url(new Uint8Array(ciphertext)),
     },

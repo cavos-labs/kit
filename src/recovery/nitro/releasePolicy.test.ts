@@ -7,7 +7,7 @@ import { verifyEnclaveRelease, type EnclaveReleasePolicy } from "./release";
  * the statement, standing in for a bundle Cavos has not published yet.
  */
 
-const signed: { claims: Record<string, string>; statement: unknown } = {
+const signed: { claims: Record<string, string | undefined>; statement: unknown } = {
   claims: {},
   statement: undefined,
 };
@@ -28,6 +28,11 @@ jest.mock("@freedomofpress/sigstore-browser", () => {
         extBuildTrigger: { buildTrigger: c.trigger },
         extSourceRepositoryRef: { sourceRepositoryRef: c.ref },
         extBuildConfigURI: { buildConfigURI: c.buildConfig },
+        extBuildSignerURI: { buildSignerURI: c.buildSigner },
+        extension: (oid: string) =>
+          oid === "1.3.6.1.4.1.57264.1.23" && c.environment !== undefined
+            ? { valueObj: { subs: [{ value: new TextEncoder().encode(c.environment) }] } }
+            : undefined,
       });
       return {
         payloadType: "application/vnd.in-toto+json",
@@ -43,6 +48,7 @@ const policy: EnclaveReleasePolicy = {
   repositoryId: "1333734222",
   ownerId: "216094156",
   workflow: ".github/workflows/release.yml",
+  environment: "release",
   minVersion: 2,
 };
 
@@ -68,6 +74,8 @@ function release(version: number, ref = `refs/tags/v${version}`, predicate: obje
     trigger: "push",
     ref,
     buildConfig: `https://github.com/cavos-labs/cavos-recovery/.github/workflows/release.yml@${ref}`,
+    buildSigner: `https://github.com/cavos-labs/cavos-recovery/.github/workflows/release.yml@${ref}`,
+    environment: "release",
   };
   signed.statement = {
     _type: "https://in-toto.io/Statement/v1",
@@ -100,6 +108,9 @@ describe("verifyEnclaveRelease policy", () => {
       trigger: "workflow_dispatch",
       buildConfig:
         "https://github.com/cavos-labs/cavos-recovery/.github/workflows/other.yml@refs/tags/v3",
+      buildSigner:
+        "https://github.com/cavos-labs/cavos-recovery/.github/workflows/reusable.yml@refs/tags/v3",
+      environment: "staging",
     };
     for (const [claim, value] of Object.entries(claims)) {
       release(3);
@@ -108,6 +119,30 @@ describe("verifyEnclaveRelease policy", () => {
         /signature is not valid/,
       );
     }
+  });
+
+  it("rejects a certificate without a deployment environment", async () => {
+    release(3);
+    delete signed.claims.environment;
+    await expect(verifyEnclaveRelease(bundle, pcrs, policy, now)).rejects.toThrow(
+      /not the release environment/,
+    );
+  });
+
+  it("rejects a release when the policy names another environment", async () => {
+    release(3);
+    await expect(
+      verifyEnclaveRelease(bundle, pcrs, { ...policy, environment: "production" }, now),
+    ).rejects.toThrow(/not the release environment/);
+  });
+
+  it("rejects a build signer that is not the release workflow", async () => {
+    release(3);
+    signed.claims.buildSigner =
+      "https://github.com/cavos-labs/cavos-recovery/.github/workflows/reusable.yml@refs/tags/v3";
+    await expect(verifyEnclaveRelease(bundle, pcrs, policy, now)).rejects.toThrow(
+      /not the release workflow/,
+    );
   });
 
   it("rejects refs that are not a v<N> release tag", async () => {

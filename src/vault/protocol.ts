@@ -2,6 +2,8 @@ import type { Call, InvocationsSignerDetails, TypedData } from "starknet";
 import type { PrivacyStatus, PrivacySubmission } from "../chains/starknet/privacy/session";
 import type { ConsentProof } from "../account/consent";
 import type { SocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
+import type { LoginVerifyRequest } from "../auth/enclaveLogin";
+import type { LoginStart } from "../auth/LoginHost";
 
 export const VAULT_READY = "cavos-vault:ready";
 export const VAULT_HELLO = "cavos-vault:hello";
@@ -65,6 +67,12 @@ export interface VaultMethods {
     paymasterApiKey: string;
   }): PrivacySubmission;
   forget(params: { userId: string; appSalt: string }): void;
+  /** Make this login's key and PKCE verifier in the vault; only the nonce and the challenge come back. */
+  loginStart(params: null): LoginStart;
+  /** Run the enclave login for the started login inside the vault; returns the enclave's id_token. */
+  loginVerify(params: LoginVerifyRequest): string;
+  /** Delete the login key. */
+  loginEnd(params: null): void;
   /**
    * Ask the user to confirm the action a server challenge names, then sign it
    * with the wallet's spend key. Null when this browser holds no key.

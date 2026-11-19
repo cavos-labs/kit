@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.0
+
+Breaking. Needs the matching recovery enclave release and vault bundle, and the
+backend that forwards `login_binding` to the enclave. Deploy the vault before
+the apps that use this package.
+
+- **A login key replaces the login secret.** Each login makes a non-extractable
+  P-256 key pair. Its public-key hash is the login `nonce`, and every enclave
+  job for that login is encrypted with it, so a token is only useful on that
+  key's channel. The key and the PKCE verifier live in the vault (in the page's
+  IndexedDB when `vault: false`) and no script on the page can read them. The
+  page only sees the nonce and the PKCE challenge.
+- **Email codes are bound to the login key.** `sendOtp` starts the login and
+  sends `login_binding` with the request; `verifyOtp` verifies under that same
+  key. Asking for another code starts a new login, and only the latest code can
+  be verified.
+- Removed from the wire: `nonce_preimage` on the credential, `client_nonce` in
+  `verify_email` and `verify_github`, and `login_secret` in `verify_telegram`.
+  `SocialRecoveryCredential.noncePreimage` is gone and
+  `createSocialRecoveryCredential` takes only the token.
+- Vault methods `loginStart`, `loginVerify` and `loginEnd`; `CavosAuthOptions.login`
+  and `SocialRecoveryClientOptions.loginKey` choose where the key lives.
+  `encryptForEnclave` and `runEnclaveJob` take the login key as an argument.
+- The `cavos-kit:login-secret:*` and `cavos-kit:pkce:*` `sessionStorage` entries
+  are replaced by `cavos-kit:login-nonce:*`, which holds only the public nonce.
+- **Only signed enclave releases from v3 are accepted.** The default
+  attestation policy pins no image and refuses releases before v3. A release
+  must also have been signed in the `release` deployment environment of
+  `cavos-labs/cavos-recovery`, by the release workflow as both build config and
+  build signer. `EnclaveReleasePolicy` gains a required `environment`.
+- React Native keeps its login key in the platform keystore. Enclave sign-in
+  and recovery stay unavailable there until it has WebCrypto HKDF and AES-GCM.
+
 ## 0.5.5
 
 - Fixed: after an OAuth sign-in in React Strict Mode (the Next.js dev default),

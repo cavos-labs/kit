@@ -1,3 +1,4 @@
+import { createLoginHost } from "../auth/LoginHost";
 import { consentAction, CONSENT_PREFIX, signConsent, type ConsentAction } from "../account/consent";
 import type { ControlKey } from "../chains/stellar/WebCryptoControlKey";
 import { STARKNET_NETWORKS, type StarknetNetwork } from "../chains/starknet/constants";
@@ -104,6 +105,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   // Every key, wrap and counter is filed under the app that embedded the vault,
   // so a second app on the same site cannot reach them with its own policy.
   const scope = deps.appId;
+  const login = createLoginHost({ appId: deps.appId, backendUrl: deps.backendUrl, attestation: deps.attestation });
   const queues = new Map<string, Promise<unknown>>();
 
   function connectedChain(userId: string, appSalt: string) {
@@ -333,6 +335,9 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
     async privacyWithdraw(params) {
       return privacyOperation(params, "withdraw", (session, amount) => session.withdraw(params.token, params.recipient, amount));
     },
+    loginStart: () => login.start(),
+    loginVerify: (request) => login.verify(request),
+    loginEnd: () => login.end(),
     async forget({ userId, appSalt }) {
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.

@@ -1,3 +1,5 @@
+import "fake-indexeddb/auto";
+import { WebCryptoLoginKey } from "../auth/loginKey";
 import { encryptForEnclave, fetchEnclaveRelease } from "./enclaveChannel";
 
 /**
@@ -36,7 +38,12 @@ describe("the channel to the enclave", () => {
     const enclave = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
     const enclavePublic = new Uint8Array(await crypto.subtle.exportKey("raw", enclave.publicKey));
     const job = new TextEncoder().encode('{"action":"enroll"}');
-    const { encrypted, openResult } = await encryptForEnclave(sessionId, enclavePublic, job);
+    const { encrypted, openResult } = await encryptForEnclave(
+      sessionId,
+      enclavePublic,
+      await WebCryptoLoginKey.create("channel-test"),
+      job,
+    );
     const keys = await enclaveKeys(enclave.privateKey, unb64(encrypted.client_public_key_b64), sessionId);
     const aad = new TextEncoder().encode(sessionId);
     const seal = async (key: CryptoKey, result: unknown) => {

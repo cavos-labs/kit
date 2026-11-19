@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import type { CavosAuth } from "./CavosAuth";
 
 /** The app the fixture's "backend" prefixes onto the nonce. */

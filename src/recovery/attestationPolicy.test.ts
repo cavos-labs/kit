@@ -39,30 +39,18 @@ describe("resolveSocialRecoveryPolicy", () => {
 });
 
 describe("shipped attestation defaults", () => {
-  const measurements = () => {
-    const { pcr0 = [] } = DEFAULT_SOCIAL_RECOVERY_ATTESTATION;
-    return Array.isArray(pcr0) ? pcr0 : [pcr0];
-  };
-
   it("accepts signed releases of the public cavos-recovery repository", () => {
     expect(DEFAULT_SOCIAL_RECOVERY_ATTESTATION.release).toEqual({
       repository: "cavos-labs/cavos-recovery",
       repositoryId: "1333734222",
       ownerId: "216094156",
       workflow: ".github/workflows/release.yml",
-      minVersion: 1,
+      environment: "release",
+      minVersion: 3,
     });
   });
 
-  // This is deliberately allowed to be empty right now: the enclave image has
-  // not been published, and an empty list fails closed, so social recovery is
-  // simply unavailable rather than accepting an unverified enclave. The shape
-  // check below is what stops a placeholder from shipping as if it were real.
-  it("pins full-length SHA-384 measurements, when it pins any", () => {
-    for (const measurement of measurements()) {
-      expect(measurement).toMatch(/^[0-9a-f]{96}$/);
-    }
-    // A rollout window needs the incoming and outgoing image to both verify.
-    expect(new Set(measurements()).size).toBe(measurements().length);
+  it("pins no image, so only signed releases are accepted", () => {
+    expect(DEFAULT_SOCIAL_RECOVERY_ATTESTATION.pcr0).toBeUndefined();
   });
 });

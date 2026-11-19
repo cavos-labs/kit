@@ -17,6 +17,7 @@ const release: EnclaveReleasePolicy = {
   repositoryId: "1333734222",
   ownerId: "216094156",
   workflow: ".github/workflows/release.yml",
+  environment: "release",
   minVersion: 1,
 };
 const document = () => Uint8Array.from(Buffer.from(REAL_ATTESTATION_B64, "base64"));

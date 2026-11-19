@@ -1,5 +1,6 @@
+import "fake-indexeddb/auto";
 import { CavosAuth } from "./CavosAuth";
-import { loginNonce, requiresLoginBinding } from "./loginBinding";
+import { loginNonceOf, pkceChallenge, requiresLoginBinding } from "./loginBinding";
 import { ENCLAVE_GITHUB_ISSUER } from "../recovery/SocialRecoveryCredential";
 import { verifyNitroAttestation } from "../recovery/nitro/attestation";
 
@@ -96,7 +97,7 @@ async function startGitHub(options: FakeOptions = {}): Promise<FakeGitHub> {
       sub: "b".repeat(64),
       name: "Ada Lovelace",
       preferred_username: "ada",
-      nonce: `${APP_ID}.${job.client_nonce as string}`,
+      nonce: `${APP_ID}.${loginNonceOf(unb64(body.job.client_public_key_b64))}`,
     });
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const sealed = await crypto.subtle.encrypt(
@@ -151,7 +152,7 @@ describe("GitHub login", () => {
     expect(url).toBe(fake.authorizeUrl());
 
     await auth.handleCallback(CALLBACK_CODE, REDIRECT);
-    expect(loginNonce(fake.sentJob().code_verifier as string)).toBe(challenge);
+    expect(pkceChallenge(fake.sentJob().code_verifier as string)).toBe(challenge);
   });
 
   it("needs an appId", async () => {
@@ -186,18 +187,18 @@ describe("GitHub login", () => {
     await expect(auth.getGitHubOAuthUrl(REDIRECT)).rejects.toThrow(/not the one this login asked for/);
   });
 
-  it("verifies the grant through the attested channel and keeps the login secret for recovery", async () => {
+  it("verifies the grant through the attested channel and keeps no secret on the wire", async () => {
     const fake = await startGitHub();
     const auth = authWith(fake);
     await auth.getGitHubOAuthUrl(REDIRECT);
     const identity = await auth.handleCallback(`?cavos_auth_code=${CALLBACK_CODE}`, REDIRECT);
 
     expect(identity).toMatchObject({ provider: "github", name: "Ada Lovelace", userId: "b".repeat(64) });
-    expect(fake.sentJob()).toMatchObject({ action: "verify_github" });
+    expect(Object.keys(fake.sentJob()).sort()).toEqual(["action", "code_verifier"]);
     expect(fake.verifyBody()).toMatchObject({ session_id: SESSION_ID, github_grant: "grant-1" });
     const credential = auth.getSocialRecoveryCredential();
     expect(credential.provider).toBe("github");
-    expect(loginNonce(credential.noncePreimage!)).toBe(fake.sentJob().client_nonce);
+    expect(Object.keys(credential).sort()).toEqual(["idToken", "provider", "tokenFingerprint"]);
     expect(auth.getAuthToken()).toBe(credential.idToken);
   });
 
@@ -207,7 +208,7 @@ describe("GitHub login", () => {
     expect(auth.hasSocialRecoveryCredential()).toBe(false);
   });
 
-  it("spends the verifier and secret on the first callback", async () => {
+  it("spends the login on the first callback", async () => {
     const fake = await startGitHub();
     const auth = authWith(fake);
     await auth.getGitHubOAuthUrl(REDIRECT);
