@@ -30,6 +30,7 @@ const ENCLAVE_LOGIN_ERRORS: Record<string, string> = {
   rate_limited: "Too many attempts. Try again in a few minutes.",
   email_unavailable: "Email sign-in is unavailable right now. Try again later.",
   enclave_unavailable: "Sign-in is unavailable right now. Try again later.",
+  enclave_release_unavailable: "Sign-in is unavailable right now. Try again later.",
   code_rejected: "That code is wrong or has expired. Request a new one.",
   github_rejected: "GitHub did not accept this sign-in. Try again.",
   telegram_rejected: "Telegram did not accept this sign-in. Try again.",
@@ -60,6 +61,11 @@ const VERIFIERS = {
   },
 } as const;
 
+/** The request field that runs a login on an earlier enclave release; empty for the current one. */
+export function enclaveReleaseOf(login: { enclaveRelease?: number }): { enclave_release?: number } {
+  return login.enclaveRelease === undefined ? {} : { enclave_release: login.enclaveRelease };
+}
+
 /** POST JSON to the Cavos backend, turning the enclave login error codes into messages a user can act on. */
 export async function enclavePost(backendUrl: string, path: string, body: unknown): Promise<any> {
   const response = await fetch(`${backendUrl}${path}`, {
@@ -89,7 +95,8 @@ export async function runEnclaveLogin(
   request: LoginVerifyRequest,
 ): Promise<string> {
   const verifier = VERIFIERS[request.provider];
-  const session = await enclavePost(opts.backendUrl, "/api/oauth/email/session", { app_id: opts.appId });
+  const release = enclaveReleaseOf(key);
+  const session = await enclavePost(opts.backendUrl, "/api/oauth/email/session", { app_id: opts.appId, ...release });
   const sessionId: unknown = session?.session_id;
   if (typeof sessionId !== "string") {
     throw new Error("kit/auth: the enclave session carried no id");
@@ -113,7 +120,8 @@ export async function runEnclaveLogin(
     channelKey,
     key,
     job,
-    (sealed) => enclavePost(opts.backendUrl, verifier.path, { session_id: sessionId, job: sealed, ...grant }),
+    (sealed) =>
+      enclavePost(opts.backendUrl, verifier.path, { session_id: sessionId, job: sealed, ...grant, ...release }),
   );
   if (result.result !== verifier.result || typeof result.id_token !== "string") {
     throw new Error(verifier.failure);

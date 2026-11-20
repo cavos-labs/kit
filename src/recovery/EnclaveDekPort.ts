@@ -2,7 +2,7 @@ import { base64UrlToBytes } from "../crypto/encoding";
 import { readTokenSubject } from "./SocialRecoveryCredential";
 import type { EnclaveDekPort } from "../secret/DeviceSecret";
 import { parseWrappedDEK } from "../secret/wrap";
-import type { SocialRecoveryClient } from "./SocialRecoveryClient";
+import { LOGIN_RELEASE_MISMATCH, type SocialRecoveryClient } from "./SocialRecoveryClient";
 
 export function toEnclaveDekPort(
   client: Pick<SocialRecoveryClient, "enroll" | "recover" | "lookupDekEnrollment">,
@@ -33,6 +33,10 @@ export function toEnclaveDekPort(
         }));
       } catch (error) {
         if (error instanceof Error && error.message.includes("recovery_revoked")) return { kind: "opted-out" };
+        // The login ran on an earlier release, to recover, and the current one
+        // cannot verify its token. The device holds the DEK, so the wallet
+        // opens now and is sealed at the next login.
+        if (error instanceof Error && error.message.includes(LOGIN_RELEASE_MISMATCH)) return { kind: "deferred" };
         throw error;
       }
       if (result.result !== "confirmed") return { kind: "enrolled" };

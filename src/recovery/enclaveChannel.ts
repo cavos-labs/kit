@@ -16,6 +16,8 @@ export interface ChannelClientKey {
   publicKeyRaw(): Uint8Array;
   /** ECDH with the enclave's public key; the 32-byte x coordinate. */
   deriveSharedSecret(peerPublicRaw: Uint8Array): Promise<Uint8Array>;
+  /** The enclave release the login ran on, when it is not the current one. */
+  readonly enclaveRelease?: number;
 }
 
 /**
