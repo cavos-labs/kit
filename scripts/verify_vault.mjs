@@ -50,9 +50,21 @@ function argument(name, fallback) {
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+// Says who is asking, so the site's firewall can allow this monitor by name
+// rather than have it pose as a browser.
+const USER_AGENT = "cavos-vault-monitor (+https://github.com/cavos-labs/kit/blob/main/scripts/verify_vault.mjs)";
+
 async function download(url) {
-  const response = await fetch(url, { redirect: "follow", headers: { "cache-control": "no-cache" } });
-  if (!response.ok) throw new Error(`${url} answered ${response.status}`);
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: { "cache-control": "no-cache", "user-agent": USER_AGENT },
+  });
+  if (!response.ok) {
+    // A firewall refusing the monitor is not a changed vault; say which it was.
+    const mitigated = response.headers.get("cf-mitigated");
+    const by = mitigated ? ` (refused by the site's firewall: ${mitigated})` : "";
+    throw new Error(`${url} answered ${response.status}${by}`);
+  }
   return { bytes: Buffer.from(await response.arrayBuffer()), headers: response.headers };
 }
 
