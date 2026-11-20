@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.1
+
+Needs the backend that tracks the enclave release of each recovery record.
+Deploy the vault before the apps that use this package.
+
+- **Recovery across enclave releases.** Each enclave release seals under a key
+  only its own image can use, so a recovery record is opened by the release
+  that sealed it. A device that still holds the wallet seals it again with the
+  current release at the next sign-in, with no change for the app.
+- **A second sign-in when the record is older than the login.** The enclave
+  signs email, GitHub and Telegram tokens with a key of its release. When such
+  a user recovers on a new device and their record was sealed by an earlier
+  release, the connect fails with `SIGN_IN_AGAIN_TO_RECOVER` and a sign-in
+  within the hour runs on that release, which then recovers the wallet. Google and
+  Apple users are not affected.
+- `LoginStart` and the login key carry `enclaveRelease` when a login does not
+  run on the current release.
+
 ## 0.6.0
 
 Breaking. Needs the matching recovery enclave release and vault bundle, and the
