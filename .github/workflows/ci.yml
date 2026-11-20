@@ -36,6 +36,28 @@ jobs:
 
       - run: npm run build
 
+      # The vault scripts are what vault.cavos.xyz serves, and the vault monitor
+      # compares the live site against the published package byte for byte. That
+      # only means something if the same source always gives the same bytes, so
+      # a second build must reproduce the first.
+      - name: Check the vault build is reproducible
+        run: |
+          first=$(sha256sum dist/vault-browser/*.js)
+          npm run build
+          second=$(sha256sum dist/vault-browser/*.js)
+          echo "$second"
+          if [[ "$first" != "$second" ]]; then
+            echo "::error::Two builds of the same commit produced different vault scripts."
+            printf 'first build:\n%s\nsecond build:\n%s\n' "$first" "$second"
+            exit 1
+          fi
+          {
+            echo "### Vault scripts (sha256)"
+            echo '```'
+            echo "$second"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - run: npm test
 
       # The published tarball is built here, from a clean checkout — never from a
