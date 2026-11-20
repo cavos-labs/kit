@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { SocialRecoveryClient } from "./SocialRecoveryClient";
+import { SIGN_IN_AGAIN_TO_RECOVER, SocialRecoveryClient } from "./SocialRecoveryClient";
 import { createSocialRecoveryCredential } from "./SocialRecoveryCredential";
 import { verifyNitroAttestation } from "./nitro/attestation";
 import { WebCryptoLoginKey } from "../auth/loginKey";
@@ -77,5 +77,57 @@ describe("SocialRecoveryClient login key", () => {
     await expect(client.recover({ walletAddress: "0x1", credential })).rejects.toThrow("not authenticated");
     expect(sent[0].client_public_key_b64).toBe(b64(key.publicKeyRaw()));
     await WebCryptoLoginKey.remove("elsewhere");
+  });
+});
+
+describe("SocialRecoveryClient across enclave releases", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(async () => {
+    globalThis.fetch = realFetch;
+    await WebCryptoLoginKey.signInWith(APP_ID, null);
+    await WebCryptoLoginKey.remove(APP_ID);
+  });
+
+  const credential = createSocialRecoveryCredential(token());
+  const client = () =>
+    new SocialRecoveryClient({ baseUrl: "https://cavos.test", appId: APP_ID, attestation: {} as never });
+
+  function refuseSessions(status: number, body: unknown) {
+    const started: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: { body: string }) => {
+      started.push(JSON.parse(init!.body));
+      return { ok: false, status, text: async () => JSON.stringify(body) };
+    }) as unknown as typeof fetch;
+    return started;
+  }
+
+  it("asks for another sign-in, on the release that holds the record, when a recovery needs one", async () => {
+    refuseSessions(409, { error: "login_release_mismatch", enclave_release: 4 });
+    await WebCryptoLoginKey.create(APP_ID);
+
+    await expect(client().recover({ walletAddress: "0x1", credential })).rejects.toThrow(SIGN_IN_AGAIN_TO_RECOVER);
+    expect((await WebCryptoLoginKey.create(APP_ID)).enclaveRelease).toBe(4);
+  });
+
+  it("tells the control plane which release the login ran on", async () => {
+    const started = refuseSessions(503, { error: "enclave_unavailable" });
+    await WebCryptoLoginKey.create(APP_ID);
+    await expect(client().recover({ walletAddress: "0x1", credential })).rejects.toThrow("503");
+    await WebCryptoLoginKey.signInWith(APP_ID, 4);
+    await WebCryptoLoginKey.create(APP_ID);
+    await expect(client().recover({ walletAddress: "0x1", credential })).rejects.toThrow("503");
+
+    expect(started[0]).not.toHaveProperty("login_release");
+    expect(started[1].login_release).toBe(4);
+  });
+
+  it("does not change the next sign-in for any other refusal, or for an enrolment", async () => {
+    await WebCryptoLoginKey.create(APP_ID);
+    refuseSessions(409, { error: "provider_mismatch", enrolled_provider: "apple" });
+    await expect(client().recover({ walletAddress: "0x1", credential })).rejects.toThrow("provider_mismatch");
+    refuseSessions(409, { error: "login_release_mismatch", enclave_release: 5 });
+    await expect(client().enroll({ walletAddress: "0x1", credential })).rejects.toThrow("login_release_mismatch");
+
+    expect((await WebCryptoLoginKey.create(APP_ID)).enclaveRelease).toBeUndefined();
   });
 });

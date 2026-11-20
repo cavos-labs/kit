@@ -39,7 +39,13 @@ export interface EnclaveDekPort {
     address: string;
     credential: SocialRecoveryCredential;
     dek: MasterDEK;
-  }): Promise<{ kind: "enrolled" } | { kind: "already-enrolled"; address: string } | { kind: "opted-out" }>;
+  }): Promise<
+    | { kind: "enrolled" }
+    | { kind: "already-enrolled"; address: string }
+    | { kind: "opted-out" }
+    /** Not sealed now; the next login seals it. */
+    | { kind: "deferred" }
+  >;
   wrapDekToFactor(params: {
     address: string;
     credential: SocialRecoveryCredential;

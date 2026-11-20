@@ -32,6 +32,17 @@ describe("toEnclaveDekPort", () => {
     await expect(port.enrollDek({ address: "Addr1", credential, dek })).resolves.toEqual({ kind: "opted-out" });
   });
 
+  it("leaves sealing for the next login when this one ran on an earlier enclave release", async () => {
+    const dek = generateMasterDEK();
+    const enroll = jest.fn(async () => {
+      throw new Error(
+        'kit/social-recovery: /api/recovery/social/sessions -> 409 {"error":"login_release_mismatch","enclave_release":5}',
+      );
+    });
+    const port = toEnclaveDekPort({ enroll, recover: jest.fn() } as unknown as SocialRecoveryClient);
+    await expect(port.enrollDek({ address: "Addr1", credential, dek })).resolves.toEqual({ kind: "deferred" });
+  });
+
   it("still raises other enroll failures", async () => {
     const dek = generateMasterDEK();
     const enroll = jest.fn(async () => {

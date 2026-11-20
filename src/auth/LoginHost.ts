@@ -6,6 +6,8 @@ import { WebCryptoLoginKey } from "./loginKey";
 export interface LoginStart {
   nonce: string;
   codeChallenge: string;
+  /** The enclave release this login runs on, when it is not the current one. */
+  enclaveRelease?: number;
 }
 
 /**
@@ -30,7 +32,11 @@ export function createLoginHost(opts: EnclaveLoginOptions): LoginHost {
   return {
     async start() {
       const key = await WebCryptoLoginKey.create(opts.appId);
-      return { nonce: loginNonceOf(key.publicKeyRaw()), codeChallenge: pkceChallenge(key.codeVerifier) };
+      return {
+        nonce: loginNonceOf(key.publicKeyRaw()),
+        codeChallenge: pkceChallenge(key.codeVerifier),
+        ...(key.enclaveRelease === undefined ? {} : { enclaveRelease: key.enclaveRelease }),
+      };
     },
     async verify(request) {
       const key = await WebCryptoLoginKey.load(opts.appId);

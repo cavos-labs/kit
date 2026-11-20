@@ -123,6 +123,26 @@ describe("enclave email login", () => {
     });
   });
 
+  it("runs the whole login on an earlier enclave release when one holds the user's recovery", async () => {
+    const enclave = await startEnclave();
+    const auth = authWith(enclave);
+    await WebCryptoLoginKey.signInWith(APP_ID, 4);
+    try {
+      await auth.sendOtp("ada@example.com");
+      await auth.verifyOtp("ada@example.com", CODE);
+    } finally {
+      await WebCryptoLoginKey.signInWith(APP_ID, null);
+    }
+
+    const sent = enclave.fetch.mock.calls.map(([url, init]) => [new URL(url).pathname, JSON.parse(init.body)]);
+    expect(sent.map(([path]) => path)).toEqual([
+      "/api/oauth/email/code",
+      "/api/oauth/email/session",
+      "/api/oauth/email/verify",
+    ]);
+    for (const [, body] of sent) expect(body.enclave_release).toBe(4);
+  });
+
   it("verifies under the key the code was bound to, with no secret on the wire", async () => {
     const enclave = await startEnclave();
     const auth = authWith(enclave);

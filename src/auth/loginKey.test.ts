@@ -50,6 +50,35 @@ describe("the login key", () => {
     await WebCryptoLoginKey.remove("other");
   });
 
+  it("runs the logins that follow on a named enclave release, until told otherwise", async () => {
+    expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBeUndefined();
+
+    await WebCryptoLoginKey.signInWith("app", 4);
+    expect((await WebCryptoLoginKey.load("app"))?.enclaveRelease).toBeUndefined();
+    expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBe(4);
+    expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBe(4);
+    expect((await WebCryptoLoginKey.load("app"))?.enclaveRelease).toBe(4);
+    expect((await WebCryptoLoginKey.create("other")).enclaveRelease).toBeUndefined();
+    await WebCryptoLoginKey.remove("other");
+
+    await WebCryptoLoginKey.signInWith("app", null);
+    expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBeUndefined();
+  });
+
+  it("goes back to the current release by itself after an hour", async () => {
+    const now = jest.spyOn(Date, "now");
+    try {
+      await WebCryptoLoginKey.signInWith("app", 4);
+      now.mockReturnValue(Date.now() + 59 * 60_000);
+      expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBe(4);
+      now.mockReturnValue(Date.now() + 2 * 60_000);
+      expect((await WebCryptoLoginKey.create("app")).enclaveRelease).toBeUndefined();
+    } finally {
+      now.mockRestore();
+      await WebCryptoLoginKey.signInWith("app", null);
+    }
+  });
+
   it("is gone after remove", async () => {
     await WebCryptoLoginKey.create("app");
     await WebCryptoLoginKey.remove("app");
@@ -68,6 +97,15 @@ describe("the page login host", () => {
       nonce: loginNonceOf(key!.publicKeyRaw()),
       codeChallenge: pkceChallenge(key!.codeVerifier),
     });
+  });
+
+  it("says which enclave release the login runs on when it is not the current one", async () => {
+    await WebCryptoLoginKey.signInWith("app", 4);
+    try {
+      expect((await host.start()).enclaveRelease).toBe(4);
+    } finally {
+      await WebCryptoLoginKey.signInWith("app", null);
+    }
   });
 
   it("refuses to verify when no login is in progress", async () => {

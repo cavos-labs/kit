@@ -8,7 +8,7 @@ import {
   type SocialRecoveryCredential,
 } from "../recovery/SocialRecoveryCredential";
 import type { AttestationPolicy } from "../recovery/SocialRecoveryClient";
-import { enclavePost } from "./enclaveLogin";
+import { enclavePost, enclaveReleaseOf } from "./enclaveLogin";
 import { createLoginHost, type LoginHost, type LoginStart } from "./LoginHost";
 import { assertLoginBinding, LOGIN_NOT_STARTED, requiresLoginBinding } from "./loginBinding";
 
@@ -266,11 +266,12 @@ export class CavosAuth implements AuthProvider {
    */
   async sendOtp(email: string): Promise<void> {
     const appId = this.requireAppId();
-    const { nonce } = await this.startLogin();
+    const login = await this.startLogin();
     await enclavePost(this.backendUrl, "/api/oauth/email/code", {
       app_id: appId,
       email: normalizeEmail(email),
-      login_binding: nonce,
+      login_binding: login.nonce,
+      ...enclaveReleaseOf(login),
     });
   }
 

@@ -8,7 +8,22 @@ interface StoredLoginKey {
   privateKey: CryptoKey;
   publicRaw: Uint8Array;
   verifier: string;
+  enclaveRelease?: number;
 }
+
+interface StoredRelease {
+  enclaveRelease: number;
+  expiresAt: number;
+}
+
+const releaseRecord = (scope: string) => `enclave-release:${scope}`;
+
+/**
+ * How long `signInWith` holds. Long enough to sign in again and recover; short
+ * enough that a browser is not left signing in with a release that has since
+ * been turned off.
+ */
+const SIGN_IN_WITH_RELEASE_MS = 60 * 60_000;
 
 /**
  * The login key: a non-extractable WebCrypto ECDH P-256 key pair kept in
@@ -20,6 +35,12 @@ interface StoredLoginKey {
  * beside it, so whoever holds the key holds both and neither is ever readable
  * by a script. In the vault the record lives in the vault's origin; without a
  * vault it lives in the page's, which is weaker but still non-extractable.
+ *
+ * A login normally runs on the current enclave release. `signInWith` makes the
+ * following logins run on an earlier one, for a user whose recovery record
+ * that release sealed: the enclave signs email, GitHub and Telegram tokens
+ * with a key of its release, and only the release that sealed a record can
+ * open it.
  */
 export class WebCryptoLoginKey implements ChannelClientKey {
   private constructor(
@@ -27,6 +48,8 @@ export class WebCryptoLoginKey implements ChannelClientKey {
     private readonly publicRaw: Uint8Array,
     /** The PKCE verifier of this login; only the enclave job ever sends it. */
     readonly codeVerifier: string,
+    /** The enclave release this login runs on, when it is not the current one. */
+    readonly enclaveRelease?: number,
   ) {}
 
   /** Make a fresh login key and verifier, replacing any stored for `scope`. */
@@ -35,15 +58,33 @@ export class WebCryptoLoginKey implements ChannelClientKey {
     const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
     const publicRaw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
     const verifier = bytesToBase64Url(secureRandomBytes(32));
-    await run("readwrite", (store) => store.put({ privateKey: pair.privateKey, publicRaw, verifier }, scope));
-    return new WebCryptoLoginKey(pair.privateKey, publicRaw, verifier);
+    const asked = (await run("readonly", (store) => store.get(releaseRecord(scope)))) as StoredRelease | undefined;
+    const enclaveRelease = asked && asked.expiresAt > Date.now() ? asked.enclaveRelease : undefined;
+    const stored: StoredLoginKey = { privateKey: pair.privateKey, publicRaw, verifier, enclaveRelease };
+    await run("readwrite", (store) => store.put(stored, scope));
+    return new WebCryptoLoginKey(pair.privateKey, publicRaw, verifier, enclaveRelease);
+  }
+
+  /**
+   * Run the logins of the next hour on `enclaveRelease`, or on the current
+   * release again when it is null. The login in progress is not affected.
+   */
+  static async signInWith(scope: string, enclaveRelease: number | null): Promise<void> {
+    if (typeof indexedDB === "undefined") return;
+    if (enclaveRelease === null) await run("readwrite", (store) => store.delete(releaseRecord(scope)));
+    else {
+      const asked: StoredRelease = { enclaveRelease, expiresAt: Date.now() + SIGN_IN_WITH_RELEASE_MS };
+      await run("readwrite", (store) => store.put(asked, releaseRecord(scope)));
+    }
   }
 
   /** The stored login key for `scope`, or null when no login is in progress. */
   static async load(scope: string): Promise<WebCryptoLoginKey | null> {
     if (typeof indexedDB === "undefined") return null;
     const stored = (await run("readonly", (store) => store.get(scope))) as StoredLoginKey | undefined;
-    return stored ? new WebCryptoLoginKey(stored.privateKey, stored.publicRaw, stored.verifier) : null;
+    return stored
+      ? new WebCryptoLoginKey(stored.privateKey, stored.publicRaw, stored.verifier, stored.enclaveRelease)
+      : null;
   }
 
   static async remove(scope: string): Promise<void> {

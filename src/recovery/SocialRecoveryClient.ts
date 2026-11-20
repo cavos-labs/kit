@@ -57,6 +57,17 @@ export type ChainAuthorization =
       expires_at: number;
     };
 
+/**
+ * The wallet's recovery record was sealed by an earlier enclave release, and
+ * the token of this login only verifies on the release that issued it. The
+ * next login runs on the release that holds the record.
+ */
+export const SIGN_IN_AGAIN_TO_RECOVER =
+  "kit/social-recovery: this wallet's recovery is held by an earlier enclave release. Sign in again to recover it.";
+
+/** The control plane's refusal of a session whose login ran on another release than the record needs. */
+export const LOGIN_RELEASE_MISMATCH = "login_release_mismatch";
+
 export interface SocialRecoveryResult {
   result: "enrolled" | "recovered" | "confirmed";
   [key: string]: unknown;
@@ -171,11 +182,12 @@ export class SocialRecoveryClient {
     authorizations?: ChainAuthorization[];
     recipientPublicSec1?: Uint8Array;
   }): Promise<{ sessionId: string; result: SocialRecoveryResult }> {
-    const session = await this.start(
-      params.walletAddress,
-      "recover",
-      params.credential,
-    );
+    const session = await this.start(params.walletAddress, "recover", params.credential).catch(async (error) => {
+      const release = mismatchedRelease(error);
+      if (release === null) throw error;
+      await WebCryptoLoginKey.signInWith(this.opts.appId, release);
+      throw new Error(SIGN_IN_AGAIN_TO_RECOVER);
+    });
     if (!session.sealed_record_b64) {
       throw new Error("kit/social-recovery: enrollment record is missing");
     }
@@ -195,6 +207,7 @@ export class SocialRecoveryClient {
         ? { stellar_recipient_pubkey_b64: bytesToBase64Url(params.recipientPublicSec1) }
         : {}),
     });
+    await WebCryptoLoginKey.signInWith(this.opts.appId, null);
     return { sessionId: session.session_id, result };
   }
 
@@ -205,12 +218,13 @@ export class SocialRecoveryClient {
     });
   }
 
-  private start(
+  private async start(
     walletAddress: string,
     action: SocialRecoveryAction,
     credential: SocialRecoveryCredential,
     dekEnroll = false,
   ): Promise<StartedSession> {
+    const loginRelease = (await this.loginKey())?.enclaveRelease;
     return this.fetchJson("/api/recovery/social/sessions", {
       method: "POST",
       body: JSON.stringify({
@@ -224,6 +238,7 @@ export class SocialRecoveryClient {
         provider: credential.provider,
         auth_challenge: credential.tokenFingerprint,
         ...(dekEnroll ? { dek_enroll: true } : {}),
+        ...(loginRelease === undefined ? {} : { login_release: loginRelease }),
       }),
     });
   }
@@ -233,7 +248,7 @@ export class SocialRecoveryClient {
     channelKey: Uint8Array,
     job: unknown,
   ): Promise<SocialRecoveryResult> {
-    const client = await (this.opts.loginKey?.() ?? WebCryptoLoginKey.load(this.opts.appId));
+    const client = await this.loginKey();
     if (!client) throw new Error("kit/social-recovery: no sign-in in progress. Sign in again.");
     return runEnclaveJob<SocialRecoveryResult>(sessionId, channelKey, client, job, (encrypted) =>
       this.fetchJson(`/api/recovery/social/sessions/${sessionId}/job`, {
@@ -241,6 +256,10 @@ export class SocialRecoveryClient {
         body: JSON.stringify(encrypted),
       }),
     );
+  }
+
+  private loginKey(): Promise<ChannelClientKey | null> {
+    return this.opts.loginKey?.() ?? WebCryptoLoginKey.load(this.opts.appId);
   }
 
   private async fetchJson(path: string, init?: RequestInit): Promise<any> {
@@ -254,6 +273,14 @@ export class SocialRecoveryClient {
     }
     return response.json();
   }
+}
+
+/** The release a refused session says to sign in with, or null for any other failure. */
+function mismatchedRelease(error: unknown): number | null {
+  const refusal = /-> 409 (\{.*\})$/s.exec(error instanceof Error ? error.message : "")?.[1];
+  if (!refusal?.includes(LOGIN_RELEASE_MISMATCH)) return null;
+  const release: unknown = JSON.parse(refusal).enclave_release;
+  return typeof release === "number" && Number.isInteger(release) && release > 0 ? release : null;
 }
 
 /**
