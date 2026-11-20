@@ -1,0 +1,33 @@
+name: Vault monitor
+
+# Checks, every hour, that vault.cavos.xyz serves exactly the vault scripts a
+# published @cavos/kit build contains. A failed run means the vault a browser
+# is being served is not one this repository built, and should be treated as an
+# incident until explained. See scripts/verify_vault.mjs.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-monitor
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Compare the served vault with the published build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # No install: the script has no dependencies, so nothing from the
+      # dependency tree runs before the comparison.
+      - run: node scripts/verify_vault.mjs
