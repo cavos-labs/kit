@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.2
+
+Security fixes. Deploy the vault from this version.
+
+- **The vault reads a muxed Stellar source as the account.** An operation, a
+  transaction or a fee bump sourced by a muxed address (`M…`) of the account
+  was neither counted against the limits nor shown, and was signed without
+  asking. Sources are now reduced to their base address first.
+- **The vault asks before `bumpSequence`.** Raised to its maximum, it makes
+  every later transaction of the account invalid.
+- **Sign-in only comes from the one-time callback code.** `handleCallback` no
+  longer reads a token from `?auth_data=` or `?zk_auth_data=`, and throws when
+  the callback carries no `cavos_auth_code`. A token is only accepted from
+  Google, Apple or the enclave, as the answer to a login this client started.
+  The React provider and the React Native client follow the same rule.
+
 ## 0.6.1
 
 Needs the backend that tracks the enclave release of each recovery record.
