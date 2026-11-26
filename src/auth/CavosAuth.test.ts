@@ -1,15 +1,14 @@
 import { CavosAuth } from "./CavosAuth";
 import { createSocialRecoveryCredential } from "../recovery/SocialRecoveryCredential";
-import { beginLogin, FIXTURE_APP_ID } from "./loginFixture";
+import { answerLogin, beginLogin, FIXTURE_APP_ID } from "./loginFixture";
 import { loginNonceOf } from "./loginBinding";
 import { WebCryptoLoginKey } from "./loginKey";
 
 /**
- * `handleCallback(authData)` is the pure, network-free seam into
- * `identityFromAuthData` — it only base64-decodes the JWT payload and projects
- * claims onto an `Identity`. These tests lock in that projection, especially
- * the optional `name` claim (present on Google's id_token, absent on the
- * enclave-issued token used by email login).
+ * `answerLogin` finishes a login with a given token, as the callback exchange
+ * would. These tests lock in how its claims project onto an `Identity`,
+ * especially the optional `name` claim (present on Google's id_token, absent on
+ * the enclave-issued token used by email login).
  */
 
 // Build a JWT-shaped string from an arbitrary claims object. Only the payload
@@ -54,7 +53,8 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
   it("reads the standard OIDC `name` claim when present (Google id_token)", async () => {
     const auth = new CavosAuth();
-    const id = await auth.handleCallback(
+    const id = await answerLogin(
+      auth,
       jwt({
         nonce: await beginLogin(auth),
         iss: "https://accounts.google.com",
@@ -71,7 +71,8 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
   it("yields name: undefined when the token has no `name` claim (enclave email token)", async () => {
     const auth = new CavosAuth();
-    const id = await auth.handleCallback(
+    const id = await answerLogin(
+      auth,
       jwt({
         iss: "https://enclave.cavos.xyz",
         sub: "email-subject-456",
@@ -87,17 +88,21 @@ describe("CavosAuth.handleCallback -> Identity", () => {
     expect(id.provider).toBe("email");
   });
 
-  it("accepts ?auth_data=<jwt> callback strings", async () => {
+  it("never reads a token from the callback URL", async () => {
     const auth = new CavosAuth();
-    const token = jwt({
-      iss: "https://accounts.google.com",
-      sub: "u",
-      name: "From URL",
-      nonce: await beginLogin(auth),
-    });
-    const id = await auth.handleCallback(`?auth_data=${token}`);
-    expect(id.userId).toBe("u");
-    expect(id.name).toBe("From URL");
+    const token = jwt({ iss: "https://accounts.google.com", sub: "u", nonce: await beginLogin(auth) });
+    for (const callback of [`?auth_data=${token}`, `?zk_auth_data=${token}`, token]) {
+      await expect(auth.handleCallback(callback, "https://app.test/callback")).rejects.toThrow("no sign-in code");
+    }
+    expect(auth.getAuthToken()).toBeNull();
+  });
+
+  it("refuses a token from an issuer no login is bound to, signed or not", async () => {
+    const auth = new CavosAuth();
+    await beginLogin(auth);
+    const forged = jwt({ iss: "https://attacker.example", sub: "victim-sub", email: "forged@attacker.example" });
+    await expect(answerLogin(auth, forged)).rejects.toThrow("are not accepted");
+    expect(auth.getAuthToken()).toBeNull();
   });
 
   it("keeps only an in-memory token fingerprint for one-session recovery binding", async () => {
@@ -110,7 +115,7 @@ describe("CavosAuth.handleCallback -> Identity", () => {
       iat: 1_700_000_000,
       exp: 1_700_003_600,
     });
-    await auth.handleCallback(token);
+    await answerLogin(auth, token);
 
     const credential = auth.consumeSocialRecoveryCredential();
     expect(credential).toMatchObject(createSocialRecoveryCredential(token));
@@ -136,19 +141,19 @@ describe("CavosAuth.handleCallback -> Identity", () => {
 
     // No login in flight: a callback carrying someone else's code.
     const idle = new CavosAuth();
-    await expect(idle.handleCallback(stranger)).rejects.toThrow("did not start here");
+    await expect(answerLogin(idle, stranger)).rejects.toThrow("did not start here");
     expect(idle.getAuthToken()).toBeNull();
 
     // A login in flight, answered with a token minted for another one.
     const waiting = new CavosAuth();
     await beginLogin(waiting);
-    await expect(waiting.handleCallback(stranger)).rejects.toThrow("does not match this sign-in");
+    await expect(answerLogin(waiting, stranger)).rejects.toThrow("does not match this sign-in");
     expect(() => waiting.getSocialRecoveryCredential()).toThrow();
 
     
     const nonce = await beginLogin(waiting);
     const mine = jwt({ iss: "https://appleid.apple.com", sub: "me", nonce });
-    await expect(waiting.handleCallback(mine)).resolves.toMatchObject({ userId: "me" });
-    await expect(waiting.handleCallback(mine)).rejects.toThrow("did not start here");
+    await expect(answerLogin(waiting, mine)).resolves.toMatchObject({ userId: "me" });
+    await expect(answerLogin(waiting, mine)).rejects.toThrow("did not start here");
   });
 });

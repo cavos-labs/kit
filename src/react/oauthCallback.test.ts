@@ -43,9 +43,9 @@ describe("urlHasOAuthCallbackCode", () => {
     expect(urlHasOAuthCallbackCode("?cavos_auth_code=abc")).toBe(true);
   });
 
-  it("detects legacy auth_data and zk_auth_data", () => {
-    expect(urlHasOAuthCallbackCode("?auth_data=xyz")).toBe(true);
-    expect(urlHasOAuthCallbackCode("?zk_auth_data=xyz")).toBe(true);
+  it("ignores a token placed in the URL", () => {
+    expect(urlHasOAuthCallbackCode("?auth_data=xyz")).toBe(false);
+    expect(urlHasOAuthCallbackCode("?zk_auth_data=xyz")).toBe(false);
   });
 
   it("is false for an ordinary URL", () => {

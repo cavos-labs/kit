@@ -48,8 +48,7 @@ describe("provider from the credential", () => {
     expect(id.provider).toBe("telegram");
   });
 
-  it("falls back rather than inventing a provider it cannot know", async () => {
-    const id = await identityFrom({ iss: "https://example.test", sub: "u1" });
-    expect(id.provider).toBe("oauth");
+  it("refuses a token from an issuer it does not know", async () => {
+    await expect(identityFrom({ iss: "https://example.test", sub: "u1" })).rejects.toThrow("are not accepted");
   });
 });

@@ -232,30 +232,27 @@ export class CavosAuth implements AuthProvider {
   }
 
   /**
-   * Resolve identity from an OAuth callback. Current callbacks carry only a
-   * short-lived one-time code; legacy raw auth data remains readable so apps can
-   * roll forward without losing an already-open callback.
+   * Resolve identity from an OAuth callback: the one-time `cavos_auth_code`,
+   * or the callback URL or query string that carries it. A token is never
+   * read from the URL.
    */
-  async handleCallback(authDataOrSearch: string, redirectUri?: string): Promise<Identity> {
-    const callbackCode = extractCallbackCode(authDataOrSearch);
-    if (callbackCode) {
-      const callbackRedirectUri = redirectUri ?? currentCleanCallbackUrl();
-      if (!callbackRedirectUri) throw new Error("kit/auth: callback redirect URI is required");
-      const result = await this.post("/api/oauth/callback/exchange", {
-        code: callbackCode,
-        app_id: this.opts.appId,
-        redirect_uri: callbackRedirectUri,
-      });
-      if (typeof result.github_grant === "string") {
-        return this.githubIdentity(result.github_grant);
-      }
-      if (typeof result.telegram_grant === "string") {
-        return this.telegramIdentity(result.telegram_grant);
-      }
-      return this.identityFromAuthData(JSON.stringify(result), "oauth");
+  async handleCallback(callback: string, redirectUri?: string): Promise<Identity> {
+    const callbackCode = extractCallbackCode(callback);
+    if (!callbackCode) throw new Error("kit/auth: the callback carries no sign-in code");
+    const callbackRedirectUri = redirectUri ?? currentCleanCallbackUrl();
+    if (!callbackRedirectUri) throw new Error("kit/auth: callback redirect URI is required");
+    const result = await this.post("/api/oauth/callback/exchange", {
+      code: callbackCode,
+      app_id: this.opts.appId,
+      redirect_uri: callbackRedirectUri,
+    });
+    if (typeof result.github_grant === "string") {
+      return this.githubIdentity(result.github_grant);
     }
-    const authData = extractAuthData(authDataOrSearch);
-    return this.identityFromAuthData(authData, "oauth");
+    if (typeof result.telegram_grant === "string") {
+      return this.telegramIdentity(result.telegram_grant);
+    }
+    return this.identityFromAuthData(JSON.stringify(result), "oauth");
   }
 
   /**
@@ -400,7 +397,10 @@ export class CavosAuth implements AuthProvider {
       // raw JWT
     }
     const claims = parseJwt(token);
-    if (requiresLoginBinding(claims.iss)) assertLoginBinding(claims.nonce, this.takeLoginNonce());
+    if (!requiresLoginBinding(claims.iss)) {
+      throw new Error(`kit/auth: sign-in tokens from ${JSON.stringify(claims.iss ?? null)} are not accepted`);
+    }
+    assertLoginBinding(claims.nonce, this.takeLoginNonce());
     this.setAuthToken(token);
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss) ? createSocialRecoveryCredential(token) : null;
     return this.remember({
@@ -561,15 +561,6 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-/** Pull the `auth_data` / `zk_auth_data` value out of a callback string. */
-function extractAuthData(input: string): string {
-  if (input.includes("auth_data=") || input.includes("zk_auth_data=")) {
-    const params = new URLSearchParams(input.startsWith("?") ? input : `?${input}`);
-    return params.get("auth_data") ?? params.get("zk_auth_data") ?? input;
-  }
-  return input;
-}
-
 function extractCallbackCode(input: string): string | null {
   if (/^[A-Za-z0-9_-]{43}$/.test(input)) return input;
   try {
@@ -586,8 +577,6 @@ function currentCleanCallbackUrl(): string | null {
   if (typeof window === 'undefined') return null;
   const url = new URL(window.location.href);
   url.searchParams.delete('cavos_auth_code');
-  url.searchParams.delete('auth_data');
-  url.searchParams.delete('zk_auth_data');
   return url.toString();
 }
 
