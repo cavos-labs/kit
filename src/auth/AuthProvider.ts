@@ -30,18 +30,28 @@ export interface Identity {
 export interface AuthProvider {
   authenticate(): Promise<Identity>;
   /**
-   * The provider id_token from the last login, if this provider has one. The
-   * wallet registry authenticates the end user with it — Cavos decides who owns
-   * an address, so a public app id is not enough. Kept in memory only; a
-   * returning device that no longer has one falls back to its address cache.
+   * The token that proves who the user is: the provider id_token of a Cavos
+   * login, or the JWT of the app's own auth. The vault opens the wallet with
+   * it and the wallet registry authenticates the end user with it, so a public
+   * app id is not enough. Kept in memory only.
    */
   getAuthToken?(): string | null;
 }
 
-/** Trivial provider when the app already has the user's stable id. */
+/**
+ * Provider for an app that signs its users in itself. `token` returns the
+ * current JWT its own auth issued for the user; the vault and the registry
+ * verify it against the identity provider registered for the app.
+ */
 export class StaticIdentity implements AuthProvider {
-  constructor(private readonly identity: Identity) {}
+  constructor(
+    private readonly identity: Identity,
+    private readonly token?: () => string | null,
+  ) {}
   async authenticate(): Promise<Identity> {
     return this.identity;
+  }
+  getAuthToken(): string | null {
+    return this.token?.() ?? null;
   }
 }

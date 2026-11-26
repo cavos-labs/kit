@@ -109,15 +109,20 @@ if (wallet.status === "undeployed" || wallet.status === "ready") {
 }
 ```
 
-`identity` is the canonical way to pass the signed-in user. If you'd rather hand
-the kit an auth provider that resolves the user itself, pass `auth` instead —
-`StaticIdentity` wraps a known user, and any `AuthProvider` implementation works:
+When you sign users in yourself, Cavos has to check who the user is. Register
+your identity provider (issuer and JWKS URL) for the app in the Cavos dashboard,
+then pass the user together with their current token. `userId` must be the
+token's `sub`:
 
 ```ts
 import { StaticIdentity } from "@cavos/kit";
 
-auth: new StaticIdentity({ userId: user.id, email: user.email }),
+auth: new StaticIdentity({ userId: user.id, email: user.email }, () => currentToken),
 ```
+
+With Cavos sign-in (`CavosAuth`) there is nothing to pass: the login proves the
+user. Either way a wallet only opens for a signed-in user, and a connect
+without a session fails with an error `isSignInRequired(error)` recognises.
 
 ### Multi-chain sessions
 
