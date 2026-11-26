@@ -1,15 +1,19 @@
-import { Address, FeeBumpTransaction, TransactionBuilder, xdr, type Asset } from "@stellar/stellar-sdk";
+import { Address, FeeBumpTransaction, TransactionBuilder, extractBaseAddress, xdr, type Asset } from "@stellar/stellar-sdk";
 import { emptyParsed, flag, parseUnits, type ParsedTx } from "./policy";
 
-const QUIET_OPS = new Set(["changeTrust", "manageData", "endSponsoringFutureReserves", "bumpSequence"]);
+const QUIET_OPS = new Set(["changeTrust", "manageData", "endSponsoringFutureReserves"]);
 
 const OP_LABELS: Record<string, string> = {
   setOptions: "Change the account's signers or thresholds",
   accountMerge: "Close the account and move its balance",
+  bumpSequence: "Change the account's sequence number",
   beginSponsoringFutureReserves: "Pay reserves for another account",
 };
 
-/** Only operations sourced from the account can use its signature. */
+/**
+ * Only operations sourced from the account can use its signature. A muxed
+ * address (`M…`) is the same account with a routing id, so it counts as one.
+ */
 export function parseStellarTransaction(
   envelope: string,
   networkPassphrase: string,
@@ -18,12 +22,12 @@ export function parseStellarTransaction(
   const parsed = emptyParsed();
   let tx = TransactionBuilder.fromXDR(envelope, networkPassphrase);
   if (tx instanceof FeeBumpTransaction) {
-    if (tx.feeSource === account) flag(parsed, "Pay the network fee for another transaction");
+    if (extractBaseAddress(tx.feeSource) === account) flag(parsed, "Pay the network fee for another transaction");
     tx = tx.innerTransaction;
   }
 
   for (const op of tx.operations) {
-    if ((op.source ?? tx.source) !== account) continue;
+    if (extractBaseAddress(op.source ?? tx.source) !== account) continue;
     switch (op.type) {
       case "payment":
         parsed.spends.push({ asset: assetId(op.asset), amount: stroops(op.amount), decimals: 7 });

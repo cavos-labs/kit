@@ -27,3 +27,17 @@ export async function beginLogin(auth: CavosAuth): Promise<string> {
   }
   return `${FIXTURE_APP_ID}.${new URL(requested).searchParams.get("nonce")}`;
 }
+
+/**
+ * Test fixture: finish a login with `token`, as the backend hands it over when
+ * the kit exchanges the callback's one-time code.
+ */
+export async function answerLogin(auth: CavosAuth, token: string) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ jwt: token }) }) as Response) as typeof fetch;
+  try {
+    return await auth.handleCallback("c".repeat(43), "https://app.test/callback");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}

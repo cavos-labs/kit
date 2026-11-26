@@ -11,6 +11,7 @@ import {
   Address,
   Asset,
   Keypair,
+  MuxedAccount,
   Networks,
   Operation,
   StrKey,
@@ -221,6 +222,47 @@ describe("parseStellarTransaction", () => {
   it("always asks before merging the account away", () => {
     const envelope = stellarTx(account, Operation.accountMerge({ destination: other }));
     expect(parseStellarTransaction(envelope, Networks.TESTNET, account).flagged).toBe(true);
+  });
+
+  it("always asks before moving the sequence number, which can lock the account for good", () => {
+    const envelope = stellarTx(account, Operation.bumpSequence({ bumpTo: "9223372036854775807" }));
+    expect(parseStellarTransaction(envelope, Networks.TESTNET, account).flagged).toBe(true);
+  });
+
+  describe("with a muxed address of the account as the source", () => {
+    const muxedAccount = () => new MuxedAccount(new Account(account, "1"), "7");
+    const muxed = muxedAccount().accountId();
+    const payment = (source?: string) =>
+      Operation.payment({ destination: other, asset: Asset.native(), amount: "9000", ...(source ? { source } : {}) });
+
+    it("counts a payment the operation sources", () => {
+      const parsed = parseStellarTransaction(stellarTx(account, payment(muxed)), Networks.TESTNET, account);
+      expect(parsed.spends).toEqual([{ asset: "XLM", amount: 90_000_000_000n, decimals: 7 }]);
+    });
+
+    it("counts a payment the transaction sources", () => {
+      const envelope = new TransactionBuilder(muxedAccount(), { fee: "100", networkPassphrase: Networks.TESTNET })
+        .addOperation(payment())
+        .setTimeout(30)
+        .build()
+        .toXDR();
+      const parsed = parseStellarTransaction(envelope, Networks.TESTNET, account);
+      expect(parsed.spends).toEqual([{ asset: "XLM", amount: 90_000_000_000n, decimals: 7 }]);
+    });
+
+    it("asks before changing signers or merging the account away", () => {
+      const takeover = Operation.setOptions({ signer: { ed25519PublicKey: other, weight: 255 }, masterWeight: 0, source: muxed });
+      const merge = Operation.accountMerge({ destination: other, source: muxed });
+      for (const op of [takeover, merge]) {
+        expect(parseStellarTransaction(stellarTx(account, op), Networks.TESTNET, account).flagged).toBe(true);
+      }
+    });
+
+    it("asks before paying the fee of another transaction", () => {
+      const inner = TransactionBuilder.fromXDR(stellarTx(other, payment()), Networks.TESTNET);
+      const bump = TransactionBuilder.buildFeeBumpTransaction(muxed, "200", inner as never, Networks.TESTNET);
+      expect(parseStellarTransaction(bump.toXDR(), Networks.TESTNET, account).flagged).toBe(true);
+    });
   });
 
   it("lets account setup through", () => {

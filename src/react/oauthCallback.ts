@@ -12,11 +12,7 @@ export function urlHasOAuthCallbackCode(search: string): boolean {
   const params = new URLSearchParams(
     search.startsWith("?") ? search.slice(1) : search,
   );
-  return !!(
-    params.get("cavos_auth_code") ||
-    params.get("auth_data") ||
-    params.get("zk_auth_data")
-  );
+  return !!params.get("cavos_auth_code");
 }
 
 /**

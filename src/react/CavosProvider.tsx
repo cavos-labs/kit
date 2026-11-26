@@ -251,8 +251,8 @@ export interface CavosContextValue {
   sendOtp: (email: string) => Promise<void>;
   /** Verify the emailed code inside the enclave and deploy the wallet. */
   verifyOtp: (email: string, code: string) => Promise<void>;
-  /** Resolve identity from an OAuth callback (?auth_data=…) and deploy. */
-  handleCallback: (authData: string) => Promise<void>;
+  /** Resolve identity from an OAuth callback (`?cavos_auth_code=…`) and deploy. */
+  handleCallback: (callback: string) => Promise<void>;
   /**
    * Execute a multicall signed by the account key (Starknet-only — on Solana /
    * Stellar call `wallet.execute(...)` directly). Sponsored (gasless) by default;
@@ -820,8 +820,8 @@ export function CavosProvider({
     }
   }, [modal, appDeviceApproval, branding.appName]);
 
-  const handleCallback = useCallback(async (authData: string, redirectUri?: string) => {
-    const id = await auth.handleCallback(authData, redirectUri);
+  const handleCallback = useCallback(async (callback: string, redirectUri?: string) => {
+    const id = await auth.handleCallback(callback, redirectUri);
     await connect(id);
   }, [auth, connect]);
 
@@ -853,21 +853,18 @@ export function CavosProvider({
   }, [session]);
 
   // On mount: exchange the one-time OAuth code after removing it from the
-  // address bar immediately. Legacy auth_data is accepted only for callbacks
-  // already in flight during rollout.
+  // address bar immediately.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    const authData = params.get('cavos_auth_code') || params.get('auth_data') || params.get('zk_auth_data');
-    if (!authData) return;
+    const callbackCode = params.get('cavos_auth_code');
+    if (!callbackCode) return;
     // Claim the callback before cleaning the URL. Silent reconnect checks this
     // ref in the same tick and would otherwise reconnect the previous identity
     // with no Bearer token (registry 401).
     oauthCallbackInFlightRef.current = true;
     const cleanUrl = new URL(window.location.href);
     cleanUrl.searchParams.delete('cavos_auth_code');
-    cleanUrl.searchParams.delete('auth_data');
-    cleanUrl.searchParams.delete('zk_auth_data');
     window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
     setModalOpen(true);
     setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
@@ -876,7 +873,7 @@ export function CavosProvider({
     (async () => {
       setIsLoading(true);
       try {
-        await handleCallback(authData, cleanUrl.toString());
+        await handleCallback(callbackCode, cleanUrl.toString());
       } catch (e) {
         console.error('[CavosProvider] OAuth callback error:', e);
         const msg = e instanceof Error ? e.message : 'Sign-in failed. Please try again.';

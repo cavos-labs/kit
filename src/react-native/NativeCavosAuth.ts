@@ -99,20 +99,15 @@ export class NativeCavosAuth implements AuthProvider {
 
   async handleCallback(input: string, provider = "oauth"): Promise<Identity> {
     const callbackCode = extractCallbackCode(input);
-    if (callbackCode) {
-      const result = await this.post("/api/oauth/callback/exchange", {
-        code: callbackCode,
-        app_id: this.opts.appId,
-        redirect_uri: this.opts.redirectUri,
-      });
-      return this.identityFromAuthData(JSON.stringify(result), provider);
+    if (!callbackCode) {
+      throw new NativeCavosAuthError("callback-invalid", "kit/native-auth: the callback carries no sign-in code");
     }
-    let authData = input;
-    if (input.includes("auth_data=") || input.includes("zk_auth_data=")) {
-      const params = new URL(input).searchParams;
-      authData = params.get("auth_data") ?? params.get("zk_auth_data") ?? input;
-    }
-    return this.identityFromAuthData(authData, provider);
+    const result = await this.post("/api/oauth/callback/exchange", {
+      code: callbackCode,
+      app_id: this.opts.appId,
+      redirect_uri: this.opts.redirectUri,
+    });
+    return this.identityFromAuthData(JSON.stringify(result), provider);
   }
 
   async authenticate(): Promise<Identity> {
@@ -147,14 +142,18 @@ export class NativeCavosAuth implements AuthProvider {
     const payload = token.split(".")[1];
     if (!payload) throw new NativeCavosAuthError("callback-invalid", "kit/native-auth: malformed JWT");
     const claims = JSON.parse(decodeUtf8(fromBase64(normalizeBase64url(payload))));
-    if (requiresLoginBinding(claims.iss)) {
-      const kept = this.loginNonce;
-      this.loginNonce = null;
-      try {
-        assertLoginBinding(claims.nonce, kept);
-      } catch (error) {
-        throw new NativeCavosAuthError("callback-invalid", (error as Error).message);
-      }
+    if (!requiresLoginBinding(claims.iss)) {
+      throw new NativeCavosAuthError(
+        "callback-invalid",
+        `kit/native-auth: sign-in tokens from ${JSON.stringify(claims.iss ?? null)} are not accepted`,
+      );
+    }
+    const kept = this.loginNonce;
+    this.loginNonce = null;
+    try {
+      assertLoginBinding(claims.nonce, kept);
+    } catch (error) {
+      throw new NativeCavosAuthError("callback-invalid", (error as Error).message);
     }
     this.recoveryCredential = isSocialRecoveryIssuer(claims.iss) ? createSocialRecoveryCredential(token) : null;
     const identity: Identity = {

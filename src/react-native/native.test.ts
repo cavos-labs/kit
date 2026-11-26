@@ -63,16 +63,23 @@ describe("NativeCavosAuth", () => {
       iat: 1_700_000_000,
     })))
       .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-    const callback = `cavos://auth?auth_data=x.${payload}.x`;
+    const token = `x.${payload}.x`;
+    const callback = `cavos://auth?cavos_auth_code=${"c".repeat(43)}`;
+    const answers = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
+
+    // A token is never read from the callback URL.
+    await expect(auth.handleCallback(`cavos://auth?auth_data=${token}`)).rejects.toThrow("no sign-in code");
 
     // A callback this app did not ask for is refused before anything is kept.
+    const exchange = jest.spyOn(globalThis, "fetch").mockResolvedValue(answers({ jwt: token }));
     await expect(auth.handleCallback(callback)).rejects.toThrow("did not start here");
     expect(() => auth.getSocialRecoveryCredential()).toThrow("fresh social login");
+    exchange.mockRestore();
 
-    const fetchMock = jest.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({ url: "https://provider.test/authorize" }),
-    } as Response);
+    const fetchMock = jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(answers({ url: "https://provider.test/authorize" }))
+      .mockResolvedValueOnce(answers({ jwt: token }));
     (WebBrowser.openAuthSessionAsync as jest.Mock).mockResolvedValue({ type: "success", url: callback });
     const identity = await auth.login("google");
     expect(String(fetchMock.mock.calls[0][0])).toContain(`nonce=${nonce}`);
@@ -80,7 +87,7 @@ describe("NativeCavosAuth", () => {
 
     expect(identity).toMatchObject({ userId: "user-1", email: "a@b.test" });
     expect(auth.getSocialRecoveryCredential()).toMatchObject({
-      idToken: `x.${payload}.x`,
+      idToken: token,
       tokenFingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(auth.getLoginKey()?.publicKeyRaw()).toEqual(unwrapPublic);
