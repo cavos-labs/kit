@@ -2,6 +2,8 @@ import { randomBytes } from "@noble/hashes/utils";
 import { deriveViewingKey } from "../chains/starknet/viewingKey";
 import { CHAIN_ID, mockPrivacy, PRIVATE_KEY } from "../chains/starknet/privacy/fixtures";
 import type { StarknetSpend } from "../chains/starknet/nativeConnect";
+import { everyoneSignedIn } from "./fixtures";
+import { NO_IDENTITY } from "./identity";
 import { createVaultHandler, serveVault } from "./host";
 import { memoryLedger } from "./ledger";
 import type { OverLimit } from "./limits";
@@ -33,6 +35,8 @@ function setup(options: { confirm?: () => Promise<boolean>; overLimit?: OverLimi
       limits: [{ chain: "starknet", asset: "STRK", perTx: "1", perDay: "3" }],
     },
     ledger: memoryLedger(),
+    identity: NO_IDENTITY,
+    sessions: everyoneSignedIn,
     confirm: async (lines) => {
       asked.push(lines);
       return (options.confirm ?? (async () => true))();

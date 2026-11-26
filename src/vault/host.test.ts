@@ -11,19 +11,26 @@ import { solanaSpendFromSeed } from "../signer/Ed25519SpendSigner";
 import { prefixedMessageBytes } from "../signing";
 import { consentAction, consentMessage, type ConsentAction } from "../account/consent";
 import { bytesToBase64Url, utf8ToBytes } from "../crypto/encoding";
+import { NO_IDENTITY } from "./identity";
 import { createVaultHandler, serveVault } from "./host";
 import { memoryLedger } from "./ledger";
+import { memorySessions, type SessionStore } from "./session";
+import { SIGN_IN_REQUIRED } from "./protocol";
 import type { OverLimit } from "./limits";
 import type { Line } from "./policy";
 import { ec, hash, num, typedData as typed } from "starknet";
 import { starknetSpendFromSeed } from "../chains/starknet/nativeConnect";
-import { outsideExecution } from "./fixtures";
+import { everyoneSignedIn, outsideExecution } from "./fixtures";
 import { VaultClient } from "./VaultClient";
 
 const BLOCKHASH = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
 const params = { network: "solana-devnet", appSalt: "salt", userId: "u1", recovery: "none" as const };
 
-function setup(confirm: () => Promise<boolean> = async () => true, overLimit: OverLimit = "ask") {
+function setup(
+  confirm: () => Promise<boolean> = async () => true,
+  overLimit: OverLimit = "ask",
+  sessions: SessionStore = everyoneSignedIn,
+) {
   const consents: ConsentAction[] = [];
   const consent = { answer: true, keyOnDevice: true };
   const seed = parseEd25519Seed(randomBytes(32));
@@ -49,6 +56,8 @@ function setup(confirm: () => Promise<boolean> = async () => true, overLimit: Ov
       ],
     },
     ledger: memoryLedger(),
+    identity: NO_IDENTITY,
+    sessions,
     confirm: async (lines, context) => {
       asked.push(lines);
       networks.push(context.network);
@@ -189,6 +198,30 @@ describe("vault client and host", () => {
     const rotate = build(Operation.setOptions({ signer: { ed25519PublicKey: Keypair.random().publicKey(), weight: 1 } }));
     await control!.signTransaction(rotate.toXDR(), Networks.TESTNET);
     expect(asked).toHaveLength(1);
+    close();
+  });
+
+  it("opens no wallet for a user who is not signed in", async () => {
+    const { client, close } = setup(undefined, undefined, memorySessions());
+    await expect(client.connectSolana(params)).rejects.toThrow(SIGN_IN_REQUIRED);
+    close();
+  });
+
+  it("erases only an account that is open", async () => {
+    const { client, close } = setup();
+    await expect(client.erase("u1", "salt")).rejects.toThrow(SIGN_IN_REQUIRED);
+    await client.connectSolana(params);
+    await expect(client.erase("u1", "salt")).resolves.toBeUndefined();
+    close();
+  });
+
+  it("ends the session on logout", async () => {
+    const sessions = memorySessions();
+    await sessions.open("app|u1");
+    const { client, close } = setup(undefined, undefined, sessions);
+    await client.connectSolana(params);
+    await client.forget("u1", "salt");
+    await expect(client.connectSolana(params)).rejects.toThrow(SIGN_IN_REQUIRED);
     close();
   });
 

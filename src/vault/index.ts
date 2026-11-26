@@ -10,4 +10,5 @@ export { evaluate } from "./policy";
 export type { ParsedTx, Spend, Decision, Line } from "./policy";
 export { parseSolanaMessage } from "./parseSolana";
 export { parseStellarTransaction, parseStellarAuthEntry } from "./parseStellar";
+export { SIGN_IN_REQUIRED, isSignInRequired } from "./protocol";
 export type * from "./protocol";

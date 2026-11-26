@@ -10,6 +10,14 @@ export const VAULT_HELLO = "cavos-vault:hello";
 export const POPUP_READY = "cavos-vault:popup-ready";
 export const POPUP_RESULT = "cavos-vault:popup-result";
 
+/** The vault's refusal to open a wallet whose user has no live session. The app should ask them to sign in. */
+export const SIGN_IN_REQUIRED = "kit/vault: sign in to open this wallet";
+
+/** Whether a vault call failed because the user has to sign in (again). */
+export function isSignInRequired(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(SIGN_IN_REQUIRED);
+}
+
 export type VaultChain = "solana" | "stellar" | "starknet";
 export type RecoveryMode = "enclave" | "passkey" | "none";
 
