@@ -14,7 +14,7 @@ import { Cavos } from '../Cavos';
 import type { Chain, NetworkEnv, CavosWallet, CavosSession } from '../Cavos';
 import { PasskeyPrf } from '../chains/stellar/PasskeyPrf';
 import { CavosAuth } from '../auth/CavosAuth';
-import type { Identity } from '../auth/AuthProvider';
+import type { AuthProvider, Identity } from '../auth/AuthProvider';
 import type { ChainCall, ExecuteOptions } from '../chains/ChainAdapter';
 import { assertDeviceApprovalScope } from './deviceApprovalScope';
 import {
@@ -35,6 +35,7 @@ import {
 import { DEFAULT_SOCIAL_RECOVERY_ATTESTATION } from '../recovery/attestationDefaults';
 import { AccountClient } from '../account/AccountClient';
 import { VaultClient, vaultLoginHost } from '../vault/VaultClient';
+import { isSignInRequired } from '../vault/protocol';
 import { zeroize } from '../secret/dek';
 import { readLocalDek } from '../secret/localDek';
 import { addPasskey } from '../secret/PasskeyDekPort';
@@ -365,6 +366,15 @@ export interface CavosProviderProps {
    * from it. Use an immutable primary key, never an email or username.
    */
   identity?: Identity | null;
+  /**
+   * With `identity`: returns the current token your auth issued for that user
+   * (Clerk's `getToken()`, Auth0's `getIdTokenClaims().__raw`, a JWT from your
+   * own backend). The vault and the wallet registry verify it against the
+   * identity provider registered for the app in the Cavos dashboard, and its
+   * `sub` has to be the `userId` you pass. It is asked for again each time one
+   * is needed, so return a fresh one.
+   */
+  identityToken?: () => Promise<string> | string;
   children: ReactNode;
 }
 
@@ -421,6 +431,7 @@ export function CavosProvider({
   config,
   modal,
   identity: externalIdentity,
+  identityToken,
   children,
 }: CavosProviderProps) {
   // `undefined` = the host is not supplying identity (Cavos runs its own auth).
@@ -463,6 +474,21 @@ export function CavosProvider({
             }
           : {}),
       }),
+  );
+  // The host's own token, for an app that signs its users in itself. Both are
+  // refs: the host may pass a new function on every render, and the token is
+  // read where it is sent, never rendered.
+  const identityTokenRef = useRef(identityToken);
+  identityTokenRef.current = identityToken;
+  const hostTokenRef = useRef<string | null>(null);
+  const refreshHostToken = useCallback(async () => {
+    const read = identityTokenRef.current;
+    if (read) hostTokenRef.current = await read();
+  }, []);
+  /** Who answers for the user to the vault and the registry: Cavos's login, or the host's. */
+  const walletAuth = useMemo<AuthProvider>(
+    () => (isExternalAuth ? { authenticate: () => auth.authenticate(), getAuthToken: () => hostTokenRef.current } : auth),
+    [auth, isExternalAuth],
   );
   const [session, setSession] = useState<(CavosWallet & CavosSession) | null>(null);
   const [selectedChain, setSelectedChain] = useState<Chain>(
@@ -733,6 +759,7 @@ export function CavosProvider({
       if (!opts?.silent) setWalletStatus({ ...INITIAL_STATUS, isDeploying: true });
       // Anything awaited below races the deadline above.
       const race = <T,>(work: Promise<T>): Promise<T> => Promise.race([work, deadline]);
+      await race(refreshHostToken());
 
       // Resolve chains configuration: use new `chains`/`defaultChain` if provided,
       // otherwise fall back to single `chain` for back-compat
@@ -770,8 +797,8 @@ export function CavosProvider({
         ...connectOpts,
         network: cfg.network,
         identity: id,
-        // The registry authenticates the end user with this login's token.
-        auth,
+        // The vault and the registry authenticate the end user with this token.
+        auth: walletAuth,
         appSalt: cfg.appSalt,
         ...(cfg.paymasterApiKey ? { paymasterApiKey: cfg.paymasterApiKey } : {}),
         ...(cfg.appId ? { appId: cfg.appId } : {}),
@@ -818,7 +845,7 @@ export function CavosProvider({
     } finally {
       clearTimeout(timer);
     }
-  }, [modal, appDeviceApproval, branding.appName]);
+  }, [modal, appDeviceApproval, branding.appName, walletAuth, refreshHostToken]);
 
   const handleCallback = useCallback(async (callback: string, redirectUri?: string) => {
     const id = await auth.handleCallback(callback, redirectUri);
@@ -951,8 +978,11 @@ export function CavosProvider({
       try {
         await connect(savedIdentity);
       } catch (e) {
-        // Keep the identity so a transient RPC failure does not force OAuth on
-        // the next launch. The app can surface the normal sign-in UI if needed.
+        // The vault holds no session for this user any more: they are signed
+        // out, and keeping the identity would show a wallet that cannot open.
+        if (isSignInRequired(e)) auth.clearStoredIdentity();
+        // Otherwise keep the identity so a transient RPC failure does not force
+        // OAuth on the next launch. The app can surface the normal sign-in UI if needed.
         console.warn("[CavosProvider] silent reconnect failed:", e);
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -1078,7 +1108,8 @@ export function CavosProvider({
     if (!cfg.appId) throw new Error('kit: adding a passkey requires an appId');
     const vault = vaultSetting(cfg);
     const user = { userId: identity.userId, userName: identity.email ?? identity.userId };
-    const authToken = auth.getAuthToken();
+    await refreshHostToken();
+    const authToken = walletAuth.getAuthToken?.() ?? null;
     if (vault) {
       await VaultClient.attach({ appId: cfg.appId, ...(typeof vault === 'object' ? vault : {}) }).enrollPasskey({
         ...user,
@@ -1099,7 +1130,7 @@ export function CavosProvider({
             baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
             appId: cfg.appId,
             ...(cfg.environment ? { environment: cfg.environment } : {}),
-            authToken: () => auth.getAuthToken(),
+            authToken: () => walletAuth.getAuthToken?.() ?? null,
           }),
           owner: { appId: cfg.appId, userId: identity.userId },
           dek,
@@ -1110,7 +1141,7 @@ export function CavosProvider({
       }
     }
     setWalletStatus((status) => ({ ...status, hasPasskey: true }));
-  }, [session, identity, rpName, auth]);
+  }, [session, identity, rpName, walletAuth, refreshHostToken]);
 
   // New-device flow: ONE passkey prompt approves THIS device on the connected
   // chain, then poll readiness and reconnect once.
@@ -1264,7 +1295,7 @@ export function CavosProvider({
           chain: 'stellar',
           network: cfg.network,
           identity,
-          auth,
+          auth: walletAuth,
           appSalt: cfg.appSalt,
           ...(cfg.appId ? { appId: cfg.appId } : {}),
           ...(cfg.authBackendUrl ? { backendUrl: cfg.authBackendUrl } : {}),
@@ -1326,24 +1357,26 @@ export function CavosProvider({
           baseUrl: cfg.authBackendUrl ?? 'https://cavos.xyz',
           appId: cfg.appId,
           ...(cfg.environment ? { environment: cfg.environment } : {}),
-          authToken: () => auth.getAuthToken(),
+          authToken: () => walletAuth.getAuthToken?.() ?? null,
         }),
       };
     },
-    [session, identity, auth],
+    [session, identity, walletAuth],
   );
 
   const deleteAccount = useCallback(async () => {
+    await refreshHostToken();
     const { userId, appSalt, vault, client } = consentSession('deleteAccount');
     const challenge = await client.challenge('delete_account');
     const proof = await vault.consent({ userId, appSalt, challenge });
     await client.deleteAccount(challenge, proof);
     await vault.erase(userId, appSalt);
     logout();
-  }, [consentSession, logout]);
+  }, [consentSession, logout, refreshHostToken]);
 
   const setEnclaveRecovery = useCallback(
     async (enabled: boolean) => {
+      await refreshHostToken();
       const { userId, appSalt, vault, client } = consentSession(
         enabled ? 'enableEnclaveRecovery' : 'disableEnclaveRecovery',
       );
@@ -1358,7 +1391,7 @@ export function CavosProvider({
         });
       }
     },
-    [consentSession],
+    [consentSession, refreshHostToken],
   );
 
   const disableEnclaveRecovery = useCallback(() => setEnclaveRecovery(false), [setEnclaveRecovery]);

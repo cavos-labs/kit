@@ -1,4 +1,5 @@
 import type { TypedData } from "starknet";
+import type { SessionStore } from "./session";
 
 /** A SNIP-9 v2 outside execution, as the paymaster asks the account to sign. For tests. */
 export function outsideExecution(calls: { To: string; Selector: string; Calldata: string[] }[]): TypedData {
@@ -28,3 +29,10 @@ export function outsideExecution(calls: { To: string; Selector: string; Calldata
     message: { Caller: "0x414e595f43414c4c4552", Nonce: "0x1", "Execute After": "0x0", "Execute Before": "0xffffffffff", Calls: calls },
   };
 }
+
+/** A session store in which every user is signed in, for tests of what the vault does once a wallet is open. */
+export const everyoneSignedIn: SessionStore = {
+  open: async () => undefined,
+  renew: async () => true,
+  end: async () => undefined,
+};

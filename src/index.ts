@@ -154,4 +154,5 @@ export {
   bigIntTo32Bytes,
 } from "./crypto/encoding";
 export { VaultClient } from "./vault/VaultClient";
+export { SIGN_IN_REQUIRED, isSignInRequired } from "./vault/protocol";
 export type { ConsentAction, ConsentProof } from "./account/consent";

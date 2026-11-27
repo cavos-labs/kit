@@ -1,4 +1,6 @@
 import "fake-indexeddb/auto";
+import { everyoneSignedIn } from "./fixtures";
+import { NO_IDENTITY } from "./identity";
 import { createVaultHandler, serveVault } from "./host";
 import { memoryLedger } from "./ledger";
 import { STRICT_POLICY } from "./limits";
@@ -14,6 +16,8 @@ function vault() {
     appId: APP_ID,
     backendUrl: "https://cavos.test",
     policy: STRICT_POLICY,
+    identity: NO_IDENTITY,
+    sessions: everyoneSignedIn,
     ledger: memoryLedger(),
     confirm: async () => true,
     consent: async () => true,

@@ -32,13 +32,17 @@ import {
   selectorOf,
   type StarknetPrivacyOperation,
 } from "./parseStarknet";
+import { createGatekeeper, parseIdentitySettings, NO_IDENTITY, type IdentitySettings } from "./identity";
+import type { JwksLoader } from "./idToken";
 import { idbLedger, type SpendLedger } from "./ledger";
 import { VaultModal } from "./modal";
 import { parseSolanaMessage } from "./parseSolana";
 import { parseStellarAuthEntry, parseStellarTransaction } from "./parseStellar";
 import { STRICT_POLICY, type VaultPolicy } from "./limits";
 import { evaluate, totals, type Line, type ParsedTx } from "./policy";
+import { idbSessions, type SessionStore } from "./session";
 import {
+  SIGN_IN_REQUIRED,
   VAULT_HELLO,
   VAULT_READY,
   type ConnectParams,
@@ -57,6 +61,11 @@ export interface VaultHandlerDeps {
   backendUrl: string;
   attestation?: AttestationPolicy;
   policy: VaultPolicy;
+  /** How this app's users prove who they are. A wallet only opens for a user who did. */
+  identity: IdentitySettings;
+  sessions: SessionStore;
+  /** Reads an issuer's signing keys. Defaults to fetching its JWKS. */
+  loadKeys?: JwksLoader;
   ledger: SpendLedger;
   confirm(lines: Line[], context: { network: string }): Promise<boolean>;
   consent(action: ConsentAction): Promise<boolean>;
@@ -106,6 +115,13 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   // so a second app on the same site cannot reach them with its own policy.
   const scope = deps.appId;
   const login = createLoginHost({ appId: deps.appId, backendUrl: deps.backendUrl, attestation: deps.attestation });
+  const gate = createGatekeeper({
+    appId: deps.appId,
+    backendUrl: deps.backendUrl,
+    settings: deps.identity,
+    sessions: deps.sessions,
+    ...(deps.loadKeys ? { loadKeys: deps.loadKeys } : {}),
+  });
   const queues = new Map<string, Promise<unknown>>();
 
   function connectedChain(userId: string, appSalt: string) {
@@ -113,6 +129,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
   }
 
   async function connect(params: ConnectParams): Promise<ConnectResult> {
+    await gate.admit(params.userId, params.authToken ?? null);
     const handle = `${params.chain}:${params.userId}:${params.appSalt}`;
     const wraps = params.recovery === "passkey" ? passkeyWraps(params) : undefined;
     const input: NativeBase = {
@@ -336,12 +353,17 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       return privacyOperation(params, "withdraw", (session, amount) => session.withdraw(params.token, params.recipient, amount));
     },
     loginStart: () => login.start(),
-    loginVerify: (request) => login.verify(request),
+    async loginVerify(request) {
+      const token = await login.verify(request);
+      await gate.signedIn(token);
+      return token;
+    },
     loginEnd: () => login.end(),
     async forget({ userId, appSalt }) {
       // Only lets go of the unlocked keys. Deleting stored ones is not the app's
       // call: without a recovery factor it would destroy the wallet.
       for (const chain of CHAINS) accounts.delete(`${chain}:${userId}:${appSalt}`);
+      await gate.signOut(userId);
     },
     async consent({ userId, appSalt, challenge }) {
       const action = consentAction(challenge);
@@ -358,6 +380,7 @@ export function createVaultHandler(deps: VaultHandlerDeps): (request: VaultReque
       return signConsent(dek, chain, appSalt, challenge);
     },
     async erase({ userId, appSalt }) {
+      if (!connectedChain(userId, appSalt)) throw new Error(SIGN_IN_REQUIRED);
       for (const chain of CHAINS) accounts.delete(`${chain}:${userId}:${appSalt}`);
       await eraseLocalAccount({ userId, appSalt, keyScope: scope });
     },
@@ -467,6 +490,8 @@ export function startVaultHost(opts: VaultHostOptions): void {
       backendUrl: opts.backendUrl,
       attestation: opts.attestation,
       policy: app.policy,
+      identity: app.identity,
+      sessions: idbSessions(),
       privacy: app.privacy,
       ...(opts.privacySdk ? { privacySdk: opts.privacySdk } : {}),
       ledger: idbLedger(),
@@ -485,20 +510,26 @@ interface AppSettings {
   /** Null when the app registered none. */
   origins: string[] | null;
   policy: VaultPolicy;
+  identity: IdentitySettings;
   privacy: (network: string) => StarknetPrivacyConfig | undefined;
 }
 
 const NO_PRIVACY = () => undefined;
 
 async function loadApp(policyUrl: string, appId: string): Promise<AppSettings> {
-  if (!appId) return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
+  if (!appId) return { origins: [], policy: STRICT_POLICY, identity: NO_IDENTITY, privacy: NO_PRIVACY };
   try {
     const res = await fetch(`${policyUrl}?app_id=${encodeURIComponent(appId)}`);
-    if (!res.ok) return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
-    const body = (await res.json()) as { origins?: string[] | null; policy?: VaultPolicy; privacy?: unknown };
-    return { origins: body.origins ?? null, policy: body.policy ?? STRICT_POLICY, privacy: privacySettings(body.privacy) };
+    if (!res.ok) return { origins: [], policy: STRICT_POLICY, identity: NO_IDENTITY, privacy: NO_PRIVACY };
+    const body = (await res.json()) as { origins?: string[] | null; policy?: VaultPolicy; identity?: unknown; privacy?: unknown };
+    return {
+      origins: body.origins ?? null,
+      policy: body.policy ?? STRICT_POLICY,
+      identity: parseIdentitySettings(body.identity),
+      privacy: privacySettings(body.privacy),
+    };
   } catch {
-    return { origins: [], policy: STRICT_POLICY, privacy: NO_PRIVACY };
+    return { origins: [], policy: STRICT_POLICY, identity: NO_IDENTITY, privacy: NO_PRIVACY };
   }
 }
 

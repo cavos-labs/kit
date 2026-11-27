@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+Breaking. Needs the backend that returns `identity` from `/api/vault/policy`.
+Deploy the backend, then the vault, before the apps that use this package.
+Every user signs in once after the vault is deployed.
+
+- **The vault opens a wallet only for a user who signed in.** It used to open
+  one for any user id the page named. It now verifies the sign-in itself and
+  keeps a session in its own storage: 7 days from the last use, at most 30 from
+  sign-in. `logout()` ends it.
+- **A connect without a session fails with `SIGN_IN_REQUIRED`.** Use
+  `isSignInRequired(error)`. `<CavosProvider>` shows the user as signed out.
+- **Bring your own identity is verified.** Register your identity provider for
+  the app in the dashboard and pass the user's token: `identityToken` on
+  `<CavosProvider>`, or `new StaticIdentity(identity, () => token)`. The vault
+  and the registry check it, and `userId` must be its `sub`. An identity passed
+  without a token no longer opens a wallet in the vault.
+- **Erasing an account needs the wallet to be open.**
+
 ## 0.6.2
 
 Security fixes. Deploy the vault from this version.
